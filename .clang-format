@@ -1,0 +1,34 @@
+# Documentation: https://clang.llvm.org/docs/ClangFormatStyleOptions.html
+
+BasedOnStyle: LLVM
+
+# Basic
+IndentWidth: 4
+UseTab: AlignWithSpaces
+TabWidth: 4
+ColumnLimit: 120
+
+# Flow control
+IndentCaseLabels: true
+
+# Braces
+BreakBeforeBraces: Allman 
+SpaceBeforeCpp11BracedList: true
+
+# Function
+IndentWrappedFunctionNames: false
+AllowAllArgumentsOnNextLine: true
+AlignAfterOpenBracket: AlwaysBreak
+BinPackArguments: false
+
+# Namespace
+NamespaceIndentation: None
+
+# Class Decl
+AccessModifierOffset: -4
+#IndentAccessModifiers: false (v13)
+EmptyLineBeforeAccessModifier: Always
+#EmptyLineAfterAccessModifier: Never (v14)
+
+# Class Def
+BreakConstructorInitializers: BeforeComma

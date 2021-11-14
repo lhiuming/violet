@@ -30,3 +30,7 @@
 *.exe
 *.out
 *.app
+
+# Project generated files
+.vs
+x64
