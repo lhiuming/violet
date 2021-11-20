@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <assert.h>
 #include <cstring>
+#include <fstream>
 
 // Window management
 #include "Window.h"
@@ -16,6 +17,7 @@
 
 #define ARRAY_LENGTH(arr) (sizeof(arr) / sizeof(arr[0]))
 
+VkDevice GVkDevice;
 VkSurfaceFormatKHR GSurfaceDefaultFormat{};
 
 #if _DEBUG
@@ -215,6 +217,7 @@ VkSwapchainKHR CreateSwapchain(VkDevice device, VkSurfaceKHR surface, uint32_t q
 	vkSwapchainCInfo.imageArrayLayers = 1;
 	vkSwapchainCInfo.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
 	vkSwapchainCInfo.imageUsage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT; // for clear
+	vkSwapchainCInfo.imageUsage |= VK_IMAGE_USAGE_STORAGE_BIT; // for compute
 	vkSwapchainCInfo.preTransform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
 	vkSwapchainCInfo.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
 	vkSwapchainCInfo.presentMode = VK_PRESENT_MODE_FIFO_KHR;
@@ -285,6 +288,76 @@ VkFramebuffer CreateFrameBuffer(VkDevice device, VkRenderPass renderPass, VkImag
 	return frameBuffer;
 }
 
+std::string GetShaderBinFilePath(const char* shaderShortPath) 
+{ 
+	static std::string ShaderDir = "Shader\\";
+	std::string fullPath = ShaderDir + shaderShortPath + ".spv";
+	return fullPath;
+}
+
+VkShaderModule LoadShader(const char *filePath)
+{
+	std::ifstream is(filePath, std::ios::binary | std::ios::in | std::ios::ate);
+
+	char *shaderCode = nullptr;
+	int32_t shaderSize = 0;
+	if (is.is_open())
+	{
+		shaderSize = is.tellg();
+		is.seekg(0, std::ios::beg);
+		shaderCode = new char[shaderSize];
+		is.read(shaderCode, shaderSize);
+		is.close();
+		assert(shaderSize > 0);
+	}
+
+	if (shaderCode)
+	{
+		assert(shaderSize > 0);
+
+		VkShaderModuleCreateInfo createInfo {};
+		createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+		createInfo.codeSize = shaderSize;
+		createInfo.pCode = (uint32_t*)shaderCode;
+
+		VkShaderModule shaderModule;
+		VK_CHECK(vkCreateShaderModule(GVkDevice, &createInfo, nullptr, &shaderModule));
+
+		delete[] shaderCode;
+
+		return shaderModule;
+	}
+
+	return nullptr;
+}
+
+VkPipelineCache GPipelineCache = VK_NULL_HANDLE;
+
+VkPipeline CreatePipeline(VkShaderModule shaderModule, VkPipelineLayout layout) 
+{
+	VkComputePipelineCreateInfo createInfo {};
+	createInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+	createInfo.flags;
+	{
+		VkPipelineShaderStageCreateInfo &stage = createInfo.stage;
+		stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+		stage.flags;
+		stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+		stage.module = shaderModule;
+		stage.pName = "main";
+		stage.pSpecializationInfo = NULL;
+	}
+	createInfo.layout = layout;
+	createInfo.basePipelineHandle = VK_NULL_HANDLE;
+
+	VkPipeline pipeline;
+	VK_CHECK(vkCreateComputePipelines(GVkDevice, GPipelineCache, 1, &createInfo, nullptr, &pipeline));
+
+	return pipeline;
+}
+
+VkDescriptorPool GDescriptorPool = VK_NULL_HANDLE;
+
 int main()
 {
 	printf("Hello, Violet on Vulkan.\n");
@@ -312,6 +385,9 @@ int main()
 	VkPhysicalDevice vkPhysicalDevice;
 	uint32_t vkDefaultQueueFamilyIndex;
 	VkDevice vkDevice = CreateVkDevice(vkInstance, vkPhysicalDevice, vkDefaultQueueFamilyIndex);
+
+	assert(vkDevice);
+	GVkDevice = vkDevice;
 
 	// should be under VK_USE_PLATFORM_WIN32_KHR
 	VkWin32SurfaceCreateInfoKHR vkSurfaceCInfo{ VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR };
@@ -393,6 +469,83 @@ int main()
 	VkCommandBuffer vkCmdBuffer;
 	VK_CHECK(vkAllocateCommandBuffers(vkDevice, &vkCmdBufferAInfo, &vkCmdBuffer));
 
+	// Shader Pipeline cache
+	{
+		VkPipelineCacheCreateInfo createInfo {};
+		createInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+		createInfo.initialDataSize = 0;
+		createInfo.pInitialData = nullptr;
+		VK_CHECK(vkCreatePipelineCache(vkDevice, &createInfo, 0, &GPipelineCache));
+	}
+
+	// Descriotor pool
+	{
+		VkDescriptorPoolSize poolSizes[] = {
+			{VkDescriptorType::VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1},
+		};
+
+		VkDescriptorPoolCreateInfo createInfo {};
+		createInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		createInfo.maxSets = 1;
+		createInfo.poolSizeCount = ARRAY_LENGTH(poolSizes);
+		createInfo.pPoolSizes = poolSizes;
+		VK_CHECK(vkCreateDescriptorPool(vkDevice, &createInfo, 0, &GDescriptorPool));
+	}
+
+	// Create shader
+	struct
+	{
+		VkPipeline pipeline;
+		VkPipelineLayout layout;
+		VkDescriptorSet descriptorSets[1];
+	} fullscreenCS;
+	{
+		std::string shaderFileName = GetShaderBinFilePath("FullScreenCS.s");
+		VkShaderModule shaderModule = LoadShader(shaderFileName.data());
+		assert(shaderModule);
+
+		// layout and descriptor stuffs
+		{
+			// NOTE: single set layrout atm
+			VkDescriptorSetLayout setLayouts[1];
+			{
+				VkDescriptorSetLayoutBinding binding {};
+				binding.binding = 0;
+				binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+				binding.descriptorCount = 1;
+				binding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT; // ?
+
+				VkDescriptorSetLayoutCreateInfo createInfo {};
+				createInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+				createInfo.pBindings = &binding;
+				createInfo.bindingCount = 1;
+				VK_CHECK(vkCreateDescriptorSetLayout(GVkDevice, &createInfo, 0, &setLayouts[0]));
+			}
+
+			// Layout
+			{
+				VkPipelineLayoutCreateInfo createInfo {};
+				createInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+				createInfo.setLayoutCount = ARRAY_LENGTH(setLayouts);
+				createInfo.pSetLayouts = setLayouts;
+				createInfo.pushConstantRangeCount = 0;
+				VK_CHECK(vkCreatePipelineLayout(GVkDevice, &createInfo, 0, &fullscreenCS.layout));
+			}
+
+			// Descriptor sets
+			{
+				VkDescriptorSetAllocateInfo info {};
+				info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+				info.descriptorPool = GDescriptorPool;
+				info.descriptorSetCount = ARRAY_LENGTH(fullscreenCS.descriptorSets);
+				info.pSetLayouts = setLayouts;
+				VK_CHECK(vkAllocateDescriptorSets(GVkDevice, &info, fullscreenCS.descriptorSets));
+			}
+		}
+
+		fullscreenCS.pipeline = CreatePipeline(shaderModule, fullscreenCS.layout);
+	}
+
 	//while (!glfwWindowShouldClose(glfwWindow))
 	while (!window.ShouldClose())
 	{
@@ -450,13 +603,58 @@ int main()
 			vkCmdBeginRenderPass(vkCmdBuffer, &beginInfo, VkSubpassContents::VK_SUBPASS_CONTENTS_INLINE);
 		}
 
-
 		vkCmdEndRenderPass(vkCmdBuffer);
+
+		// Transition for compute
+		{
+			VkImageMemoryBarrier imageBarrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
+			imageBarrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+			imageBarrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+			imageBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+			imageBarrier.subresourceRange.layerCount = 1;
+			imageBarrier.subresourceRange.levelCount = 1;
+			imageBarrier.image = vkSwapchainImages[imageIndex];
+			vkCmdPipelineBarrier(vkCmdBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0, nullptr, 0, nullptr, 1, &imageBarrier);
+		}
+
+		// Fill the buffer with compute
+		{
+			vkCmdBindPipeline(vkCmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, fullscreenCS.pipeline);
+
+			VkDescriptorImageInfo dstImageInfo {};
+			dstImageInfo.sampler = VK_NULL_HANDLE;
+			dstImageInfo.imageView = vkImageView[imageIndex];
+			dstImageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+
+			VkWriteDescriptorSet writeDescriptorSet {};
+			writeDescriptorSet.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+			writeDescriptorSet.dstSet = fullscreenCS.descriptorSets[0];
+			writeDescriptorSet.dstBinding = 0;
+			writeDescriptorSet.dstArrayElement = 0;
+			writeDescriptorSet.descriptorCount = 1;
+			writeDescriptorSet.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+			writeDescriptorSet.pImageInfo = &dstImageInfo;
+			vkUpdateDescriptorSets(vkDevice, 1, &writeDescriptorSet, 0, nullptr);
+
+			vkCmdBindDescriptorSets(
+				vkCmdBuffer,
+				VK_PIPELINE_BIND_POINT_COMPUTE,
+				fullscreenCS.layout,
+				0,
+				ARRAY_LENGTH(fullscreenCS.descriptorSets),
+				fullscreenCS.descriptorSets,
+				0,
+				0);
+
+			uint32_t dispatchX = (width + 7) / 8;
+			uint32_t dispatchY = (height + 3) / 4;
+			vkCmdDispatch(vkCmdBuffer, dispatchX, dispatchY, 1);
+		}
+
 
 		{
 			VkImageMemoryBarrier imageBarrier{ VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER };
-			//imageBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
-			imageBarrier.oldLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL_KHR;
+			imageBarrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
 			imageBarrier.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 			imageBarrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
 			imageBarrier.subresourceRange.layerCount = 1;
