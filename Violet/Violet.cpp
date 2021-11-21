@@ -295,12 +295,55 @@ std::string GetShaderBinFilePath(const char* shaderShortPath)
 	return fullPath;
 }
 
-VkShaderModule LoadShader(const char *filePath)
+
+#include "spirv_reflect.h"
+namespace shader
+{
+
+struct ShaderReflect
+{
+	// This is too much, but should be okay because we dont have much shaders.
+	SpvReflectShaderModule spvModule;
+
+	bool IsCompute() const;
+	uint32_t FindBinding(const char *name) const;
+};
+
+bool ShaderReflect::IsCompute() const { return spvModule.spirv_execution_model == SpvExecutionModelGLCompute; }
+
+uint32_t ShaderReflect::FindBinding(const char *name) const
+{
+	for (uint32_t i = 0; i < spvModule.descriptor_binding_count; i++)
+	{
+		auto &binding = spvModule.descriptor_bindings[i];
+		if (strcmp(name, binding.name) == 0)
+		{
+			//assert(binding.resource_type == SPV_REFLECT_RESOURCE_FLAG_UAV);
+			return i;
+		}
+	}
+	return ~0u;
+}
+
+#define SPV_CHECK(call) \
+	{ \
+		SpvReflectResult spvResult = call; \
+		assert(spvResult == SPV_REFLECT_RESULT_SUCCESS); \
+	}
+
+ShaderReflect CreateShaderReflection(const char *shaderCode, size_t codeSize)
+{
+	ShaderReflect reflect;
+	SPV_CHECK(spvReflectCreateShaderModule(codeSize, shaderCode, &reflect.spvModule));
+	return reflect;
+};
+
+VkShaderModule LoadShader(const char *filePath, ShaderReflect *reflect)
 {
 	std::ifstream is(filePath, std::ios::binary | std::ios::in | std::ios::ate);
 
 	char *shaderCode = nullptr;
-	int32_t shaderSize = 0;
+	size_t shaderSize = 0;
 	if (is.is_open())
 	{
 		shaderSize = is.tellg();
@@ -318,10 +361,15 @@ VkShaderModule LoadShader(const char *filePath)
 		VkShaderModuleCreateInfo createInfo {};
 		createInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
 		createInfo.codeSize = shaderSize;
-		createInfo.pCode = (uint32_t*)shaderCode;
+		createInfo.pCode = (uint32_t *)shaderCode;
 
 		VkShaderModule shaderModule;
 		VK_CHECK(vkCreateShaderModule(GVkDevice, &createInfo, nullptr, &shaderModule));
+
+		if (reflect)
+		{
+			*reflect = CreateShaderReflection(shaderCode, shaderSize);
+		}
 
 		delete[] shaderCode;
 
@@ -330,6 +378,8 @@ VkShaderModule LoadShader(const char *filePath)
 
 	return nullptr;
 }
+
+} // namespace shader
 
 VkPipelineCache GPipelineCache = VK_NULL_HANDLE;
 
@@ -357,6 +407,60 @@ VkPipeline CreatePipeline(VkShaderModule shaderModule, VkPipelineLayout layout)
 }
 
 VkDescriptorPool GDescriptorPool = VK_NULL_HANDLE;
+
+void CreateDescriptorSet(shader::ShaderReflect reflect, VkDescriptorSetLayout& outSetLayout, VkPipelineLayout &outPipelineLayout, VkDescriptorSet &outDescriptorSets)
+{
+	// NOTE: single set layrout atm
+	{
+		VkDescriptorSetLayoutBinding bindings[64];
+		uint32_t bindingCount = 0;
+		assert(reflect.spvModule.descriptor_binding_count < ARRAY_LENGTH(bindings));
+		for (uint32_t i = 0; i < reflect.spvModule.descriptor_binding_count; i++)
+		{
+			auto &spvBinding = reflect.spvModule.descriptor_bindings[i];
+			if (spvBinding.count == 0)
+			{
+				// reserved binding slot
+				continue;
+			}
+
+			auto &binding = bindings[bindingCount];
+			binding.binding = reflect.spvModule.descriptor_bindings[i].binding;
+			// NOTE: they seems to have same value; might want to do safer converion by table/map
+			binding.descriptorType = (VkDescriptorType)spvBinding.descriptor_type;
+			binding.descriptorCount = spvBinding.count;
+			binding.stageFlags = reflect.spvModule.shader_stage;
+
+			bindingCount++;
+		}
+
+		VkDescriptorSetLayoutCreateInfo createInfo {};
+		createInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+		createInfo.pBindings = bindings;
+		createInfo.bindingCount = bindingCount;
+		VK_CHECK(vkCreateDescriptorSetLayout(GVkDevice, &createInfo, 0, &outSetLayout));
+	}
+
+	// Layout object
+	{
+		VkPipelineLayoutCreateInfo createInfo {};
+		createInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+		createInfo.setLayoutCount = 1;
+		createInfo.pSetLayouts = &outSetLayout;
+		createInfo.pushConstantRangeCount = 0;
+		VK_CHECK(vkCreatePipelineLayout(GVkDevice, &createInfo, 0, &outPipelineLayout));
+	}
+
+	// Descriptor sets object (from pool)
+	{
+		VkDescriptorSetAllocateInfo info {};
+		info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+		info.descriptorPool = GDescriptorPool;
+		info.descriptorSetCount = 1;
+		info.pSetLayouts = &outSetLayout;
+		VK_CHECK(vkAllocateDescriptorSets(GVkDevice, &info, &outDescriptorSets));
+	}
+}
 
 int main()
 {
@@ -486,6 +590,7 @@ int main()
 
 		VkDescriptorPoolCreateInfo createInfo {};
 		createInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+		createInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
 		createInfo.maxSets = 1;
 		createInfo.poolSizeCount = ARRAY_LENGTH(poolSizes);
 		createInfo.pPoolSizes = poolSizes;
@@ -496,54 +601,24 @@ int main()
 	struct
 	{
 		VkPipeline pipeline;
-		VkPipelineLayout layout;
+		VkDescriptorSetLayout setLayout;
+		VkPipelineLayout pipelineLayout;
 		VkDescriptorSet descriptorSets[1];
+
+		shader::ShaderReflect relfect;
 	} fullscreenCS;
 	{
 		std::string shaderFileName = GetShaderBinFilePath("FullScreenCS.s");
-		VkShaderModule shaderModule = LoadShader(shaderFileName.data());
+		VkShaderModule shaderModule = LoadShader(shaderFileName.data(), &fullscreenCS.relfect);
 		assert(shaderModule);
 
 		// layout and descriptor stuffs
-		{
-			// NOTE: single set layrout atm
-			VkDescriptorSetLayout setLayouts[1];
-			{
-				VkDescriptorSetLayoutBinding binding {};
-				binding.binding = 0;
-				binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-				binding.descriptorCount = 1;
-				binding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT; // ?
+		CreateDescriptorSet(fullscreenCS.relfect, fullscreenCS.setLayout, fullscreenCS.pipelineLayout, fullscreenCS.descriptorSets[0]);
 
-				VkDescriptorSetLayoutCreateInfo createInfo {};
-				createInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-				createInfo.pBindings = &binding;
-				createInfo.bindingCount = 1;
-				VK_CHECK(vkCreateDescriptorSetLayout(GVkDevice, &createInfo, 0, &setLayouts[0]));
-			}
+		fullscreenCS.pipeline = CreatePipeline(shaderModule, fullscreenCS.pipelineLayout);
 
-			// Layout
-			{
-				VkPipelineLayoutCreateInfo createInfo {};
-				createInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-				createInfo.setLayoutCount = ARRAY_LENGTH(setLayouts);
-				createInfo.pSetLayouts = setLayouts;
-				createInfo.pushConstantRangeCount = 0;
-				VK_CHECK(vkCreatePipelineLayout(GVkDevice, &createInfo, 0, &fullscreenCS.layout));
-			}
-
-			// Descriptor sets
-			{
-				VkDescriptorSetAllocateInfo info {};
-				info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
-				info.descriptorPool = GDescriptorPool;
-				info.descriptorSetCount = ARRAY_LENGTH(fullscreenCS.descriptorSets);
-				info.pSetLayouts = setLayouts;
-				VK_CHECK(vkAllocateDescriptorSets(GVkDevice, &info, fullscreenCS.descriptorSets));
-			}
-		}
-
-		fullscreenCS.pipeline = CreatePipeline(shaderModule, fullscreenCS.layout);
+		// TODO it is safe to detroy here?
+		vkDestroyShaderModule(vkDevice, shaderModule, 0);
 	}
 
 	//while (!glfwWindowShouldClose(glfwWindow))
@@ -639,7 +714,7 @@ int main()
 			vkCmdBindDescriptorSets(
 				vkCmdBuffer,
 				VK_PIPELINE_BIND_POINT_COMPUTE,
-				fullscreenCS.layout,
+				fullscreenCS.pipelineLayout,
 				0,
 				ARRAY_LENGTH(fullscreenCS.descriptorSets),
 				fullscreenCS.descriptorSets,
@@ -681,6 +756,14 @@ int main()
 		// brute force for now
 		VK_CHECK(vkDeviceWaitIdle(vkDevice));
 	}
+
+	vkDestroyPipeline(vkDevice, fullscreenCS.pipeline, 0);
+	vkDestroyDescriptorSetLayout(vkDevice, fullscreenCS.setLayout, 0);
+	vkDestroyPipelineLayout(vkDevice, fullscreenCS.pipelineLayout, 0);
+	vkFreeDescriptorSets(vkDevice, GDescriptorPool, ARRAY_LENGTH(fullscreenCS.descriptorSets), fullscreenCS.descriptorSets);
+
+	vkDestroyPipelineCache(vkDevice, GPipelineCache, 0);
+	vkDestroyDescriptorPool(vkDevice, GDescriptorPool, 0);
 
 	vkDestroyCommandPool(vkDevice, vkCmdPool, nullptr);
 	vkDestroySemaphore(vkDevice, vkPresentSemaphore, nullptr);

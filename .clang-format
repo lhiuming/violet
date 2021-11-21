@@ -11,15 +11,17 @@ ColumnLimit: 120
 # Flow control
 IndentCaseLabels: true
 
-# Braces
+# Braces and block
 BreakBeforeBraces: Allman 
 SpaceBeforeCpp11BracedList: true
+AllowShortBlocksOnASingleLine: Never
 
 # Function
 IndentWrappedFunctionNames: false
 AllowAllArgumentsOnNextLine: true
 AlignAfterOpenBracket: AlwaysBreak
 BinPackArguments: false
+AllowShortFunctionsOnASingleLine: Inline
 
 # Namespace
 NamespaceIndentation: None
@@ -32,3 +34,6 @@ EmptyLineBeforeAccessModifier: Always
 
 # Class Def
 BreakConstructorInitializers: BeforeComma
+
+# Misc
+AlignEscapedNewlines: DontAlign

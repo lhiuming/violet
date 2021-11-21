@@ -16,6 +16,12 @@
     <Filter Include="Resource Files\Shader">
       <UniqueIdentifier>{162cdcb3-6df2-4f9f-aa7a-be5cbba3970a}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Extern">
+      <UniqueIdentifier>{616025ce-d253-47d5-8394-2b6b3cc385ac}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Extern\SPIRV-Reflect">
+      <UniqueIdentifier>{45a6347d-a4a0-4277-b616-d9a403624772}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Violet.cpp">
@@ -24,10 +30,16 @@
     <ClCompile Include="Window.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="Extern\SPIRV-Reflect\spirv_reflect.c">
+      <Filter>Extern\SPIRV-Reflect</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Window.h">
       <Filter>Source Files</Filter>
+    </ClInclude>
+    <ClInclude Include="Extern\SPIRV-Reflect\spirv_reflect.h">
+      <Filter>Extern\SPIRV-Reflect</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
