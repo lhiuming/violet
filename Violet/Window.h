@@ -28,7 +28,7 @@ public:
 	void PollEvents();
 
 	// Window properties
-	void GetSize(int32_t& width, int32_t& height);
+	void GetSize(uint32_t& width, uint32_t& height);
 
 private:
 	friend class WindowPrivate::SystemCallbackHandler;

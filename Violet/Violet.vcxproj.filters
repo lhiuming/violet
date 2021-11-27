@@ -22,6 +22,9 @@
     <Filter Include="Extern\SPIRV-Reflect">
       <UniqueIdentifier>{45a6347d-a4a0-4277-b616-d9a403624772}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Extern\volk">
+      <UniqueIdentifier>{b156f2a8-7a2f-471c-8255-d28d9f1ac72e}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Violet.cpp">
@@ -33,6 +36,9 @@
     <ClCompile Include="Extern\SPIRV-Reflect\spirv_reflect.c">
       <Filter>Extern\SPIRV-Reflect</Filter>
     </ClCompile>
+    <ClCompile Include="Extern\volk\volk.c">
+      <Filter>Extern\volk</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Window.h">
@@ -40,6 +46,9 @@
     </ClInclude>
     <ClInclude Include="Extern\SPIRV-Reflect\spirv_reflect.h">
       <Filter>Extern\SPIRV-Reflect</Filter>
+    </ClInclude>
+    <ClInclude Include="Extern\volk\volk.h">
+      <Filter>Extern\volk</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>

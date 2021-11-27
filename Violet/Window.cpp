@@ -4,8 +4,10 @@
 
 // Win32 Platform
 //#include <wctype.h>
+#define NOMINMAX
 #include <windows.h>
 #include <strsafe.h>
+#undef NOMINMAX
 
 #define WINDOW_INVALID_HANDLE 0
 
@@ -67,6 +69,12 @@ public:
 				window->SetShouldClose();
 				return 0;
 			}
+			//case WM_SIZE:
+			//{
+			//	UINT width = LOWORD(lParam);
+			//	UINT height = HIWORD(lParam);
+			//	break;
+			//}
 		};
 
 		return DefWindowProcW(hWnd, uMsg, wParam, lParam);
@@ -220,7 +228,7 @@ void Window::PollEvents()
 	}
 }
 
-void Window::GetSize(int32_t& width, int32_t& height)
+void Window::GetSize(uint32_t& width, uint32_t& height)
 {
     assert(IsValid());
 
@@ -231,6 +239,8 @@ void Window::GetSize(int32_t& width, int32_t& height)
     if (bSucceed)
     {
         // .left and .top are zero
+		assert(rect.right < 0xFFFFFFFF);
+		assert(rect.bottom < 0xFFFFFFFF);
         width = rect.right;
         height = rect.bottom;
     }
