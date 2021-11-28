@@ -25,6 +25,9 @@
     <Filter Include="Extern\volk">
       <UniqueIdentifier>{b156f2a8-7a2f-471c-8255-d28d9f1ac72e}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Extern\tinyobjloader">
+      <UniqueIdentifier>{953a6903-6a96-4741-a2c7-812975a45518}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="Violet.cpp">
@@ -39,6 +42,9 @@
     <ClCompile Include="Extern\volk\volk.c">
       <Filter>Extern\volk</Filter>
     </ClCompile>
+    <ClCompile Include="Extern\tinyobjloader\tiny_obj_loader.cc">
+      <Filter>Extern\tinyobjloader</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="Window.h">
@@ -50,9 +56,15 @@
     <ClInclude Include="Extern\volk\volk.h">
       <Filter>Extern\volk</Filter>
     </ClInclude>
+    <ClInclude Include="Extern\tinyobjloader\tiny_obj_loader.h">
+      <Filter>Extern\tinyobjloader</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <None Include="Shader\FullScreenCS.s">
+      <Filter>Resource Files\Shader</Filter>
+    </None>
+    <None Include="Shader\Mesh.s">
       <Filter>Resource Files\Shader</Filter>
     </None>
   </ItemGroup>
