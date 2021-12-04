@@ -11,7 +11,7 @@ Buffer<uint> indexBuffer : register(t1);
 
 struct RasterData
 {
-	float4 pos : POSITION; 
+	float4 pos : SV_POSITION;
 	float4 color : COLOR;
 };
 
@@ -26,12 +26,13 @@ void VSMain(uint vertexID: SV_VertexID, out RasterData o)
 	uint Index = indexBuffer[vertexID];
 	Vertex v = vertexBuffer[Index];
 
-	const float scale = 0.02f;
+	const float scale = 0.01f;
 	const float3 bias = float3(0, 0, 1.0f);
 	o.pos = float4(v.position * scale + bias, 1.0f);
-	o.pos.xyz = clamp(o.pos.xyz, float3(-0.5, -0.5, 0.0f), float3(0.5, 0.5, 1.0f));
+	//o.pos.xyz = clamp(o.pos.xyz, float3(-0.5, -0.5, 0.0f), float3(0.5, 0.5, 1.0f));
 
 	// debug
+	if (0)
 	{
 		o.pos.xyz = vs[vertexID % 3];
 	}
@@ -42,7 +43,7 @@ void VSMain(uint vertexID: SV_VertexID, out RasterData o)
 
 struct PixelOutput
 {
-	float4 color : COLOR0;
+	float4 color : SV_Target0;
 };
 
 void PSMain(RasterData i, out PixelOutput o)

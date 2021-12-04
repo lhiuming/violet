@@ -27,6 +27,7 @@
 VkDevice GVkDevice;
 VkPhysicalDeviceMemoryProperties GMemoryProperties;
 VkSurfaceFormatKHR GSurfaceDefaultFormat{};
+bool GVulkanDynamicRendering;
 
 #if _DEBUG
 VkBool32 VulkanDebugReportCallback(
@@ -186,18 +187,18 @@ VkDevice CreateVkDevice(VkInstance instance, VkPhysicalDevice& outPhysicalDevice
 		vkGetPhysicalDeviceFeatures2KHR(outPhysicalDevice, &supportedDeviceFeatures);
 
 		// NOTE: requring dynamic rendering
-		assert(dynamicRendering.dynamicRendering);
+		GVulkanDynamicRendering = dynamicRendering.dynamicRendering == VK_TRUE;
 
 		const char* deviceExtensionNames[] = {
 			VK_KHR_SWAPCHAIN_EXTENSION_NAME
-			, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME
+			, VK_KHR_DYNAMIC_RENDERING_EXTENSION_NAME // NOTE: keep this at last for now
 		};
 		const uint32_t deviceExtensionCount = ARRAY_LENGTH(deviceExtensionNames);
 
 		VkDeviceCreateInfo vkDeviceCInfo{ VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO };
 		vkDeviceCInfo.queueCreateInfoCount = 1;
 		vkDeviceCInfo.pQueueCreateInfos = &vkQueueCInfo;
-		vkDeviceCInfo.enabledExtensionCount = deviceExtensionCount;
+		vkDeviceCInfo.enabledExtensionCount = GVulkanDynamicRendering ? deviceExtensionCount : deviceExtensionCount - 1;
 		vkDeviceCInfo.ppEnabledExtensionNames = deviceExtensionNames;
 		vkDeviceCInfo.pEnabledFeatures = &supportedDeviceFeatures.features;
 		vkDeviceCInfo.pNext = &dynamicRendering;
@@ -217,10 +218,12 @@ struct Swapchain
 	uint32_t imageCount;
 	VkImage images[8];
 	VkImageView imageViews[8];
+	// optional
+	VkFramebuffer framebuffers[8];
 };
 
 Swapchain
-CreateSwapchain(VkDevice device, VkSurfaceKHR surface, uint32_t queueFamilyIndex, uint32_t width, uint32_t height)
+CreateSwapchain(VkDevice device, VkSurfaceKHR surface, uint32_t queueFamilyIndex, uint32_t width, uint32_t height, VkRenderPass renderPass = VK_NULL_HANDLE)
 {
 	Swapchain swapchain {width, height};
 
@@ -250,6 +253,23 @@ CreateSwapchain(VkDevice device, VkSurfaceKHR surface, uint32_t queueFamilyIndex
 		VkImageView imageView = CreateImageView(device, swapchain.images[i]);
 		assert(imageView);
 		swapchain.imageViews[i] = imageView;
+
+		// optional: FrameBuffer
+		if (renderPass != VK_NULL_HANDLE)
+		{
+			VkFramebufferCreateInfo cInfo {VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+			cInfo.renderPass = renderPass;
+			cInfo.attachmentCount = 1;
+			cInfo.pAttachments = &imageView;
+			cInfo.width = width;
+			cInfo.height = height;
+			cInfo.layers = 1;
+			VK_CHECK(vkCreateFramebuffer(device, &cInfo, 0, &swapchain.framebuffers[i]));
+		}
+		else
+		{
+			swapchain.framebuffers[i] = VK_NULL_HANDLE;
+		}
 	}
 
 	return swapchain;
@@ -260,6 +280,11 @@ void DestroySwapchain(VkDevice device, Swapchain& swapchain)
 	for (uint32_t imageIndex = 0; imageIndex < swapchain.imageCount; ++imageIndex)
 	{
 		vkDestroyImageView(device, swapchain.imageViews[imageIndex], 0);
+
+		if (swapchain.framebuffers[imageIndex])
+		{
+			vkDestroyFramebuffer(device, swapchain.framebuffers[imageIndex], 0);
+		}
 	}
 
 	// NOTE: this also destoy images
@@ -427,7 +452,7 @@ VkPipeline CreateComputePipeline(VkShaderModule shaderModule, VkPipelineLayout l
 }
 
 VkPipeline CreateGraphicPipeline(VkShaderModule vertModule, const char* vertEntryPoint, 
-	VkShaderModule fragModule, const char* fragEntryPoint, VkPipelineLayout layout)
+	VkShaderModule fragModule, const char* fragEntryPoint, VkPipelineLayout layout, VkRenderPass renderPass = VK_NULL_HANDLE)
 {
 	VkGraphicsPipelineCreateInfo createInfo {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
 	createInfo.flags;
@@ -456,12 +481,8 @@ VkPipeline CreateGraphicPipeline(VkShaderModule vertModule, const char* vertEntr
 
 	// dummy; it is dynamic
 	VkPipelineViewportStateCreateInfo viewportState {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
-	VkViewport viewport {};
 	viewportState.viewportCount = 1;
-	viewportState.pViewports = &viewport;
-	VkRect2D scissor {};
 	viewportState.scissorCount = 1;
-	viewportState.pScissors = &scissor;
 	createInfo.pViewportState = &viewportState;
 
     VkPipelineRasterizationStateCreateInfo rasterizationState {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
@@ -480,8 +501,7 @@ VkPipeline CreateGraphicPipeline(VkShaderModule vertModule, const char* vertEntr
 
     VkPipelineColorBlendStateCreateInfo colorBlendState {VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
 	VkPipelineColorBlendAttachmentState attachmentState {};
-	attachmentState.colorWriteMask =
-		VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+	attachmentState.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
 	colorBlendState.attachmentCount = 1;
 	colorBlendState.pAttachments = &attachmentState; 
 	createInfo.pColorBlendState = &colorBlendState;
@@ -498,11 +518,28 @@ VkPipeline CreateGraphicPipeline(VkShaderModule vertModule, const char* vertEntr
 	createInfo.layout = layout;
 
 	// using dynamic_rendering
-	createInfo.renderPass = VK_NULL_HANDLE;
-	createInfo.subpass = 0;
+	VkPipelineRenderingCreateInfoKHR renderingCreateInfo {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR};
+	const VkFormat colorFormat = GSurfaceDefaultFormat.format; // TODO rendering directly to swapchain image view ATM
+	if (GVulkanDynamicRendering)
+	{
+		createInfo.renderPass = VK_NULL_HANDLE;
+		createInfo.subpass = 0;
 
-    VkPipeline                                       basePipelineHandle;
-    int32_t                                          basePipelineIndex;
+		// Chain dynamic_rendering obejct
+		renderingCreateInfo.viewMask = 0; // none zero only for multiview rendering
+		renderingCreateInfo.colorAttachmentCount = 1;
+		renderingCreateInfo.pColorAttachmentFormats = &colorFormat;
+		renderingCreateInfo.depthAttachmentFormat = VkFormat::VK_FORMAT_UNDEFINED;
+		renderingCreateInfo.stencilAttachmentFormat = VkFormat::VK_FORMAT_UNDEFINED;
+		createInfo.pNext = &renderingCreateInfo;
+	}
+	// not dynamic_rendering
+	else
+	{
+		assert(renderPass != VK_NULL_HANDLE);
+		createInfo.renderPass = renderPass;
+		createInfo.subpass = 0;
+	}
 
 	VkPipeline pipeline;
 	VK_CHECK(vkCreateGraphicsPipelines(GVkDevice, GPipelineCache, 1, &createInfo, nullptr, &pipeline));
@@ -779,7 +816,7 @@ void DestroyMesh(MeshData &mesh)
 
 int main()
 {
-	printf("Hello, Violet on Vulkan.\n");
+	//printf("Hello, Violet on Vulkan.\n");
 
 	WindowCreateDesc windowCreateDesc {
 		1280,
@@ -861,6 +898,37 @@ int main()
 		delete[] vkSurfaceFormat;
 	}
 
+	// Render pass for pipeline
+	VkRenderPass renderPass = VK_NULL_HANDLE;
+	if (!GVulkanDynamicRendering)
+	{
+		VkAttachmentDescription attachDesc {};
+		attachDesc.format = GSurfaceDefaultFormat.format;
+		attachDesc.initialLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL_KHR;
+		attachDesc.finalLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL_KHR;
+		attachDesc.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+		attachDesc.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+		attachDesc.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+		attachDesc.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+		attachDesc.samples = VK_SAMPLE_COUNT_1_BIT;
+
+		VkSubpassDescription subpassDesc {};
+		subpassDesc.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+		subpassDesc.inputAttachmentCount = 0;
+		subpassDesc.colorAttachmentCount = 1;
+		VkAttachmentReference attachment {0, VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL_KHR};
+		subpassDesc.pColorAttachments = &attachment;
+		subpassDesc.preserveAttachmentCount = 0;
+		subpassDesc.pDepthStencilAttachment = 0;
+
+		VkRenderPassCreateInfo cInfo {VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+		cInfo.attachmentCount = 1;
+		cInfo.pAttachments = &attachDesc;
+		cInfo.subpassCount = 1;
+		cInfo.pSubpasses = &subpassDesc;
+
+		VK_CHECK(vkCreateRenderPass(GVkDevice, &cInfo, 0, &renderPass));
+	}
 
 	//int glfwWidth, glfwHeight;
 	//glfwGetWindowSize(glfwWindow, &glfwWidth, &glfwHeight);
@@ -868,7 +936,7 @@ int main()
 	{
 		uint32_t width, height;
 		window.GetSize(width, height);
-		swapchain = CreateSwapchain(vkDevice, vkSurface, vkDefaultQueueFamilyIndex, width, height);
+		swapchain = CreateSwapchain(vkDevice, vkSurface, vkDefaultQueueFamilyIndex, width, height, renderPass);
 	}
 
 	VkSemaphoreCreateInfo vkSemaphoreCInfo{ VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO };
@@ -915,6 +983,7 @@ int main()
 		createInfo.pPoolSizes = poolSizes;
 		VK_CHECK(vkCreateDescriptorPool(vkDevice, &createInfo, 0, &GDescriptorPool));
 	}
+
 
 	// Create shader
 	struct Shader
@@ -971,7 +1040,8 @@ int main()
 			shader.vertReflect.spvModule.entry_point_name,
 			fragModule,
 			shader.fragReflect.spvModule.entry_point_name,
-			shader.pipelineLayout
+			shader.pipelineLayout,
+			renderPass
 		);
 
 		vkDestroyShaderModule(vkDevice, vertModule, nullptr);
@@ -1032,8 +1102,9 @@ int main()
 		clearColorValue.float32[0] = 0x5A / 255.0f;
 		clearColorValue.float32[1] = 0x44 / 255.0f;
 		clearColorValue.float32[2] = 0x94 / 255.0f;
+		clearColorValue.float32[3] = 0xFF / 255.0f;
 
-		bool bFillWithCompute = true;
+		bool bFillWithCompute = false;
 		bool bClearUsingRenderPass = !bFillWithCompute;
 		const bool bDrawMesh = true;
 
@@ -1099,7 +1170,15 @@ int main()
 			imageBarrier.subresourceRange.layerCount = 1;
 			imageBarrier.subresourceRange.levelCount = 1;
 			imageBarrier.image = swapchain.images[imageIndex];
-			vkCmdPipelineBarrier(vkCmdBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0, nullptr, 0, nullptr, 1, &imageBarrier);
+			//vkCmdPipelineBarrier(vkCmdBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0, nullptr, 0, nullptr, 1, &imageBarrier);
+			vkCmdPipelineBarrier(
+				vkCmdBuffer, 
+				VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, 
+				VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 
+				0, 
+				0, nullptr, 
+				0, nullptr, 
+				1, &imageBarrier);
 
 			swapchainImageLayout = VK_IMAGE_LAYOUT_ATTACHMENT_OPTIMAL_KHR;
 		}
@@ -1107,38 +1186,56 @@ int main()
 		// Using dynamic render pass
 		if (bDrawMesh || bClearUsingRenderPass)
 		{
-			VkRenderingAttachmentInfoKHR attachmentInfo {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR};
-			attachmentInfo.imageView = swapchain.imageViews[imageIndex];
-			attachmentInfo.imageLayout = swapchainImageLayout;
-			attachmentInfo.resolveMode = VK_RESOLVE_MODE_NONE;
-			attachmentInfo.loadOp = bClearUsingRenderPass ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
-			attachmentInfo.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-			attachmentInfo.clearValue.color = clearColorValue;
-			attachmentInfo.clearValue.depthStencil;
+			if (GVulkanDynamicRendering)
+			{
+				VkRenderingAttachmentInfoKHR attachmentInfo {VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO_KHR};
+				attachmentInfo.imageView = swapchain.imageViews[imageIndex];
+				attachmentInfo.imageLayout = swapchainImageLayout;
+				attachmentInfo.resolveMode = VK_RESOLVE_MODE_NONE;
+				// attachmentInfo.loadOp = bClearUsingRenderPass ? VK_ATTACHMENT_LOAD_OP_CLEAR :
+				// VK_ATTACHMENT_LOAD_OP_LOAD;
+				attachmentInfo.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+				attachmentInfo.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+				attachmentInfo.clearValue.color = clearColorValue;
+				attachmentInfo.clearValue.depthStencil;
 
-			VkRenderingInfoKHR renderingInfo {VK_STRUCTURE_TYPE_RENDERING_INFO_KHR};
-			renderingInfo.flags;
-			renderingInfo.renderArea.offset = {0, 0};
-			renderingInfo.renderArea.extent = {swapchain.width, swapchain.heigth};
-			renderingInfo.layerCount = 1;
-			renderingInfo.viewMask = 0; // all view
-			renderingInfo.colorAttachmentCount = 1;
-			renderingInfo.pColorAttachments = &attachmentInfo;
-			vkCmdBeginRenderingKHR(vkCmdBuffer, &renderingInfo);
+				VkRenderingInfoKHR renderingInfo {VK_STRUCTURE_TYPE_RENDERING_INFO_KHR};
+				renderingInfo.flags;
+				renderingInfo.renderArea.offset = VkOffset2D {0, 0};
+				renderingInfo.renderArea.extent = VkExtent2D {swapchain.width, swapchain.heigth};
+				renderingInfo.layerCount = 1;
+				renderingInfo.viewMask = 0; // all view
+				renderingInfo.colorAttachmentCount = 1;
+				renderingInfo.pColorAttachments = &attachmentInfo;
+				renderingInfo.pDepthAttachment = VK_NULL_HANDLE;
+				renderingInfo.pStencilAttachment = VK_NULL_HANDLE;
+				vkCmdBeginRenderingKHR(vkCmdBuffer, &renderingInfo);
+			}
+			else
+			{
+				VkRenderPassBeginInfo beginInfo {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+				beginInfo.renderPass = renderPass;
+				beginInfo.framebuffer = swapchain.framebuffers[imageIndex];
+				beginInfo.renderArea = {{0, 0}, {swapchain.width, swapchain.heigth}};
+				beginInfo.clearValueCount = 1;
+				VkClearValue clearValue {};
+				clearValue.color = clearColorValue;
+				beginInfo.pClearValues = &clearValue;
+				VkSubpassContents spContents {};
+				vkCmdBeginRenderPass(vkCmdBuffer, &beginInfo, spContents);
+			}
 
 			// Draw mesh
 			if (bDrawMesh)
 			{
-				// set shader (pipeline)
-				vkCmdBindPipeline(vkCmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, meshGraphic.pipeline);
 
 				// set pipeline dynamic states
 				{
 					VkViewport viewport {};
 					viewport.x = 0;
-					viewport.y = 0;
+					viewport.y = float(swapchain.heigth);
 					viewport.width = swapchain.width;
-					viewport.height = swapchain.heigth;
+					viewport.height = -float(swapchain.heigth);
 					viewport.minDepth = 0;
 					viewport.maxDepth = 1;
 					vkCmdSetViewport(vkCmdBuffer, 0, 1, &viewport);
@@ -1198,10 +1295,20 @@ int main()
 					0,
 					0);
 
+				// set shader (pipeline)
+				vkCmdBindPipeline(vkCmdBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, meshGraphic.pipeline);
+
 				vkCmdDraw(vkCmdBuffer, mesh.indexCount, 1, 0, 0);
 			}
 
-			vkCmdEndRenderingKHR(vkCmdBuffer);
+			if (GVulkanDynamicRendering)
+			{
+				vkCmdEndRenderingKHR(vkCmdBuffer);
+			}
+			else
+			{
+				vkCmdEndRenderPass(vkCmdBuffer);
+			}
 		}
 
 		// Transition for present
@@ -1213,7 +1320,14 @@ int main()
 			imageBarrier.subresourceRange.layerCount = 1;
 			imageBarrier.subresourceRange.levelCount = 1;
 			imageBarrier.image = swapchain.images[imageIndex];
-			vkCmdPipelineBarrier(vkCmdBuffer, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, VK_DEPENDENCY_BY_REGION_BIT, 0, nullptr, 0, nullptr, 1, &imageBarrier);
+			vkCmdPipelineBarrier(
+				vkCmdBuffer, 
+				VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 
+				VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, //VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT, 
+				0, 
+				0, nullptr, 
+				0, nullptr, 
+				1, &imageBarrier);
 
 			swapchainImageLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
 		}
@@ -1264,6 +1378,11 @@ int main()
 	vkDestroySemaphore(vkDevice, vkPresentSemaphore, nullptr);
 
 	DestroySwapchain(vkDevice, swapchain);
+
+	if (renderPass != VK_NULL_HANDLE)
+	{
+		vkDestroyRenderPass(vkDevice, renderPass, 0);
+	}
 
 	vkDestroySurfaceKHR(vkInstance, vkSurface, nullptr);
 	vkDestroyDevice(vkDevice, nullptr);
