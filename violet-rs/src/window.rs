@@ -1,5 +1,5 @@
-use std::{ffi, mem, ptr};
 use std::os::windows::prelude::OsStrExt;
+use std::{ffi, mem, ptr};
 use windows_sys::Win32::{
     Foundation::*, System::Diagnostics::Debug::*, System::LibraryLoader::*, System::Memory::*,
     UI::Input::KeyboardAndMouse::*, UI::WindowsAndMessaging::*,
