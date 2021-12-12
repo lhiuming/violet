@@ -193,7 +193,8 @@ fn main() {
             .enabled_layer_names(&layer_names_raw)
             .enabled_extension_names(&ext_names_raw);
 
-        print!("Vulkan: creating instance ... "); std::io::stdout().flush().unwrap();
+        print!("Vulkan: creating instance ... ");
+        std::io::stdout().flush().unwrap();
         let instance = unsafe { entry.create_instance(&create_info, None) }
             .expect("Vulkan instance creation failed");
         println!("done.");
@@ -236,16 +237,17 @@ fn main() {
     };
 
     // Create device
-    let mut b_support_dynamic_rendering = false;
+    let b_support_dynamic_rendering;
+    let gfx_queue_family_index;
     let device = {
         // Enumerate and pick queue families to create with the device
         let queue_fams =
             unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
-        let mut gfx_queue_family_index = 0;
+        let mut found_gfx_queue_family_index = 0;
         for i in 0..queue_fams.len() {
             let queue_fam = &queue_fams[i];
             if queue_fam.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
-                gfx_queue_family_index = i as u32;
+                found_gfx_queue_family_index = i as u32;
                 println!(
                     "Vulkan: found graphics queue family index: index {}, count {}",
                     i, queue_fam.queue_count
@@ -260,6 +262,7 @@ fn main() {
                 continue;
             }
         }
+        gfx_queue_family_index = found_gfx_queue_family_index;
         let queue_create_infos = [
             // Just create a graphics queue for everything ATM...
             vk::DeviceQueueCreateInfo::builder()
@@ -295,6 +298,13 @@ fn main() {
         }
     };
 
+    // Load dynamic_rendering
+    assert!(b_support_dynamic_rendering);
+    let dynamic_render = khr::DynamicRendering::new(&instance, &device);
+
+    // Get quques
+    let gfx_queue = unsafe { device.get_device_queue(gfx_queue_family_index, 0) };
+
     // Create surface
     let surface_entry = khr::Surface::new(&entry, &&instance);
     let win_surface_entry = khr::Win32Surface::new(&entry, &instance);
@@ -328,6 +338,12 @@ fn main() {
         let surface_size = surface.query_size(&surface_entry, &physical_device);
         swapchain_entry.create(&device, &surface, &surface_size)
     };
+
+    let present_semaphore = unsafe {
+        let create_info = vk::SemaphoreCreateInfo::builder();
+        device.create_semaphore(&create_info, None)
+    }
+    .expect("Vulkan: failed to create semaphore");
 
     // Command buffer (and pool)
     let cmd_pool = {
@@ -364,6 +380,10 @@ fn main() {
 
         // Resize swapchain
         let surface_size = surface.query_size(&surface_entry, &physical_device);
+        let b_invalid_size = (surface_size.width == 0) || (surface_size.height == 0);
+        if b_invalid_size {
+            continue;
+        }
         let b_resize =
             (surface_size.width != swapchain.width) || (surface_size.height != swapchain.height);
         if b_resize {
@@ -371,6 +391,158 @@ fn main() {
             swapchain = swapchain_entry.create(&device, &surface, &surface_size);
         }
 
-        // todo render things
+        // Acquire target image
+        let (image_index, b_image_suboptimal) = unsafe {
+            swapchain_entry.entry.acquire_next_image(
+                swapchain.handle,
+                u64::MAX,
+                present_semaphore,
+                vk::Fence::default(),
+            )
+        }
+        .expect("Vulkan: failed to acquire swapchain image");
+        if b_image_suboptimal {
+            println!("Vulkan: suboptimal image is get (?)");
+        }
+
+        // SIMPLE CONFIGURATION
+        let b_clear_using_render_pass = true;
+        let clear_color = vk::ClearColorValue {
+            float32: [
+                0x5A as f32 / 255.0,
+                0x44 as f32 / 255.0,
+                0x94 as f32 / 255.0,
+                0xFF as f32 / 255.0,
+            ],
+        };
+
+        // Being command recording
+        {
+            let begin_info = vk::CommandBufferBeginInfo::builder()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            unsafe {
+                device.begin_command_buffer(cmd_buf, &begin_info).unwrap();
+            }
+        }
+
+        let mut swapchain_image_layout = vk::ImageLayout::UNDEFINED;
+
+        // Transition for render
+        if b_clear_using_render_pass {
+            let sub_res_range = vk::ImageSubresourceRange::builder()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .layer_count(1)
+                .level_count(1);
+            let image_barrier = vk::ImageMemoryBarrier::builder()
+                .old_layout(swapchain_image_layout)
+                .new_layout(vk::ImageLayout::ATTACHMENT_OPTIMAL_KHR)
+                .subresource_range(*sub_res_range)
+                .image(swapchain.image[image_index as usize]);
+            unsafe {
+                device.cmd_pipeline_barrier(
+                    cmd_buf,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[*image_barrier],
+                );
+            }
+
+            swapchain_image_layout = image_barrier.new_layout;
+        }
+
+        // Begin render pass
+        if b_support_dynamic_rendering {
+            let color_attachment = vk::RenderingAttachmentInfoKHR::builder()
+                .image_view(swapchain.image_view[image_index as usize])
+                .image_layout(swapchain_image_layout)
+                .resolve_mode(vk::ResolveModeFlags::NONE)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue { color: clear_color });
+            let color_attachments = [*color_attachment];
+            let rendering_info = vk::RenderingInfoKHR::builder()
+                .render_area(vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: surface_size,
+                })
+                .layer_count(1)
+                .view_mask(0)
+                .color_attachments(&color_attachments);
+            unsafe {
+                dynamic_render.cmd_begin_rendering(cmd_buf, &rendering_info);
+            }
+        }
+
+        // TODO draw some mesh here
+
+        // End render pass
+        unsafe {
+            dynamic_render.cmd_end_rendering(cmd_buf);
+        }
+
+        // Transition for present
+        if swapchain_image_layout != vk::ImageLayout::PRESENT_SRC_KHR {
+            let sub_res_range = vk::ImageSubresourceRange::builder()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .layer_count(1)
+                .level_count(1);
+            let image_barrier = vk::ImageMemoryBarrier::builder()
+                .old_layout(swapchain_image_layout)
+                .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
+                .subresource_range(*sub_res_range)
+                .image(swapchain.image[image_index as usize]);
+            unsafe {
+                device.cmd_pipeline_barrier(
+                    cmd_buf,
+                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[*image_barrier],
+                );
+            }
+            //swapchain_image_layout = image_barrier.new_layout;
+        }
+
+        // End command recoding
+        unsafe {
+            device.end_command_buffer(cmd_buf).unwrap();
+        }
+
+        // Submit
+        {
+            let command_buffers = [cmd_buf];
+            let submit_info = vk::SubmitInfo::builder().command_buffers(&command_buffers);
+            unsafe {
+                device
+                    .queue_submit(gfx_queue, &[*submit_info], vk::Fence::null())
+                    .unwrap();
+            }
+        }
+
+        // Present
+        {
+            let mut present_info = vk::PresentInfoKHR::default();
+            present_info.wait_semaphore_count = 1;
+            present_info.p_wait_semaphores = &present_semaphore;
+            present_info.swapchain_count = 1;
+            present_info.p_swapchains = &swapchain.handle;
+            present_info.p_image_indices = &image_index;
+            unsafe {
+                swapchain_entry
+                    .entry
+                    .queue_present(gfx_queue, &present_info)
+                    .unwrap();
+            }
+        }
+
+        // Wait brute-force (ATM)
+        unsafe {
+            device.device_wait_idle().unwrap();
+        }
     }
 }
