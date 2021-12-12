@@ -221,6 +221,15 @@ impl Window {
         }
     }
 
+    pub fn system_handle(&self) -> u64 {
+        self.system_handle
+    }
+
+    pub fn system_handle_for_module() -> u64 {
+        let hmodule = unsafe { GetModuleHandleW(std::ptr::null_mut()) };
+        hmodule as u64
+    }
+
     pub fn should_close(&self) -> bool {
         self.should_close
     }
