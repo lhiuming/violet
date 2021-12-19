@@ -62,8 +62,7 @@ impl Surface {
 }
 
 struct Swapchain {
-    pub width: u32,
-    pub height: u32,
+    pub extent: vk::Extent2D,
     pub handle: vk::SwapchainKHR,
     pub num_image: u32,
     pub image: [vk::Image; 8],
@@ -73,8 +72,10 @@ struct Swapchain {
 impl Swapchain {
     fn default() -> Swapchain {
         Swapchain {
-            width: 0,
-            height: 0,
+            extent: vk::Extent2D {
+                width: 0,
+                height: 0,
+            },
             handle: vk::SwapchainKHR::default(),
             num_image: 0,
             image: [vk::Image::default(); 8],
@@ -96,8 +97,7 @@ impl SwapchainEntry {
 
     fn create(&self, device: &ash::Device, surface: &Surface, extent: &vk::Extent2D) -> Swapchain {
         let mut ret = Swapchain::default();
-        ret.width = extent.width;
-        ret.height = extent.height;
+        ret.extent = *extent;
 
         // Create swapchain object
         let create_info = {
@@ -163,28 +163,26 @@ impl SwapchainEntry {
 
 pub struct PipelineDevice {
     device: ash::Device,
-    pipeline_cache: vk::PipelineCache,
     descriptor_pool: vk::DescriptorPool,
+    pipeline_cache: vk::PipelineCache,
 }
-
-use spirv_reflect;
 
 // AKA shader
 pub struct PipelineProgram {
     pub shader_module: vk::ShaderModule,
+    pub reflect_module: spirv_reflect::ShaderModule,
+    pub entry_point_c: CString,
     pub set_layout: vk::DescriptorSetLayout,
     pub layout: vk::PipelineLayout,
-    pub pipeline: vk::Pipeline,
     pub descriptor_sets: Vec<vk::DescriptorSet>,
 }
 
 fn create_pipeline_program(
     device: &PipelineDevice,
     binary: &[u32],
-    entry_point: &str,
+    shader_def: &ShaderDefinition,
 ) -> Option<PipelineProgram> {
-    let pipeline_cache = device.pipeline_cache;
-    let descriptor_pool = device.descriptor_pool;
+    let descriptor_pool = &device.descriptor_pool;
     let device = &device.device;
 
     // Create shader module
@@ -202,13 +200,13 @@ fn create_pipeline_program(
     let set_layout = {
         assert!(
             reflect_module
-                .enumerate_descriptor_sets(Some(entry_point))
+                .enumerate_descriptor_sets(Some(&shader_def.entry_point))
                 .unwrap()
                 .len()
                 <= 1
         );
         let bindings = reflect_module
-            .enumerate_descriptor_bindings(Some(entry_point))
+            .enumerate_descriptor_bindings(Some(&shader_def.entry_point))
             .unwrap()
             .iter()
             .map(|b| {
@@ -244,169 +242,217 @@ fn create_pipeline_program(
         unsafe { device.create_pipeline_layout(&create_info, None) }.ok()?
     };
 
-    // Create pipeline object
-    let pipeline = {
-        let entry_point_c =
-            CString::new(entry_point).expect(&format!("Bad entry point name: {}", entry_point));
-        let stage_info = vk::PipelineShaderStageCreateInfo::builder()
-            .stage(vk::ShaderStageFlags::COMPUTE)
-            .module(shader_module)
-            .name(&entry_point_c);
-        let create_info = vk::ComputePipelineCreateInfo::builder()
-            .stage(*stage_info)
-            .layout(layout);
-        let create_infos = [create_info.build()];
-        match unsafe { device.create_compute_pipelines(pipeline_cache, &create_infos, None) } {
-            Ok(pipeline) => pipeline[0],
-            Err(_) => return None,
-        }
-    };
-
     // Create all used descriptor sets
     let descriptor_sets = {
         let create_info = vk::DescriptorSetAllocateInfo::builder()
-            .descriptor_pool(descriptor_pool)
+            .descriptor_pool(*descriptor_pool)
             .set_layouts(&set_layouts);
         unsafe { device.allocate_descriptor_sets(&create_info) }.ok()?
     };
 
+    let entry_point_c = reflect_module.get_entry_point_name().to_cstring();
+
     Some(PipelineProgram {
         shader_module,
+        reflect_module,
+        entry_point_c,
         set_layout,
         layout,
-        pipeline,
         descriptor_sets,
     })
 }
 
-mod shader {
-    use shaderc;
+use shaderc;
 
-    use std::fs::File;
-    use std::io::Read;
-    use std::path::{Path, PathBuf};
+use std::fs::File;
+use std::io::Read;
+use std::path::PathBuf;
 
-    use std::collections::HashMap;
+trait ToCString {
+    fn to_cstring(&self) -> CString;
+}
 
-    use crate::PipelineDevice;
-    use crate::PipelineProgram;
-
-    pub struct ShaderDefinition {
-        pub virutal_path: String,
-        pub entry_point: String,
+impl ToCString for String {
+    fn to_cstring(&self) -> CString {
+        CString::new(self.clone()).unwrap()
     }
+}
 
-    pub struct CompiledShader {
-        pub artifact: shaderc::CompilationArtifact,
-        pub program: PipelineProgram,
-    }
+enum ShaderStage {
+    Compute,
+    Vert,
+    Frag,
+}
 
-    impl CompiledShader {}
+struct ShaderDefinition {
+    pub virtual_path: String,
+    pub entry_point: String,
+    pub stage: ShaderStage,
+}
 
-    type CompiledShaderSet = HashMap<String, CompiledShader>;
-
-    pub struct ShaderLibrary {
-        shader_types: Vec<ShaderDefinition>,
-        compiled_shaders: CompiledShaderSet,
-    }
-
-    impl ShaderLibrary {
-        pub fn new() -> ShaderLibrary {
-            ShaderLibrary {
-                shader_types: Vec::new(),
-                compiled_shaders: HashMap::new(),
-            }
-        }
-
-        pub fn add_shader(&mut self, shader_type: ShaderDefinition) {
-            self.shader_types.push(shader_type);
-        }
-
-        pub fn find_shader(&self, virtual_path: &str) -> Option<&CompiledShader> {
-            self.compiled_shaders.get(virtual_path)
-        }
-
-        fn update_shader(
-            set: &mut CompiledShaderSet,
-            device: &PipelineDevice,
-            v_path: &str,
-            entry_point: &str,
-        ) {
-            match load_shader(device, v_path, entry_point) {
-                Some(compiled) => {
-                    set.insert(v_path.to_string(), compiled);
-                }
-                _ => (),
-            };
-        }
-
-        pub fn update(&mut self, device: &PipelineDevice) {
-            for shader_type in self.shader_types.iter() {
-                ShaderLibrary::update_shader(
-                    &mut self.compiled_shaders,
-                    device,
-                    &shader_type.virutal_path,
-                    &shader_type.entry_point,
-                );
-            }
+impl ShaderDefinition {
+    pub fn new(virtual_path: &str, entry_point: &str, stage: ShaderStage) -> ShaderDefinition {
+        ShaderDefinition {
+            virtual_path: virtual_path.to_string(),
+            entry_point: entry_point.to_string(),
+            stage,
         }
     }
+}
 
-    fn load_shader(
-        device: &PipelineDevice,
-        v_path: &str,
-        entry_point: &str,
-    ) -> Option<CompiledShader> {
-        // todo map v_path to actuall pathes
-        let mut path = PathBuf::new();
-        path.push("./shader/");
-        path.push(v_path);
-        let display = path.display();
+pub struct CompiledShader {
+    pub artifact: shaderc::CompilationArtifact,
+    pub program: PipelineProgram,
+}
 
-        // Read file content
-        let mut file = match File::open(&path) {
-            Err(why) => panic!("Coundn't open shader path {}: {}", display, why),
-            Ok(file) => file,
-        };
-        let mut text = String::new();
-        match file.read_to_string(&mut text) {
-            Err(why) => panic!("Couldn't read file {}: {}", display, why),
-            Ok(_) => (),
-        };
+fn load_shader(device: &PipelineDevice, shader_def: &ShaderDefinition) -> Option<CompiledShader> {
+    // todo map v_path to actuall pathes
+    let mut path = PathBuf::new();
+    path.push("./shader/");
+    path.push(&shader_def.virtual_path);
+    let display = path.display();
 
-        // Compile the shader
-        let file_name_os = path.file_name().unwrap();
-        let file_name = file_name_os.to_str().unwrap();
-        let mut compiler = shaderc::Compiler::new().unwrap();
-        let mut options = shaderc::CompileOptions::new().unwrap();
-        options.set_source_language(shaderc::SourceLanguage::HLSL);
-        let compile_result = compiler.compile_into_spirv(
-            &text,
-            shaderc::ShaderKind::Compute,
-            file_name,
-            entry_point,
-            Some(&options),
-        );
+    // Read file content
+    let mut file = match File::open(&path) {
+        Err(why) => panic!("Coundn't open shader path {}: {}", display, why),
+        Ok(file) => file,
+    };
+    let mut text = String::new();
+    match file.read_to_string(&mut text) {
+        Err(why) => panic!("Couldn't read file {}: {}", display, why),
+        Ok(_) => (),
+    };
 
-        let artifact = match compile_result {
-            Err(why) => {
-                println!("Shaer compiled binay is not valid: {}", why);
-                return None;
-            }
-            Ok(artifact) => artifact,
-        };
+    let shader_kind = match shader_def.stage {
+        ShaderStage::Compute => shaderc::ShaderKind::Compute,
+        ShaderStage::Vert => shaderc::ShaderKind::Vertex,
+        ShaderStage::Frag => shaderc::ShaderKind::Fragment,
+    };
 
-        let program =
-            match crate::create_pipeline_program(device, artifact.as_binary(), entry_point) {
-                Some(program) => program,
-                None => return None,
-            };
+    // Compile the shader
+    let file_name_os = path.file_name().unwrap();
+    let file_name = file_name_os.to_str().unwrap();
+    let mut compiler = shaderc::Compiler::new().unwrap();
+    let mut options = shaderc::CompileOptions::new().unwrap();
+    options.set_source_language(shaderc::SourceLanguage::HLSL);
+    let compile_result = compiler.compile_into_spirv(
+        &text,
+        shader_kind,
+        file_name,
+        &shader_def.entry_point,
+        Some(&options),
+    );
 
-        Some(CompiledShader {
-            artifact: artifact,
-            program: program,
-        })
-    }
+    let artifact = match compile_result {
+        Err(why) => {
+            println!("Shaer compiled binay is not valid: {}", why);
+            return None;
+        }
+        Ok(artifact) => artifact,
+    };
+
+    let program = match create_pipeline_program(device, artifact.as_binary(), &shader_def) {
+        Some(program) => program,
+        None => return None,
+    };
+
+    Some(CompiledShader {
+        artifact: artifact,
+        program: program,
+    })
+}
+
+struct Pipeline {
+    handle: vk::Pipeline,
+}
+
+fn create_compute_pipeline(
+    device: &PipelineDevice,
+    shader_def: &ShaderDefinition,
+    compiled: &CompiledShader,
+) -> Option<Pipeline> {
+    let pipeline_cache = device.pipeline_cache;
+    let device = &device.device;
+
+    let program = &compiled.program;
+
+    // Create pipeline object
+    let pipeline = {
+        let entry_point_c = CString::new(shader_def.entry_point.clone())
+            .expect(&format!("Bad entry point name: {}", shader_def.entry_point));
+        let stage_info = vk::PipelineShaderStageCreateInfo::builder()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(program.shader_module)
+            .name(&entry_point_c);
+        let create_info = vk::ComputePipelineCreateInfo::builder()
+            .stage(*stage_info)
+            .layout(program.layout);
+        let create_infos = [create_info.build()];
+        let result =
+            unsafe { device.create_compute_pipelines(pipeline_cache, &create_infos, None) }.ok()?;
+        result[0]
+    };
+
+    Some(Pipeline { handle: pipeline })
+}
+
+fn create_graphics_pipeline(
+    device: &PipelineDevice,
+    vs: &CompiledShader,
+    ps: &CompiledShader,
+    layout: vk::PipelineLayout,
+) -> Option<Pipeline> {
+    let pipeline_cache = device.pipeline_cache;
+    let device = &device.device;
+
+    // Stages
+    let vs_info = vk::PipelineShaderStageCreateInfo::builder()
+        .stage(vk::ShaderStageFlags::VERTEX)
+        .module(vs.program.shader_module)
+        .name(&vs.program.entry_point_c);
+    let ps_info = vk::PipelineShaderStageCreateInfo::builder()
+        .stage(vk::ShaderStageFlags::FRAGMENT)
+        .module(ps.program.shader_module)
+        .name(&ps.program.entry_point_c);
+    let stage_infos = [vs_info.build(), ps_info.build()];
+
+    // States
+    let vertex_info = vk::PipelineVertexInputStateCreateInfo::builder();
+    let input_assembly = vk::PipelineInputAssemblyStateCreateInfo::builder()
+        .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
+    //let tess = ();
+    let viewport = vk::PipelineViewportStateCreateInfo::builder()
+        .viewport_count(1) // actual state is dynamic
+        .scissor_count(1); // actual dynamic
+    let raster = vk::PipelineRasterizationStateCreateInfo::builder();
+    let multisample = vk::PipelineMultisampleStateCreateInfo::builder()
+        .rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::builder();
+    let attachment = vk::PipelineColorBlendAttachmentState::builder()
+        .color_write_mask(vk::ColorComponentFlags::from_raw(0xFFFFFFFF));
+    let attachments = [attachment.build()];
+    let color_blend = vk::PipelineColorBlendStateCreateInfo::builder().attachments(&attachments);
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic_state =
+        vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states);
+
+    let create_info = vk::GraphicsPipelineCreateInfo::builder()
+        .stages(&stage_infos)
+        .vertex_input_state(&vertex_info)
+        .input_assembly_state(&input_assembly)
+        .viewport_state(&viewport)
+        .rasterization_state(&raster)
+        .multisample_state(&multisample)
+        .depth_stencil_state(&depth_stencil)
+        .color_blend_state(&color_blend)
+        .layout(layout)
+        .dynamic_state(&dynamic_state);
+    let create_infos = [create_info.build()];
+    let result =
+        unsafe { device.create_graphics_pipelines(pipeline_cache, &create_infos, None) }.ok()?;
+    let pipeline = result[0];
+
+    Some(Pipeline { handle: pipeline })
 }
 
 fn main() {
@@ -636,12 +682,19 @@ fn main() {
         pipeline_cache: vk::PipelineCache::null(),
         descriptor_pool: descriptor_pool,
     };
-    let mut shader_lib = shader::ShaderLibrary::new();
-    shader_lib.add_shader(shader::ShaderDefinition {
-        virutal_path: String::from("MeshCS.hlsl"),
-        entry_point: String::from("main"),
-    });
-    shader_lib.update(&pipeline_device);
+    let mesh_cs_def = ShaderDefinition::new("MeshCS.hlsl", "main", ShaderStage::Compute);
+    let (mesh_cs, mesh_cs_pipeline) = {
+        let shader = load_shader(&pipeline_device, &mesh_cs_def).unwrap();
+        let pipeline = create_compute_pipeline(&pipeline_device, &mesh_cs_def, &shader).unwrap();
+        (shader, Some(pipeline))
+    };
+    let mesh_vs_def = ShaderDefinition::new("MeshVSPS.hlsl", "vs_main", ShaderStage::Vert);
+    let mesh_ps_def = ShaderDefinition::new("MeshVSPS.hlsl", "ps_main", ShaderStage::Frag);
+    let mesh_gfx_pipeline = {
+        let vs = load_shader(&pipeline_device, &mesh_vs_def).unwrap();
+        let ps = load_shader(&pipeline_device, &mesh_ps_def).unwrap();
+        create_graphics_pipeline(&pipeline_device, &vs, &ps, vs.program.layout)
+    };
 
     while !window.should_close() {
         window.poll_events();
@@ -659,8 +712,7 @@ fn main() {
         if b_invalid_size {
             continue;
         }
-        let b_resize =
-            (surface_size.width != swapchain.width) || (surface_size.height != swapchain.height);
+        let b_resize = surface_size != swapchain.extent;
         if b_resize {
             swapchain_entry.detroy(&device, &mut swapchain);
             swapchain = swapchain_entry.create(&device, &surface, &surface_size);
@@ -751,16 +803,49 @@ fn main() {
             }
         }
 
-        // TODO draw some mesh here
+        // Draw mesh
+        if let Some(pipeline) = &mesh_gfx_pipeline {
+            // Set viewport and scissor
+            {
+                let viewport = vk::Viewport {
+                    x: 0.0,
+                    y: swapchain.extent.height as f32,
+                    width: swapchain.extent.width as f32,
+                    height: -(swapchain.extent.height as f32),
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                };
+                let viewports = [viewport];
+                unsafe {
+                    device.cmd_set_viewport(cmd_buf, 0, &viewports);
+                }
+
+                let scissor = vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: swapchain.extent,
+                };
+                let scissors = [scissor];
+                unsafe {
+                    device.cmd_set_scissor(cmd_buf, 0, &scissors);
+                }
+            }
+
+            // Set pipeline and Draw
+            unsafe {
+                device.cmd_bind_pipeline(cmd_buf, vk::PipelineBindPoint::GRAPHICS, pipeline.handle);
+            }
+            unsafe {
+                device.cmd_draw(cmd_buf, 3, 1, 0, 0);
+            }
+        }
 
         // End render pass
         unsafe {
             dynamic_render.cmd_end_rendering(cmd_buf);
         }
 
-        // Draw mesh with compute
-        let mesh_cs = shader_lib.find_shader("MeshCS.hlsl");
-        if let Some(mesh_cs) = mesh_cs {
+        // Draw something with compute
+        if let Some(pipeline) = &mesh_cs_pipeline {
             // Transition for compute
             {
                 let sub_res_range = vk::ImageSubresourceRange::builder()
@@ -792,7 +877,7 @@ fn main() {
                     device.cmd_bind_pipeline(
                         cmd_buf,
                         vk::PipelineBindPoint::COMPUTE,
-                        mesh_cs.program.pipeline,
+                        pipeline.handle,
                     )
                 }
 
@@ -823,8 +908,8 @@ fn main() {
                     )
                 }
 
-                let dispatch_x = (swapchain.width + 7) / 8;
-                let dispatch_y = (swapchain.height + 3) / 4;
+                let dispatch_x = (swapchain.extent.width + 7) / 8;
+                let dispatch_y = (swapchain.extent.height + 3) / 4;
                 unsafe {
                     device.cmd_dispatch(cmd_buf, dispatch_x, dispatch_y, 1);
                 }
