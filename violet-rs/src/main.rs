@@ -172,9 +172,6 @@ pub struct PipelineProgram {
     pub shader_module: vk::ShaderModule,
     pub reflect_module: spirv_reflect::ShaderModule,
     pub entry_point_c: CString,
-    pub set_layout: vk::DescriptorSetLayout,
-    pub layout: vk::PipelineLayout,
-    pub descriptor_sets: Vec<vk::DescriptorSet>,
 }
 
 fn create_pipeline_program(
@@ -196,69 +193,12 @@ fn create_pipeline_program(
         unsafe { std::slice::from_raw_parts(binary.as_ptr() as *const u8, binary.len() * 4) };
     let reflect_module = spirv_reflect::create_shader_module(bin_char).ok()?;
 
-    // Create all used set layouts
-    let set_layout = {
-        assert!(
-            reflect_module
-                .enumerate_descriptor_sets(Some(&shader_def.entry_point))
-                .unwrap()
-                .len()
-                <= 1
-        );
-        let bindings = reflect_module
-            .enumerate_descriptor_bindings(Some(&shader_def.entry_point))
-            .unwrap()
-            .iter()
-            .map(|b| {
-                assert!(
-                    b.descriptor_type != spirv_reflect::types::ReflectDescriptorType::Undefined
-                );
-                assert!(
-                    b.descriptor_type
-                        != spirv_reflect::types::ReflectDescriptorType::AccelerationStructureNV
-                );
-                vk::DescriptorSetLayoutBinding {
-                    binding: b.binding,
-                    // TODO ReflectDescriptorType does not match vk::DescriptorType in bit value, also AccelerationStructureNV is in spirv_reflect but not in ash
-                    descriptor_type: vk::DescriptorType::from_raw(b.descriptor_type as i32 - 1),
-                    descriptor_count: b.count,
-                    stage_flags: vk::ShaderStageFlags::from_raw(
-                        reflect_module.get_shader_stage().bits(),
-                    ),
-                    p_immutable_samplers: std::ptr::null(),
-                }
-            })
-            .collect::<Vec<vk::DescriptorSetLayoutBinding>>();
-        let create_info =
-            vk::DescriptorSetLayoutCreateInfo::builder().bindings(bindings.as_slice());
-        unsafe { device.create_descriptor_set_layout(&create_info, None) }.ok()?
-    };
-
-    let set_layouts = [set_layout];
-
-    // Create pipeline layout
-    let layout = {
-        let create_info = vk::PipelineLayoutCreateInfo::builder().set_layouts(&set_layouts);
-        unsafe { device.create_pipeline_layout(&create_info, None) }.ok()?
-    };
-
-    // Create all used descriptor sets
-    let descriptor_sets = {
-        let create_info = vk::DescriptorSetAllocateInfo::builder()
-            .descriptor_pool(*descriptor_pool)
-            .set_layouts(&set_layouts);
-        unsafe { device.allocate_descriptor_sets(&create_info) }.ok()?
-    };
-
     let entry_point_c = reflect_module.get_entry_point_name().to_cstring();
 
     Some(PipelineProgram {
         shader_module,
         reflect_module,
         entry_point_c,
-        set_layout,
-        layout,
-        descriptor_sets,
     })
 }
 
@@ -335,6 +275,7 @@ fn load_shader(device: &PipelineDevice, shader_def: &ShaderDefinition) -> Option
     let mut compiler = shaderc::Compiler::new().unwrap();
     let mut options = shaderc::CompileOptions::new().unwrap();
     options.set_source_language(shaderc::SourceLanguage::HLSL);
+    options.set_auto_bind_uniforms(true);
     let compile_result = compiler.compile_into_spirv(
         &text,
         shader_kind,
@@ -363,7 +304,10 @@ fn load_shader(device: &PipelineDevice, shader_def: &ShaderDefinition) -> Option
 }
 
 struct Pipeline {
-    handle: vk::Pipeline,
+    pub handle: vk::Pipeline,
+    //pub set_layouts: Vec<vk::DescriptorSetLayout>,
+    pub layout: vk::PipelineLayout,
+    pub descriptor_sets: Vec<vk::DescriptorSet>,
 }
 
 fn create_compute_pipeline(
@@ -372,9 +316,65 @@ fn create_compute_pipeline(
     compiled: &CompiledShader,
 ) -> Option<Pipeline> {
     let pipeline_cache = device.pipeline_cache;
+    let descriptor_pool = device.descriptor_pool;
     let device = &device.device;
 
     let program = &compiled.program;
+    let reflect_module = &program.reflect_module;
+
+    // Create all set layouts used in compute
+    let set_layout = {
+        assert!(
+            reflect_module
+                .enumerate_descriptor_sets(Some(&shader_def.entry_point))
+                .unwrap()
+                .len()
+                <= 1
+        );
+        let bindings = reflect_module
+            .enumerate_descriptor_bindings(Some(&shader_def.entry_point))
+            .unwrap()
+            .iter()
+            .map(|b| {
+                assert!(
+                    b.descriptor_type != spirv_reflect::types::ReflectDescriptorType::Undefined
+                );
+                assert!(
+                    b.descriptor_type
+                        != spirv_reflect::types::ReflectDescriptorType::AccelerationStructureNV
+                );
+                vk::DescriptorSetLayoutBinding {
+                    binding: b.binding,
+                    // TODO ReflectDescriptorType does not match vk::DescriptorType in bit value, also AccelerationStructureNV is in spirv_reflect but not in ash
+                    descriptor_type: vk::DescriptorType::from_raw(b.descriptor_type as i32 - 1),
+                    descriptor_count: b.count,
+                    stage_flags: vk::ShaderStageFlags::from_raw(
+                        reflect_module.get_shader_stage().bits(),
+                    ),
+                    p_immutable_samplers: std::ptr::null(),
+                }
+            })
+            .collect::<Vec<vk::DescriptorSetLayoutBinding>>();
+        let create_info =
+            vk::DescriptorSetLayoutCreateInfo::builder().bindings(bindings.as_slice());
+        unsafe { device.create_descriptor_set_layout(&create_info, None) }.ok()?
+    };
+
+    let set_layouts = vec![set_layout];
+
+    // Create pipeline layout
+    let layout = {
+        let create_info = vk::PipelineLayoutCreateInfo::builder().set_layouts(&set_layouts);
+        unsafe { device.create_pipeline_layout(&create_info, None) }.ok()?
+    };
+
+    // Create all used descriptor sets
+    let descriptor_sets = {
+        let create_info = vk::DescriptorSetAllocateInfo::builder()
+            .descriptor_pool(descriptor_pool)
+            .set_layouts(&set_layouts);
+        unsafe { device.allocate_descriptor_sets(&create_info) }.ok()?
+    };
 
     // Create pipeline object
     let pipeline = {
@@ -386,24 +386,95 @@ fn create_compute_pipeline(
             .name(&entry_point_c);
         let create_info = vk::ComputePipelineCreateInfo::builder()
             .stage(*stage_info)
-            .layout(program.layout);
+            .layout(layout);
         let create_infos = [create_info.build()];
         let result =
             unsafe { device.create_compute_pipelines(pipeline_cache, &create_infos, None) }.ok()?;
         result[0]
     };
 
-    Some(Pipeline { handle: pipeline })
+    Some(Pipeline {
+        handle: pipeline,
+        //set_layouts,
+        layout,
+        descriptor_sets,
+    })
 }
 
 fn create_graphics_pipeline(
     device: &PipelineDevice,
     vs: &CompiledShader,
     ps: &CompiledShader,
-    layout: vk::PipelineLayout,
 ) -> Option<Pipeline> {
     let pipeline_cache = device.pipeline_cache;
+    let descriptor_pool = device.descriptor_pool;
     let device = &device.device;
+
+    let shaders = [vs, ps];
+
+    // Collect and merge descriptor set from all stages
+    use std::collections::hash_map::{Entry, HashMap};
+    type MergedSet = HashMap<u32, vk::DescriptorSetLayoutBinding>;
+    type MergedLayout = HashMap<u32, MergedSet>;
+    let mut merged_layout = MergedLayout::new();
+    for shader in shaders {
+        let reflect = &shader.program.reflect_module;
+        let stage = reflect.get_shader_stage().bits();
+        let stage = vk::ShaderStageFlags::from_raw(stage);
+        for s in reflect.enumerate_descriptor_sets(None).unwrap() {
+            let set = match merged_layout.entry(s.set) {
+                Entry::Occupied(o) => o.into_mut(),
+                Entry::Vacant(v) => v.insert(MergedSet::new()),
+            };
+            for b in s.bindings {
+                // TODO ReflectDescriptorType does not match vk::DescriptorType in bit value, also AccelerationStructureNV is in spirv_reflect but not in ash
+                let descriptor_type = vk::DescriptorType::from_raw(b.descriptor_type as i32 - 1);
+                assert!(b.count > 0);
+
+                if let Some(binding) = set.get_mut(&b.binding) {
+                    assert!(descriptor_type == binding.descriptor_type);
+                    assert!(b.count == binding.descriptor_count); // really?
+                    binding.stage_flags |= stage;
+                } else {
+                    let binding = vk::DescriptorSetLayoutBinding::builder()
+                        .binding(b.binding)
+                        .descriptor_type(descriptor_type)
+                        .descriptor_count(b.count)
+                        .stage_flags(stage);
+                    set.insert(b.binding, binding.build());
+                }
+            }
+        }
+    }
+
+    let set_layouts: Vec<vk::DescriptorSetLayout> = merged_layout
+        .into_iter()
+        .map(|(set_index, set_bindings)| {
+            let bindings: Vec<vk::DescriptorSetLayoutBinding> =
+                set_bindings.into_values().collect();
+            let create_info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
+            unsafe { device.create_descriptor_set_layout(&create_info, None) }.unwrap()
+        })
+        .into_iter()
+        .collect();
+
+    // Create pipeline layout
+    let layout = {
+        let create_info = vk::PipelineLayoutCreateInfo::builder().set_layouts(&set_layouts);
+        unsafe { device.create_pipeline_layout(&create_info, None) }.ok()?
+    };
+
+    // Create all used descriptor sets
+    let descriptor_sets = {
+        if set_layouts.len() == 0 {
+            Vec::new()
+        } else {
+            let create_info = vk::DescriptorSetAllocateInfo::builder()
+                .descriptor_pool(descriptor_pool)
+                .set_layouts(&set_layouts);
+            unsafe { device.allocate_descriptor_sets(&create_info) }.ok()?
+        }
+    };
 
     // Stages
     let vs_info = vk::PipelineShaderStageCreateInfo::builder()
@@ -452,7 +523,12 @@ fn create_graphics_pipeline(
         unsafe { device.create_graphics_pipelines(pipeline_cache, &create_infos, None) }.ok()?;
     let pipeline = result[0];
 
-    Some(Pipeline { handle: pipeline })
+    Some(Pipeline {
+        handle: pipeline,
+        //set_layouts,
+        layout,
+        descriptor_sets,
+    })
 }
 
 fn main() {
@@ -693,7 +769,7 @@ fn main() {
     let mesh_gfx_pipeline = {
         let vs = load_shader(&pipeline_device, &mesh_vs_def).unwrap();
         let ps = load_shader(&pipeline_device, &mesh_ps_def).unwrap();
-        create_graphics_pipeline(&pipeline_device, &vs, &ps, vs.program.layout)
+        create_graphics_pipeline(&pipeline_device, &vs, &ps)
     };
 
     while !window.should_close() {
@@ -888,7 +964,7 @@ fn main() {
                         .image_layout(swapchain_image_layout);
                     let image_infos = [image_info.build()];
                     let write = vk::WriteDescriptorSet::builder()
-                        .dst_set(mesh_cs.program.descriptor_sets[0])
+                        .dst_set(pipeline.descriptor_sets[0])
                         .dst_binding(0)
                         .dst_array_element(0)
                         .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
@@ -901,9 +977,9 @@ fn main() {
                     device.cmd_bind_descriptor_sets(
                         cmd_buf,
                         vk::PipelineBindPoint::COMPUTE,
-                        mesh_cs.program.layout,
+                        pipeline.layout,
                         0,
-                        &mesh_cs.program.descriptor_sets,
+                        &pipeline.descriptor_sets,
                         &[],
                     )
                 }
