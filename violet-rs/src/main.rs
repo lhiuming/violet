@@ -171,10 +171,12 @@ pub struct PipelineDevice {
     pipeline_cache: vk::PipelineCache,
 }
 
+use rspirv_reflect;
+
 // AKA shader
 pub struct PipelineProgram {
     pub shader_module: vk::ShaderModule,
-    pub reflect_module: spirv_reflect::ShaderModule,
+    pub reflect_module: rspirv_reflect::Reflection,
     pub entry_point_c: CString,
 }
 
@@ -183,7 +185,6 @@ fn create_pipeline_program(
     binary: &[u32],
     shader_def: &ShaderDefinition,
 ) -> Option<PipelineProgram> {
-    let descriptor_pool = &device.descriptor_pool;
     let device = &device.device;
 
     // Create shader module
@@ -195,9 +196,24 @@ fn create_pipeline_program(
     // Get reflect info
     let bin_char =
         unsafe { std::slice::from_raw_parts(binary.as_ptr() as *const u8, binary.len() * 4) };
-    let reflect_module = spirv_reflect::create_shader_module(bin_char).ok()?;
+    let reflect_module = rspirv_reflect::Reflection::new_from_spirv(bin_char).ok()?;
 
-    let entry_point_c = reflect_module.get_entry_point_name().to_cstring();
+    // Debug: print the reflect content
+    {
+        println!(
+            "Reflection(shader: {}, entry_point: {})",
+            shader_def.virtual_path, shader_def.entry_point
+        );
+        println!(
+            "\tdesciptor_sets: {:?}",
+            reflect_module.get_descriptor_sets()
+        );
+        if let Some(pc) = reflect_module.get_push_constant_range().unwrap_or_default() {
+            println!("\tpush_consants: offset {}, size{}", pc.offset, pc.size);
+        }
+    }
+
+    let entry_point_c = shader_def.entry_point.to_cstring();
 
     Some(PipelineProgram {
         shader_module,
@@ -327,44 +343,43 @@ fn create_compute_pipeline(
     let reflect_module = &program.reflect_module;
 
     // Create all set layouts used in compute
-    let set_layout = {
-        assert!(
-            reflect_module
-                .enumerate_descriptor_sets(Some(&shader_def.entry_point))
-                .unwrap()
-                .len()
-                <= 1
-        );
-        let bindings = reflect_module
-            .enumerate_descriptor_bindings(Some(&shader_def.entry_point))
-            .unwrap()
-            .iter()
-            .map(|b| {
-                assert!(
-                    b.descriptor_type != spirv_reflect::types::ReflectDescriptorType::Undefined
-                );
-                assert!(
-                    b.descriptor_type
-                        != spirv_reflect::types::ReflectDescriptorType::AccelerationStructureNV
-                );
-                vk::DescriptorSetLayoutBinding {
-                    binding: b.binding,
-                    // TODO ReflectDescriptorType does not match vk::DescriptorType in bit value, also AccelerationStructureNV is in spirv_reflect but not in ash
-                    descriptor_type: vk::DescriptorType::from_raw(b.descriptor_type as i32 - 1),
-                    descriptor_count: b.count,
-                    stage_flags: vk::ShaderStageFlags::from_raw(
-                        reflect_module.get_shader_stage().bits(),
-                    ),
-                    p_immutable_samplers: std::ptr::null(),
+    let mut set_layouts: Vec<vk::DescriptorSetLayout> = Vec::new();
+    let reflected_descriptor_sets = reflect_module.get_descriptor_sets().unwrap(); // todo
+    let last_set = reflected_descriptor_sets
+        .keys()
+        .reduce(|last_set, set| if set > last_set { set } else { last_set })
+        .map(|arg| *arg);
+    if let Some(last_set) = last_set {
+        set_layouts.resize((last_set + 1) as usize, vk::DescriptorSetLayout::null());
+    }
+    reflected_descriptor_sets
+        .iter()
+        .for_each(|(set, bindings)| {
+            let bindings_info = bindings
+                .iter()
+                .map(
+                    |(binding, descriptor_info)| vk::DescriptorSetLayoutBinding {
+                        binding: *binding,
+                        descriptor_type: vk::DescriptorType::from_raw(descriptor_info.ty.0 as i32),
+                        descriptor_count: match descriptor_info.binding_count {
+                            rspirv_reflect::BindingCount::One => 1,
+                            rspirv_reflect::BindingCount::StaticSized(size) => size as u32,
+                            rspirv_reflect::BindingCount::Unbounded => todo!(),
+                        },
+                        stage_flags: vk::ShaderStageFlags::COMPUTE,
+                        p_immutable_samplers: std::ptr::null(),
+                    },
+                )
+                .collect::<Vec<vk::DescriptorSetLayoutBinding>>();
+            let create_info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings_info);
+            match unsafe { device.create_descriptor_set_layout(&create_info, None) } {
+                Ok(set_layout) => {
+                    assert!(set_layouts.len() as u32 > *set);
+                    set_layouts[*set as usize] = set_layout;
                 }
-            })
-            .collect::<Vec<vk::DescriptorSetLayoutBinding>>();
-        let create_info =
-            vk::DescriptorSetLayoutCreateInfo::builder().bindings(bindings.as_slice());
-        unsafe { device.create_descriptor_set_layout(&create_info, None) }.ok()?
-    };
-
-    let set_layouts = vec![set_layout];
+                Err(_) => todo!(),
+            }
+        });
 
     // Create pipeline layout
     let layout = {
@@ -414,53 +429,66 @@ fn create_graphics_pipeline(
     let descriptor_pool = device.descriptor_pool;
     let device = &device.device;
 
-    let shaders = [vs, ps];
+    let shaders = [
+        (vk::ShaderStageFlags::VERTEX, vs),
+        (vk::ShaderStageFlags::FRAGMENT, ps),
+    ];
 
     // Collect and merge descriptor set from all stages
     use std::collections::hash_map::{Entry, HashMap};
     type MergedSet = HashMap<u32, vk::DescriptorSetLayoutBinding>;
     type MergedLayout = HashMap<u32, MergedSet>;
     let mut merged_layout = MergedLayout::new();
+    let mut last_set = 0;
     for shader in shaders {
-        let reflect = &shader.program.reflect_module;
-        let stage = reflect.get_shader_stage().bits();
-        let stage = vk::ShaderStageFlags::from_raw(stage);
-        for s in reflect.enumerate_descriptor_sets(None).unwrap() {
-            let set = match merged_layout.entry(s.set) {
+        let stage = shader.0;
+        let reflect = &shader.1.program.reflect_module;
+        for (set, set_bindings) in reflect.get_descriptor_sets().unwrap().iter() {
+            last_set = if *set > last_set { *set } else { last_set };
+            let merged_set = match merged_layout.entry(*set) {
                 Entry::Occupied(o) => o.into_mut(),
                 Entry::Vacant(v) => v.insert(MergedSet::new()),
             };
-            for b in s.bindings {
-                // TODO ReflectDescriptorType does not match vk::DescriptorType in bit value, also AccelerationStructureNV is in spirv_reflect but not in ash
-                let descriptor_type = vk::DescriptorType::from_raw(b.descriptor_type as i32 - 1);
-                assert!(b.count > 0);
-
-                if let Some(binding) = set.get_mut(&b.binding) {
-                    assert!(descriptor_type == binding.descriptor_type);
-                    assert!(b.count == binding.descriptor_count); // really?
-                    binding.stage_flags |= stage;
+            for (binding, descriptor_info) in set_bindings {
+                let descriptor_type = vk::DescriptorType::from_raw(descriptor_info.ty.0 as i32);
+                let count = match descriptor_info.binding_count {
+                    rspirv_reflect::BindingCount::One => 1,
+                    rspirv_reflect::BindingCount::StaticSized(size) => size as u32,
+                    rspirv_reflect::BindingCount::Unbounded => todo!(),
+                };
+                if let Some(binding_info) = merged_set.get_mut(binding) {
+                    assert!(descriptor_type == binding_info.descriptor_type);
+                    assert!(count == binding_info.descriptor_count); // really?
+                    binding_info.stage_flags |= stage;
                 } else {
-                    let binding = vk::DescriptorSetLayoutBinding::builder()
-                        .binding(b.binding)
+                    let binding_info = vk::DescriptorSetLayoutBinding::builder()
+                        .binding(*binding)
                         .descriptor_type(descriptor_type)
-                        .descriptor_count(b.count)
+                        .descriptor_count(count)
                         .stage_flags(stage);
-                    set.insert(b.binding, binding.build());
+                    merged_set.insert(*binding, binding_info.build());
                 }
             }
         }
     }
 
-    let set_layouts: Vec<vk::DescriptorSetLayout> = merged_layout
-        .into_iter()
-        .map(|(set_index, set_bindings)| {
-            let bindings: Vec<vk::DescriptorSetLayoutBinding> =
-                set_bindings.into_values().collect();
+    let mut set_layouts: Vec<vk::DescriptorSetLayout> = Vec::new();
+    if merged_layout.len() > 0 {
+        set_layouts.resize((last_set + 1) as usize, vk::DescriptorSetLayout::null());
+        merged_layout.drain().for_each(|(set, bindings)| {
+            let bindings = bindings
+                .into_values()
+                .collect::<Vec<vk::DescriptorSetLayoutBinding>>();
             let create_info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
-            unsafe { device.create_descriptor_set_layout(&create_info, None) }.unwrap()
-        })
-        .into_iter()
-        .collect();
+            assert!(set_layouts.len() as u32 > set);
+            match unsafe { device.create_descriptor_set_layout(&create_info, None) } {
+                Ok(set_layout) => {
+                    set_layouts[set as usize] = set_layout;
+                }
+                Err(_) => todo!(),
+            }
+        });
+    }
 
     // Create pipeline layout
     let layout = {
