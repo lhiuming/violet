@@ -13,7 +13,9 @@
 					"build"
 				]
 			},
-			"args": []
+			"args": [
+				"../assets/Box/Box.gltf"
+			]
 		},
 	]
 }

@@ -4,6 +4,10 @@ use std::borrow::Cow;
 use std::ffi::{CStr, CString};
 use std::io::Write;
 use std::os::raw::c_void;
+use std::str::FromStr;
+
+use gltf;
+use std::env;
 
 mod window;
 use window::Window;
@@ -531,6 +535,94 @@ fn create_graphics_pipeline(
     })
 }
 
+struct Buffer {
+    buffer: vk::Buffer,
+    memory: vk::DeviceMemory,
+    size: u64,
+    data: *mut c_void,
+    srv: Option<vk::BufferView>,
+}
+
+fn create_buffer(
+    device: &ash::Device,
+    memory_properties: &vk::PhysicalDeviceMemoryProperties,
+    size: u64,
+    usage: vk::BufferUsageFlags,
+    srv_format: vk::Format,
+) -> Option<Buffer> {
+    // Create the vk buffer object
+    // TODO drop buffer if later stage failed
+    let buffer = {
+        let create_info = vk::BufferCreateInfo::builder().size(size).usage(usage);
+        unsafe { device.create_buffer(&create_info, None) }.ok()?
+    };
+
+    // Allocate memory for ths buffer
+    // TODO drop device_memory if later stage failed
+    let memory = {
+        let mem_req = unsafe { device.get_buffer_memory_requirements(buffer) };
+
+        // Pick memory type
+        let memory_type_index = {
+            let mem_type_bits = mem_req.memory_type_bits;
+            // TODO currently treating all buffer like a staging buffer
+            let mem_prop_flags =
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+
+            || -> Option<u32> {
+                for mem_type_index in 0..memory_properties.memory_type_count {
+                    let mem_type = &memory_properties.memory_types[mem_type_index as usize];
+                    if (mem_type_bits & (1 << mem_type_index) != 0)
+                        && ((mem_type.property_flags & mem_prop_flags) == mem_prop_flags)
+                    {
+                        return Some(mem_type_index);
+                    }
+                }
+                println!(
+                    "Vulkan: No compatible device memory type with required properties {:?}",
+                    mem_req
+                );
+                return None;
+            }()?
+        };
+
+        let create_info = vk::MemoryAllocateInfo::builder()
+            .allocation_size(mem_req.size)
+            .memory_type_index(memory_type_index);
+        unsafe { device.allocate_memory(&create_info, None) }.ok()?
+    };
+
+    // Bind
+    let offset: vk::DeviceSize = 0;
+    unsafe { device.bind_buffer_memory(buffer, memory, offset) }.ok()?;
+
+    // Map (staging buffer) persistently
+    // TODO unmap if later stage failed
+    let map_flags = vk::MemoryMapFlags::default(); // dummy parameter
+    let data = unsafe { device.map_memory(memory, offset, size, map_flags) }.ok()?;
+
+    // Create SRV
+    let srv = if srv_format != vk::Format::UNDEFINED {
+        let create_info = vk::BufferViewCreateInfo::builder()
+            .buffer(buffer)
+            .format(srv_format)
+            .offset(0)
+            .range(vk::WHOLE_SIZE);
+        let srv = unsafe { device.create_buffer_view(&create_info, None) }.ok()?;
+        Some(srv)
+    } else {
+        None
+    };
+
+    Some(Buffer {
+        buffer,
+        memory,
+        size,
+        data,
+        srv,
+    })
+}
+
 fn main() {
     println!("Hello, rusty world!");
 
@@ -672,6 +764,10 @@ fn main() {
     assert!(b_support_dynamic_rendering);
     let dynamic_render = khr::DynamicRendering::new(&instance, &device);
 
+    // Get memory properties
+    let physical_device_mem_prop =
+        unsafe { instance.get_physical_device_memory_properties(physical_device) };
+
     // Get quques
     let gfx_queue = unsafe { device.get_device_queue(gfx_queue_family_index, 0) };
 
@@ -770,6 +866,85 @@ fn main() {
         let vs = load_shader(&pipeline_device, &mesh_vs_def).unwrap();
         let ps = load_shader(&pipeline_device, &mesh_ps_def).unwrap();
         create_graphics_pipeline(&pipeline_device, &vs, &ps)
+    };
+
+    // Buffer for whole scene
+    let ib_size = 4 * 1024 * 1024;
+    let vb_size = 4 * 1024 * 1024;
+    let index_buffer = create_buffer(
+        &device,
+        &physical_device_mem_prop,
+        ib_size,
+        vk::BufferUsageFlags::INDEX_BUFFER,
+        vk::Format::UNDEFINED,
+    )
+    .unwrap();
+    let vertex_buffer = create_buffer(
+        &device,
+        &physical_device_mem_prop,
+        vb_size,
+        vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER,
+        vk::Format::R32_UINT,
+    )
+    .unwrap();
+
+    let args: Vec<String> = env::args().collect();
+
+    // Reading mesh model
+    let mut index_count: u32 = 0;
+    if args.len() > 1 {
+        let path_str = &args[1];
+        let path_os = std::ffi::OsString::from_str(path_str).unwrap_or_default();
+        let path = std::path::Path::new(&path_os);
+        match gltf::import(&path) {
+            Err(msg) => println!("{:?}", msg),
+            Ok((document, buffers, _images)) => {
+                if let Some(mesh) = document.meshes().nth(0) {
+                    for primitive in mesh.primitives() {
+                        //println!("{:?}", primitive);
+                        let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
+                        if let Some(indices) = reader.read_indices() {
+                            println!("{:?}", indices);
+                            match indices {
+                                gltf::mesh::util::ReadIndices::U8(_) => todo!(),
+                                gltf::mesh::util::ReadIndices::U16(iter) => {
+                                    let mut offset = 0;
+                                    let ib_u16 = unsafe {
+                                        std::slice::from_raw_parts_mut(
+                                            index_buffer.data as *mut u16,
+                                            index_buffer.size as usize / 2, // 2 bytes per index
+                                        )
+                                    };
+                                    for ind in iter {
+                                        ib_u16[offset] = ind;
+                                        offset += 1;
+                                    }
+                                    index_count = offset as u32;
+                                }
+                                gltf::mesh::util::ReadIndices::U32(_) => todo!(),
+                            }
+                        }
+                        if let Some(iter) = reader.read_positions() {
+                            let mut offset = 0;
+                            let vb_f32 = unsafe {
+                                std::slice::from_raw_parts_mut(
+                                    vertex_buffer.data as *mut f32,
+                                    vertex_buffer.size as usize / 4, // 4 bytes per f32
+                                )
+                            };
+                            for vert_pos in iter {
+                                //println!("{:?}", vert_pos);
+                                vb_f32[offset + 0] = vert_pos[0];
+                                vb_f32[offset + 1] = vert_pos[1];
+                                vb_f32[offset + 2] = vert_pos[2];
+                                offset += 3;
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
     };
 
     while !window.should_close() {
@@ -906,12 +1081,50 @@ fn main() {
                 }
             }
 
+            // Bind shader resources
+            if let Some(vb_srv) = vertex_buffer.srv {
+                assert!(pipeline.descriptor_sets.len() == 1);
+                let buffer_views = [vb_srv];
+                let write = vk::WriteDescriptorSet::builder()
+                    .dst_set(pipeline.descriptor_sets[0])
+                    .dst_binding(0)
+                    .dst_array_element(0)
+                    .descriptor_type(vk::DescriptorType::UNIFORM_TEXEL_BUFFER)
+                    .texel_buffer_view(&buffer_views);
+                let writes = [*write];
+                unsafe {
+                    device.update_descriptor_sets(&writes, &[]);
+                }
+
+                unsafe {
+                    device.cmd_bind_descriptor_sets(
+                        cmd_buf,
+                        vk::PipelineBindPoint::GRAPHICS,
+                        pipeline.layout,
+                        0,
+                        &pipeline.descriptor_sets,
+                        &[],
+                    );
+                }
+            }
+
+            // Bind index buffer
+            unsafe {
+                device.cmd_bind_index_buffer(
+                    cmd_buf,
+                    index_buffer.buffer,
+                    0,
+                    vk::IndexType::UINT16,
+                );
+            }
+
             // Set pipeline and Draw
             unsafe {
                 device.cmd_bind_pipeline(cmd_buf, vk::PipelineBindPoint::GRAPHICS, pipeline.handle);
             }
             unsafe {
-                device.cmd_draw(cmd_buf, 3, 1, 0, 0);
+                //device.cmd_draw(cmd_buf, 3, 1, 0, 0);
+                device.cmd_draw_indexed(cmd_buf, index_count, 1, 0, 0, 0);
             }
         }
 

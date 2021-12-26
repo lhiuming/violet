@@ -11,6 +11,8 @@ ash = { git = "https://github.com/MaikKlein/ash", rev = "f0c743a" }
 # Shader compilation runtime tools
 shaderc = "0.7"
 spirv-reflect = "0.2.3"
+# Mesh assets
+gltf = "0.16"
 
 [dependencies.windows-sys]
 version = "0.28.0"
