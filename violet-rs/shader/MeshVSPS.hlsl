@@ -1,3 +1,17 @@
+// NOTE: SPIRV use columns to represent matrix, while HLSL use rows. HLSL-to-SPIRV codegen does not translate this for us (or translate partially, for some reason, which is confusing).
+// The result is, the actual memory layout is always the opposite of what is in HLSL code. That is, if you tag the matrix as row_major, the data layout in buffer is actually column major, and vice versa.
+// But if you load a matrix from buffer for, e.g., multiplication, the matrix is automatically got transposed and the multiplication order is flipped for you, so the result would 'seems' respecting the intent matrix layout. 
+// You only need to be careful when you are investigating the generated code or raw buffer content.
+// See: https://github.com/Microsoft/DirectXShaderCompiler/blob/master/docs/SPIR-V.rst#vectors-and-matrices
+#pragma pack_matrix(row_major)
+
+struct ViewParams 
+{
+	float4x4 view_proj;
+};
+[[vk::binding(0, 1)]]
+ConstantBuffer<ViewParams> view_params;
+
 Buffer<uint> vertex_buffer;
 
 void vs_main(uint vert_id : SV_VertexID, out float4 hpos : SV_Position) 
@@ -15,7 +29,8 @@ void vs_main(uint vert_id : SV_VertexID, out float4 hpos : SV_Position)
 		asfloat(vertex_buffer[vert_id * 3 + 0]),
 		asfloat(vertex_buffer[vert_id * 3 + 1]),
 		asfloat(vertex_buffer[vert_id * 3 + 2]));
-	hpos = float4(v, 1.0f);
+	float4x4 view_proj = view_params.view_proj;
+	hpos =  mul(view_proj, float4(v, 1.0f));
 #endif
 }
 

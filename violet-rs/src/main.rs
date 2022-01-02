@@ -3,6 +3,7 @@ use ash::vk;
 use std::borrow::Cow;
 use std::ffi::{CStr, CString};
 use std::io::Write;
+use std::mem;
 use std::os::raw::c_void;
 use std::str::FromStr;
 
@@ -182,21 +183,22 @@ pub struct PipelineProgram {
 
 fn create_pipeline_program(
     device: &PipelineDevice,
-    binary: &[u32],
+    binary: &[u8],
     shader_def: &ShaderDefinition,
 ) -> Option<PipelineProgram> {
     let device = &device.device;
 
     // Create shader module
     let shader_module = {
-        let create_info = vk::ShaderModuleCreateInfo::builder().code(binary);
+        assert!(binary.len() & 0x3 == 0);
+        let binary_u32 =
+            unsafe { std::slice::from_raw_parts(binary.as_ptr() as *const u32, binary.len() / 4) };
+        let create_info = vk::ShaderModuleCreateInfo::builder().code(binary_u32);
         unsafe { device.create_shader_module(&create_info, None) }.ok()?
     };
 
     // Get reflect info
-    let bin_char =
-        unsafe { std::slice::from_raw_parts(binary.as_ptr() as *const u8, binary.len() * 4) };
-    let reflect_module = rspirv_reflect::Reflection::new_from_spirv(bin_char).ok()?;
+    let reflect_module = rspirv_reflect::Reflection::new_from_spirv(binary).ok()?;
 
     // Debug: print the reflect content
     {
@@ -221,8 +223,6 @@ fn create_pipeline_program(
         entry_point_c,
     })
 }
-
-use shaderc;
 
 use std::fs::File;
 use std::io::Read;
@@ -261,7 +261,7 @@ impl ShaderDefinition {
 }
 
 pub struct CompiledShader {
-    pub artifact: shaderc::CompilationArtifact,
+    //pub artifact: shaderc::CompilationArtifact,
     pub program: PipelineProgram,
 }
 
@@ -283,44 +283,37 @@ fn load_shader(device: &PipelineDevice, shader_def: &ShaderDefinition) -> Option
         Ok(_) => (),
     };
 
-    let shader_kind = match shader_def.stage {
-        ShaderStage::Compute => shaderc::ShaderKind::Compute,
-        ShaderStage::Vert => shaderc::ShaderKind::Vertex,
-        ShaderStage::Frag => shaderc::ShaderKind::Fragment,
-    };
-
     // Compile the shader
     let file_name_os = path.file_name().unwrap();
     let file_name = file_name_os.to_str().unwrap();
-    let mut compiler = shaderc::Compiler::new().unwrap();
-    let mut options = shaderc::CompileOptions::new().unwrap();
-    options.set_source_language(shaderc::SourceLanguage::HLSL);
-    options.set_auto_bind_uniforms(true);
-    let compile_result = compiler.compile_into_spirv(
-        &text,
-        shader_kind,
+    //options.set_auto_bind_uniforms(true);
+    let target_profile = match shader_def.stage {
+        ShaderStage::Compute => "cs_5_0",
+        ShaderStage::Vert => "vs_5_0",
+        ShaderStage::Frag => "ps_5_0",
+    };
+    let compile_result = hassle_rs::compile_hlsl(
         file_name,
+        &text,
         &shader_def.entry_point,
-        Some(&options),
+        target_profile,
+        &["-spirv"],
+        &[],
     );
-
-    let artifact = match compile_result {
-        Err(why) => {
-            println!("Shaer compiled binay is not valid: {}", why);
+    let compiled_binary = match compile_result {
+        Ok(bin) => bin,
+        Err(reason) => {
+            println!("Shaer compiled binay is not valid: {}", reason);
             return None;
         }
-        Ok(artifact) => artifact,
     };
 
-    let program = match create_pipeline_program(device, artifact.as_binary(), &shader_def) {
+    let program = match create_pipeline_program(device, &compiled_binary, &shader_def) {
         Some(program) => program,
         None => return None,
     };
 
-    Some(CompiledShader {
-        artifact: artifact,
-        program: program,
-    })
+    Some(CompiledShader { program: program })
 }
 
 struct Pipeline {
@@ -651,6 +644,38 @@ fn create_buffer(
     })
 }
 
+// Matrix 4x4 type, row major
+#[repr(C)]
+struct float4x4 {
+    pub val: [f32; 16],
+}
+
+// Assumming positive Z; mapping near-plane to 1, far-plane to 0 (reversed Z).
+// Never flip y (or x).
+fn perspective_projection(
+    near_plane: f32,
+    far_plane: f32,
+    fov_horizontal_radian: f32,
+    width_by_height: f32,
+) -> float4x4 {
+    let ran = (fov_horizontal_radian / 2.0).tan();
+    let width = near_plane * ran;
+    let m00 = near_plane / width;
+    let m11 = near_plane * width_by_height / width;
+    //let m22 = far_plane * near_plane / (far_plane - near_plane);
+    // NOTE: this allow far_plane -> infinite
+    let m22 = near_plane / (1.0 - near_plane / far_plane);
+    let m23 = -near_plane / (far_plane - near_plane);
+    float4x4 {
+        val: [
+            m00, 0.0, 0.0, 0.0, //
+            0.0, m11, 0.0, 0.0, //
+            0.0, 0.0, m22, m23, //
+            0.0, 0.0, 1.0, 0.0, //
+        ],
+    }
+}
+
 fn main() {
     println!("Hello, rusty world!");
 
@@ -697,7 +722,7 @@ fn main() {
         use vk::DebugUtilsMessageSeverityFlagsEXT as Severity;
         use vk::DebugUtilsMessageTypeFlagsEXT as Type;
         let create_info = vk::DebugUtilsMessengerCreateInfoEXT::builder()
-            .message_severity(Severity::ERROR | Severity::WARNING | Severity::INFO)
+            .message_severity(Severity::ERROR | Severity::WARNING)
             .message_type(Type::PERFORMANCE | Type::VALIDATION)
             .pfn_user_callback(Some(vulkan_debug_report_callback));
         debug_report
@@ -975,6 +1000,34 @@ fn main() {
         }
     };
 
+    // View parameter constant buffer
+    #[repr(C)]
+    struct ViewParams {
+        view_proj: float4x4,
+    }
+    let view_params_cb = create_buffer(
+        &device,
+        &physical_device_mem_prop,
+        mem::size_of::<ViewParams>() as u64,
+        vk::BufferUsageFlags::UNIFORM_BUFFER,
+        vk::Format::UNDEFINED,
+    )
+    .unwrap();
+    {
+        let width_by_height = (swapchain.extent.width as f32) / (swapchain.extent.height as f32);
+        let fov = (120.0f32).to_radians();
+        let view_params = ViewParams {
+            view_proj: perspective_projection(0.05, 102400.0, fov, width_by_height),
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                std::ptr::addr_of!(view_params),
+                view_params_cb.data as *mut ViewParams,
+                mem::size_of::<ViewParams>(),
+            );
+        }
+    }
+
     while !window.should_close() {
         window.poll_events();
 
@@ -1111,7 +1164,7 @@ fn main() {
 
             // Bind shader resources
             if let Some(vb_srv) = vertex_buffer.srv {
-                assert!(pipeline.descriptor_sets.len() == 1);
+                // TODO map desriptor binding name
                 let buffer_views = [vb_srv];
                 let write = vk::WriteDescriptorSet::builder()
                     .dst_set(pipeline.descriptor_sets[0])
@@ -1119,7 +1172,17 @@ fn main() {
                     .dst_array_element(0)
                     .descriptor_type(vk::DescriptorType::UNIFORM_TEXEL_BUFFER)
                     .texel_buffer_view(&buffer_views);
-                let writes = [*write];
+                let cb_info = vk::DescriptorBufferInfo::builder()
+                    .buffer(view_params_cb.buffer)
+                    .range(vk::WHOLE_SIZE);
+                let cb_infos = [*cb_info];
+                let write_cb = vk::WriteDescriptorSet::builder()
+                    .dst_set(pipeline.descriptor_sets[1])
+                    .dst_binding(0)
+                    .dst_array_element(0)
+                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                    .buffer_info(&cb_infos);
+                let writes = [*write, *write_cb];
                 unsafe {
                     device.update_descriptor_sets(&writes, &[]);
                 }

@@ -9,7 +9,7 @@ edition = "2021"
 # Using ash from source, to get newest support (for vulkan dynamic_rendering)
 ash = { git = "https://github.com/MaikKlein/ash", rev = "f0c743a" }
 # Shader compilation runtime tools
-shaderc = "0.7"
+hassle-rs = "0.5.4"
 rspirv-reflect = "0.6.0"
 # Mesh assets
 gltf = "0.16"
