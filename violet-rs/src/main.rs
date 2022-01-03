@@ -1,5 +1,5 @@
 use ash::extensions::{ext, khr};
-use ash::vk;
+use ash::{vk, RawPtr};
 use std::borrow::Cow;
 use std::ffi::{CStr, CString};
 use std::io::Write;
@@ -644,10 +644,96 @@ fn create_buffer(
     })
 }
 
+#[repr(C)]
+struct float3 {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+impl float3 {
+    pub fn new(x: f32, y: f32, z: f32) -> float3 {
+        float3 { x, y, z }
+    }
+
+    pub fn cross(a: &float3, b: &float3) -> float3 {
+        float3 {
+            x: a.y * b.z - a.z * b.y,
+            y: a.z * b.x - a.x * b.z,
+            z: a.x * b.y - a.y * b.x,
+        }
+    }
+
+    pub fn dot(a: &float3, b: &float3) -> f32 {
+        a.x * b.x + a.y * b.y + a.z * b.z
+    }
+}
+
+#[repr(C)]
+struct float4 {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+    pub w: f32,
+}
+
+impl float4 {
+    pub fn new(x: f32, y: f32, z: f32, w: f32) -> float4 {
+        float4 { x, y, z, w }
+    }
+    pub fn from3(xyz: &float3, w: f32) -> float4 {
+        float4 {
+            x: xyz.x,
+            y: xyz.y,
+            z: xyz.z,
+            w: w,
+        }
+    }
+}
+
 // Matrix 4x4 type, row major
 #[repr(C)]
 struct float4x4 {
-    pub val: [f32; 16],
+    pub rows: [float4; 4],
+}
+
+impl float4x4 {
+    pub fn from_rows(rows: [float4; 4]) -> float4x4 {
+        float4x4 { rows }
+    }
+
+    pub fn from_data(data: &[f32; 16]) -> float4x4 {
+        unsafe {
+            let mut ret: float4x4 = mem::MaybeUninit::uninit().assume_init();
+            let src = data.as_ptr();
+            let dst = ret.rows.as_mut_ptr() as *mut f32;
+            dst.copy_from_nonoverlapping(src, 16);
+            ret
+        }
+    }
+
+    pub fn mul(lhs: &float4x4, rhs: &float4x4) -> float4x4 {
+        unsafe {
+            let mut ret: float4x4 = mem::MaybeUninit::uninit().assume_init();
+            let dst_ptr = ret.rows.as_mut_ptr() as *mut f32;
+            let dst = std::slice::from_raw_parts_mut(dst_ptr, 16);
+            let rhs_ptr = rhs.rows.as_ptr() as *const f32;
+            let rhs = std::slice::from_raw_parts(rhs_ptr, 16);
+            let mut dst_ind = 0;
+            for i in 0..4 {
+                let lhs_row = &lhs.rows[i];
+                for j in 0..4 {
+                    // lhr.row[i] dot rhs.col[j]
+                    dst[dst_ind] = lhs_row.x * rhs[j + 0]
+                        + lhs_row.y * rhs[j + 4]
+                        + lhs_row.z * rhs[j + 8]
+                        + lhs_row.w * rhs[j + 12];
+                    dst_ind += 1;
+                }
+            }
+            ret
+        }
+    }
 }
 
 // Assumming positive Z; mapping near-plane to 1, far-plane to 0 (reversed Z).
@@ -666,14 +752,12 @@ fn perspective_projection(
     // NOTE: this allow far_plane -> infinite
     let m22 = near_plane / (1.0 - near_plane / far_plane);
     let m23 = -near_plane / (far_plane - near_plane);
-    float4x4 {
-        val: [
-            m00, 0.0, 0.0, 0.0, //
-            0.0, m11, 0.0, 0.0, //
-            0.0, 0.0, m22, m23, //
-            0.0, 0.0, 1.0, 0.0, //
-        ],
-    }
+    float4x4::from_data(&[
+        m00, 0.0, 0.0, 0.0, //
+        0.0, m11, 0.0, 0.0, //
+        0.0, 0.0, m22, m23, //
+        0.0, 0.0, 1.0, 0.0, //
+    ])
 }
 
 fn main() {
@@ -1013,23 +1097,46 @@ fn main() {
         vk::Format::UNDEFINED,
     )
     .unwrap();
-    {
-        let width_by_height = (swapchain.extent.width as f32) / (swapchain.extent.height as f32);
-        let fov = (120.0f32).to_radians();
-        let view_params = ViewParams {
-            view_proj: perspective_projection(0.05, 102400.0, fov, width_by_height),
-        };
-        unsafe {
-            std::ptr::copy_nonoverlapping(
-                std::ptr::addr_of!(view_params),
-                view_params_cb.data as *mut ViewParams,
-                mem::size_of::<ViewParams>(),
-            );
-        }
-    }
+
+    // Init camera
+    // NOTE:
+    //   - Using a right-hand coordinate in both view and world space;
+    //   - View/camera space: x-axis is right, y-axis is down (, z-axis is forward);
+    //   - World/background space: camera yz-plane is kept paralled to world z-axis (up/anti-gravity direction);
+    let up_dir = float3::new(0.0, 0.0, 1.0);
+    let mut camera_dir = float3::new(0.0, 1.0, 0.0);
+    let mut camera_pos = float3::new(0.0, -5.0, 2.0);
 
     while !window.should_close() {
         window.poll_events();
+
+        // Update camera
+        let view_proj: float4x4;
+        {
+            // World-to-view transform
+            let z_forward = &camera_dir;
+            let x_right = float3::cross(z_forward, &up_dir);
+            let y_down = float3::cross(z_forward, &x_right);
+            let pos_comp = float3 {
+                x: -float3::dot(&x_right, &camera_pos),
+                y: -float3::dot(&y_down, &camera_pos),
+                z: -float3::dot(&z_forward, &camera_pos),
+            };
+            let view = float4x4::from_rows([
+                float4::from3(&x_right, pos_comp.x),
+                float4::from3(&y_down, pos_comp.y),
+                float4::from3(&z_forward, pos_comp.z),
+                float4::new(0.0, 0.0, 0.0, 1.0),
+            ]);
+
+            // Perspective proj
+            let width_by_height =
+                (swapchain.extent.width as f32) / (swapchain.extent.height as f32);
+            let fov = (120.0f32).to_radians();
+            let proj = perspective_projection(0.05, 102400.0, fov, width_by_height);
+
+            view_proj = float4x4::mul(&proj, &view);
+        }
 
         // wait idle (for now)
         unsafe {
@@ -1037,6 +1144,19 @@ fn main() {
                 .reset_command_buffer(cmd_buf, vk::CommandBufferResetFlags::empty())
                 .expect("Vulkan: Reset command buffer failed???");
         };
+
+        // Update GPU ViewParams const buffer
+        {
+            let view_params = ViewParams { view_proj };
+
+            unsafe {
+                std::ptr::copy_nonoverlapping(
+                    std::ptr::addr_of!(view_params),
+                    view_params_cb.data as *mut ViewParams,
+                    mem::size_of::<ViewParams>(),
+                );
+            }
+        }
 
         // Resize swapchain
         let surface_size = surface.query_size(&surface_entry, &physical_device);
@@ -1141,9 +1261,9 @@ fn main() {
             {
                 let viewport = vk::Viewport {
                     x: 0.0,
-                    y: swapchain.extent.height as f32,
+                    y: 0.0,
                     width: swapchain.extent.width as f32,
-                    height: -(swapchain.extent.height as f32),
+                    height: swapchain.extent.height as f32,
                     min_depth: 0.0,
                     max_depth: 1.0,
                 };

@@ -1,8 +1,10 @@
+use std::cell::RefCell;
 use std::os::windows::prelude::OsStrExt;
+use std::rc::Rc;
 use std::{ffi, mem, ptr};
 use windows_sys::Win32::{
-    Foundation::*, System::Diagnostics::Debug::*, System::LibraryLoader::*, System::Memory::*,
-    UI::Input::KeyboardAndMouse::*, UI::WindowsAndMessaging::*,
+    Foundation::*, System::LibraryLoader::*, System::Memory::*, UI::Input::KeyboardAndMouse::*,
+    UI::WindowsAndMessaging::*,
 };
 
 // TODO this process shoule be run in compile time, and return a const u16 array; but currently this is hard to write in Rust (might need to use proc_macro)
@@ -17,6 +19,8 @@ static K_WINDOW_CLASS_NAME: &str = "Violet";
 static K_WINDOW_INSTANCE_PROP_NAME: &str = "VioletWindowInstance";
 static K_MSGBOX_ERROR_CAPTION: &str = "Error";
 
+static mut S_MESSAGE_HANDLER: Option<Rc<RefCell<MessageHandler>>> = None;
+
 fn report_last_error() {
     unsafe {
         // Get message
@@ -27,6 +31,7 @@ fn report_last_error() {
         }
         assert!(last_err != 0);
 
+        use windows_sys::Win32::System::Diagnostics::Debug::*;
         let mut lp_msg_buf = ptr::null_mut();
         let fmt_result = FormatMessageW(
             FORMAT_MESSAGE_ALLOCATE_BUFFER
@@ -56,23 +61,6 @@ fn report_last_error() {
         );
 
         LocalFree(lp_msg_buf as isize);
-    }
-}
-
-unsafe extern "system" fn wnd_callback(
-    hwnd: HWND,
-    msg: u32,
-    w_param: WPARAM,
-    l_param: LPARAM,
-) -> LRESULT {
-    match msg {
-        WM_CLOSE => {
-            let mut cstr_prop_name = to_cstr_wide(K_WINDOW_INSTANCE_PROP_NAME);
-            let window: *mut Window = GetPropW(hwnd, cstr_prop_name.as_mut_ptr()) as _;
-            (&mut *window).should_close = true;
-            0
-        }
-        _ => DefWindowProcW(hwnd, msg, w_param, l_param),
     }
 }
 
@@ -115,14 +103,101 @@ fn ensure_register_window_class() {
     }
 }
 
+struct MessageHandler {
+    pub hwnd: HWND, // Copied this from Window, for validation porpose
+    pub should_close: bool,
+    pub latest_mouse_pos: (i16, i16), // most up-to-dated mouse pos
+    pub prev_drag_mouse_pos: Option<(i16, i16)>, // last frame mouse drag with right-button down
+    pub curr_drag_mouse_pos: Option<(i16, i16)>, // current frame mouse drag with right-button down (collapsed to last position polled)
+}
+
+impl MessageHandler {
+    pub fn new_frame(&mut self) {
+        self.prev_drag_mouse_pos = self.curr_drag_mouse_pos;
+        self.curr_drag_mouse_pos = None;
+    }
+}
+
+unsafe extern "system" fn wnd_callback(
+    hwnd: HWND,
+    msg: u32,
+    w_param: WPARAM,
+    l_param: LPARAM,
+) -> LRESULT {
+    let handler = match &S_MESSAGE_HANDLER {
+        Some(handler) => handler,
+        None => {
+            //println!("Win32 message: no handler");
+            return DefWindowProcW(hwnd, msg, w_param, l_param);
+        }
+    };
+
+    assert!(hwnd == handler.borrow().hwnd);
+
+    let decode_cursor_pos = || -> (i16, i16) {
+        assert!(mem::size_of_val(&l_param) >= 4); // at least contain 2 short integers
+        let x = (l_param & 0xFFFF) as i16;
+        let y = ((l_param >> 16) & 0xFFFF) as i16;
+        (x, y)
+    };
+
+    match msg {
+        WM_CLOSE => {
+            handler.borrow_mut().should_close = true;
+            0
+        }
+        WM_RBUTTONDOWN => {
+            SetCapture(hwnd);
+            let (x, y) = decode_cursor_pos();
+            {
+                let mut handler = handler.borrow_mut();
+                handler.latest_mouse_pos = (x, y);
+                handler.curr_drag_mouse_pos = Some((x, y));
+            }
+            println!("Win32 message: right button down");
+            0
+        }
+        WM_RBUTTONUP => {
+            ReleaseCapture();
+            {
+                let mut handler = handler.borrow_mut();
+                handler.latest_mouse_pos = decode_cursor_pos();
+                handler.curr_drag_mouse_pos = None;
+            }
+            println!("Win32 message: right button up");
+            0
+        }
+        WM_MOUSEMOVE => {
+            let rb_down = (w_param as u32) == MK_RBUTTON;
+            let (x, y) = decode_cursor_pos();
+            {
+                let mut handler = handler.borrow_mut();
+                handler.latest_mouse_pos = (x, y);
+                if rb_down {
+                    handler.curr_drag_mouse_pos = Some((x, y));
+                }
+            }
+            println!(
+                "Win32 message: mouse move x {}, y {}, right button down {}",
+                x, y, rb_down
+            );
+            0
+        }
+        _ => {
+            //println!("Win32 message: unhandled");
+            DefWindowProcW(hwnd, msg, w_param, l_param)
+        }
+    }
+}
+
 pub struct Window {
     system_handle: u64,
-    should_close: bool,
+    message_handler: Rc<RefCell<MessageHandler>>,
 }
 
 impl Window {
     // General constructor
-    pub fn new(init_width: u32, init_height: u32, title: &str) -> std::boxed::Box<Window> {
+    pub fn new(init_width: u32, init_height: u32, title: &str) -> Box<Window> {
         // Check if we have reigster window class (wnd_callback)
         ensure_register_window_class();
 
@@ -134,7 +209,23 @@ impl Window {
         let mut style: u32 = WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
         style |= WS_SYSMENU | WS_MINIMIZEBOX; // ?
         style |= WS_CAPTION | WS_MAXIMIZEBOX | WS_THICKFRAME; // Title and resizable frame
+        let ex_style = WS_EX_APPWINDOW;
         let hwnd = unsafe {
+            // Found proper windows size to produce desired surface size
+            let mut rect = RECT {
+                left: 0,
+                top: 0,
+                right: init_width as i32,
+                bottom: init_height as i32,
+            };
+            let cal_size = AdjustWindowRectEx(std::ptr::addr_of_mut!(rect), style, 0, ex_style);
+            if cal_size == 0 {
+                report_last_error();
+            }
+
+            let win_width = rect.right - rect.left;
+            let win_height = rect.bottom - rect.top;
+
             let hmodule = GetModuleHandleW(std::ptr::null_mut());
             CreateWindowExW(
                 WS_EX_APPWINDOW,
@@ -143,8 +234,8 @@ impl Window {
                 style,
                 CW_USEDEFAULT,
                 CW_USEDEFAULT,
-                init_width as i32,
-                init_height as i32,
+                win_width,
+                win_height,
                 0,
                 0,
                 hmodule,
@@ -156,12 +247,21 @@ impl Window {
             report_last_error();
         }
 
+        // A ref-count message handler, to pass message from global call back to this window instance
+        let message_handler = Rc::new(RefCell::new(MessageHandler {
+            hwnd,
+            should_close: false,
+            latest_mouse_pos: (0, 0),
+            prev_drag_mouse_pos: None,
+            curr_drag_mouse_pos: None,
+        }));
+
         // Allocate the window object first, because this pointer is passed to windows system via SetPropW
         let result = {
             std::assert!(mem::size_of_val(&hwnd) >= mem::size_of::<HWND>());
             let temp = Window {
                 system_handle: hwnd as u64,
-                should_close: false,
+                message_handler: message_handler.clone(),
             };
             Box::new(temp)
         };
@@ -201,10 +301,18 @@ impl Window {
             }
         }
 
+        // Register message handler to global state
+        unsafe {
+            S_MESSAGE_HANDLER = Some(message_handler);
+        }
+
         result
     }
 
     pub fn poll_events(&self) {
+        // Cache last frame info
+        self.message_handler.borrow_mut().new_frame();
+
         unsafe {
             let mut msg: MSG = mem::zeroed();
             while PeekMessageW(
@@ -231,6 +339,6 @@ impl Window {
     }
 
     pub fn should_close(&self) -> bool {
-        self.should_close
+        self.message_handler.borrow().should_close
     }
 }
