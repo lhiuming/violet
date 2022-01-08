@@ -1,5 +1,5 @@
 use ash::extensions::{ext, khr};
-use ash::{vk, RawPtr};
+use ash::vk;
 use std::borrow::Cow;
 use std::ffi::{CStr, CString};
 use std::io::Write;
@@ -645,6 +645,7 @@ fn create_buffer(
 }
 
 #[repr(C)]
+#[derive(Debug)]
 struct float3 {
     pub x: f32,
     pub y: f32,
@@ -654,6 +655,10 @@ struct float3 {
 impl float3 {
     pub fn new(x: f32, y: f32, z: f32) -> float3 {
         float3 { x, y, z }
+    }
+
+    pub fn add_vector(a: &float3, b: &float3) -> float3 {
+        float3::new(a.x + b.x, a.y + b.y, a.z + b.z)
     }
 
     pub fn cross(a: &float3, b: &float3) -> float3 {
@@ -666,6 +671,43 @@ impl float3 {
 
     pub fn dot(a: &float3, b: &float3) -> f32 {
         a.x * b.x + a.y * b.y + a.z * b.z
+    }
+
+    pub fn mul_scalar(a: &float3, b: &f32) -> float3 {
+        float3::new(a.x * b, a.y * b, a.z * b)
+    }
+
+    pub fn mul_vector(a: &float3, b: &float3) -> float3 {
+        float3::new(a.x * b.x, a.y * b.y, a.z * b.z)
+    }
+
+    pub fn normalize(a: &float3) -> float3 {
+        float3::mul_scalar(a, &(1.0 / a.len()))
+    }
+
+    pub fn len(&self) -> f32 {
+        float3::dot(self, self).sqrt()
+    }
+}
+
+// TODO use something like impl_ops
+impl std::ops::AddAssign<float3> for float3 {
+    fn add_assign(&mut self, rhs: float3) {
+        *self = float3::add_vector(self, &rhs)
+    }
+}
+impl std::ops::Add<float3> for float3 {
+    type Output = float3;
+
+    fn add(self, rhs: float3) -> Self::Output {
+        float3::add_vector(&self, &rhs)
+    }
+}
+impl std::ops::Mul<&float3> for f32 {
+    type Output = float3;
+
+    fn mul(self, rhs: &float3) -> Self::Output {
+        float3::mul_scalar(rhs, &self)
     }
 }
 
@@ -1105,34 +1147,89 @@ fn main() {
     //   - World/background space: camera yz-plane is kept paralled to world z-axis (up/anti-gravity direction);
     let up_dir = float3::new(0.0, 0.0, 1.0);
     let mut camera_dir = float3::new(0.0, 1.0, 0.0);
+    let mut camera_right = float3::new(1.0, 0.0, 0.0); // derived
+    let mut camera_down = float3::new(0.0, 0.0, -1.0); // derived
     let mut camera_pos = float3::new(0.0, -5.0, 2.0);
+    let mut prev_time = std::time::Instant::now();
 
     while !window.should_close() {
         window.poll_events();
 
+        // Time udpate
+        let delta_seconds;
+        {
+            let curr_time = std::time::Instant::now();
+            let delta_time = curr_time.duration_since(prev_time);
+            prev_time = curr_time;
+            delta_seconds = delta_time.as_secs_f32();
+            //println!("Violet: frame delta time: {}ms", delta_seconds / 1000.0);
+        }
+
         // Update camera
         let view_proj: float4x4;
         {
+            let fov = (90.0f32).to_radians(); // horizontal
+
+            // Camera navifation
+            {
+                // Move (by WASD+EQ)
+                let (forward, right, up) = window.nav_dir();
+                let speed = 2.0; // meter per secs
+                let mov = speed * delta_seconds;
+                camera_pos += (forward * mov) * &camera_dir;
+                camera_pos += (right * mov) * &camera_right;
+                camera_pos += (-up * mov) * &camera_down;
+
+                // Rotate (by mouse darg with right button pressed)
+                if let Some((beg_x, beg_y, end_x, end_y)) = window.effective_darg() {
+                    println!("Dragging: {}, {} -> {}, {}", beg_x, beg_y, end_x, end_y);
+
+                    let w = swapchain.extent.width as f32;
+                    let h = swapchain.extent.height as f32;
+                    let right_x = (fov * 0.5).tan() * 1.0;
+                    let down_y = right_x * h / w;
+                    let screen_pos_to_world_dir = |x: i16, y: i16| -> float3 {
+                        let x = right_x * ((x as f32) / w * 2.0 - 1.0);
+                        let y = down_y * ((y as f32) / h * 2.0 - 1.0);
+                        let dir = float3::normalize(&float3::new(x, y, 1.0)); // in camera space
+                        dir.x * &camera_right + dir.y * &camera_down + dir.z * &camera_dir
+                    };
+
+                    let from_dir = screen_pos_to_world_dir(beg_x, beg_y);
+                    let to_dir = screen_pos_to_world_dir(end_x, end_y);
+                    let rot_axis = float3::cross(&from_dir, &to_dir);
+                    if rot_axis.len() > 0.0f32 {
+                        let rot_axis = float3::normalize(&rot_axis);
+                        let rot_cos = float3::dot(&from_dir, &to_dir);
+                        let rot_sin = (1.0 - rot_cos * rot_cos).sqrt();
+                        println!("Rot axis: {:?}, cos {}, sin {}", rot_axis, rot_cos, rot_sin);
+                        camera_dir = rot_cos * &camera_dir
+                            + rot_sin * &float3::cross(&rot_axis, &camera_dir)
+                            + (1.0 - rot_cos) * float3::dot(&rot_axis, &camera_dir) * &rot_axis;
+                        camera_dir = float3::normalize(&camera_dir); // avoid precision loss
+                        camera_right = float3::cross(&camera_dir, &up_dir);
+                        camera_down = float3::cross(&camera_dir, &camera_right);
+                        println!("camera dir : {:?}", camera_dir);
+                    }
+                }
+            }
+
             // World-to-view transform
-            let z_forward = &camera_dir;
-            let x_right = float3::cross(z_forward, &up_dir);
-            let y_down = float3::cross(z_forward, &x_right);
             let pos_comp = float3 {
-                x: -float3::dot(&x_right, &camera_pos),
-                y: -float3::dot(&y_down, &camera_pos),
-                z: -float3::dot(&z_forward, &camera_pos),
+                x: -float3::dot(&camera_right, &camera_pos),
+                y: -float3::dot(&camera_down, &camera_pos),
+                z: -float3::dot(&camera_dir, &camera_pos),
             };
             let view = float4x4::from_rows([
-                float4::from3(&x_right, pos_comp.x),
-                float4::from3(&y_down, pos_comp.y),
-                float4::from3(&z_forward, pos_comp.z),
+                float4::from3(&camera_right, pos_comp.x),
+                float4::from3(&camera_down, pos_comp.y),
+                float4::from3(&camera_dir, pos_comp.z),
                 float4::new(0.0, 0.0, 0.0, 1.0),
             ]);
 
             // Perspective proj
             let width_by_height =
                 (swapchain.extent.width as f32) / (swapchain.extent.height as f32);
-            let fov = (120.0f32).to_radians();
             let proj = perspective_projection(0.05, 102400.0, fov, width_by_height);
 
             view_proj = float4x4::mul(&proj, &view);

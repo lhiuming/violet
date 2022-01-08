@@ -105,16 +105,46 @@ fn ensure_register_window_class() {
 
 struct MessageHandler {
     pub hwnd: HWND, // Copied this from Window, for validation porpose
+    // TODO move these kind of logic to app side
     pub should_close: bool,
-    pub latest_mouse_pos: (i16, i16), // most up-to-dated mouse pos
-    pub prev_drag_mouse_pos: Option<(i16, i16)>, // last frame mouse drag with right-button down
-    pub curr_drag_mouse_pos: Option<(i16, i16)>, // current frame mouse drag with right-button down (collapsed to last position polled)
+    pub mouse_pos: (i16, i16),    // most up-to-dated mouse pos
+    pub mouse_right_button: bool, // most up-to-dated right-button down
+    pub curr_drag_beg_mouse_pos: Option<(i16, i16)>, // current frame init mouse pos with right-button down
+    pub curr_drag_end_mouse_pos: Option<(i16, i16)>, // current frame last mouse pos with right-button down
+    pub push_W: bool,
+    pub push_A: bool,
+    pub push_S: bool,
+    pub push_D: bool,
+    pub push_Q: bool,
+    pub push_E: bool,
 }
 
 impl MessageHandler {
+    pub fn new(hwnd: HWND) -> MessageHandler {
+        MessageHandler {
+            hwnd,
+            should_close: false,
+            mouse_pos: (0, 0),
+            mouse_right_button: false,
+            curr_drag_beg_mouse_pos: None,
+            curr_drag_end_mouse_pos: None,
+            push_W: false,
+            push_A: false,
+            push_S: false,
+            push_D: false,
+            push_E: false,
+            push_Q: false,
+        }
+    }
+
     pub fn new_frame(&mut self) {
-        self.prev_drag_mouse_pos = self.curr_drag_mouse_pos;
-        self.curr_drag_mouse_pos = None;
+        // Continue last frame unrelease drag
+        self.curr_drag_beg_mouse_pos = if self.mouse_right_button {
+            Some(self.mouse_pos)
+        } else {
+            None
+        };
+        self.curr_drag_end_mouse_pos = None;
     }
 }
 
@@ -151,20 +181,25 @@ unsafe extern "system" fn wnd_callback(
             let (x, y) = decode_cursor_pos();
             {
                 let mut handler = handler.borrow_mut();
-                handler.latest_mouse_pos = (x, y);
-                handler.curr_drag_mouse_pos = Some((x, y));
+                handler.mouse_pos = (x, y);
+                handler.mouse_right_button = true;
+                if handler.curr_drag_beg_mouse_pos.is_none() {
+                    handler.curr_drag_beg_mouse_pos = Some((x, y));
+                }
             }
-            println!("Win32 message: right button down");
+            //println!("Win32 message: right button down");
             0
         }
         WM_RBUTTONUP => {
             ReleaseCapture();
+            let (x, y) = decode_cursor_pos();
             {
                 let mut handler = handler.borrow_mut();
-                handler.latest_mouse_pos = decode_cursor_pos();
-                handler.curr_drag_mouse_pos = None;
+                handler.mouse_pos = (x, y);
+                handler.mouse_right_button = false;
+                handler.curr_drag_end_mouse_pos = Some((x, y));
             }
-            println!("Win32 message: right button up");
+            //println!("Win32 message: right button up");
             0
         }
         WM_MOUSEMOVE => {
@@ -172,15 +207,64 @@ unsafe extern "system" fn wnd_callback(
             let (x, y) = decode_cursor_pos();
             {
                 let mut handler = handler.borrow_mut();
-                handler.latest_mouse_pos = (x, y);
+                handler.mouse_pos = (x, y);
                 if rb_down {
-                    handler.curr_drag_mouse_pos = Some((x, y));
+                    handler.curr_drag_end_mouse_pos = Some((x, y));
                 }
             }
+            /*
             println!(
                 "Win32 message: mouse move x {}, y {}, right button down {}",
                 x, y, rb_down
             );
+            */
+            0
+        }
+        WM_KEYDOWN => {
+            let vk_code = w_param as u16;
+            match vk_code {
+                VK_W => handler.borrow_mut().push_W = true,
+                VK_A => handler.borrow_mut().push_A = true,
+                VK_S => handler.borrow_mut().push_S = true,
+                VK_D => handler.borrow_mut().push_D = true,
+                VK_E => handler.borrow_mut().push_E = true,
+                VK_Q => handler.borrow_mut().push_Q = true,
+                _ => {
+                    //println!("Win32 message: unhandle key down {}", vk_code);
+                    return DefWindowProcW(hwnd, msg, w_param, l_param);
+                }
+            }
+            /*
+            let repeat_count = (l_param & 0xFFFF) as u16;
+            let is_prev_down = ((l_param >> 30) & 0x1) > 0;
+            println!(
+                "Win32 message: key W is down {}, count {}, holding {}",
+                vk_code, repeat_count, is_prev_down
+            );
+            */
+            0
+        }
+        WM_KEYUP => {
+            let vk_code = w_param as u16;
+            match vk_code {
+                VK_W => handler.borrow_mut().push_W = false,
+                VK_A => handler.borrow_mut().push_A = false,
+                VK_S => handler.borrow_mut().push_S = false,
+                VK_D => handler.borrow_mut().push_D = false,
+                VK_E => handler.borrow_mut().push_E = false,
+                VK_Q => handler.borrow_mut().push_Q = false,
+                _ => {
+                    //println!("Win32 message: unhandle key up {}", vk_code);
+                    return DefWindowProcW(hwnd, msg, w_param, l_param);
+                }
+            }
+            /*
+            let repeat_count = (l_param & 0xFFFF) as u16;
+            println!(
+                "Win32 message: key W is up {}, count {}",
+                vk_code, repeat_count
+            );
+            */
             0
         }
         _ => {
@@ -248,13 +332,7 @@ impl Window {
         }
 
         // A ref-count message handler, to pass message from global call back to this window instance
-        let message_handler = Rc::new(RefCell::new(MessageHandler {
-            hwnd,
-            should_close: false,
-            latest_mouse_pos: (0, 0),
-            prev_drag_mouse_pos: None,
-            curr_drag_mouse_pos: None,
-        }));
+        let message_handler = Rc::new(RefCell::new(MessageHandler::new(hwnd)));
 
         // Allocate the window object first, because this pointer is passed to windows system via SetPropW
         let result = {
@@ -340,5 +418,40 @@ impl Window {
 
     pub fn should_close(&self) -> bool {
         self.message_handler.borrow().should_close
+    }
+
+    // Forward, Right, Up
+    pub fn nav_dir(&self) -> (f32, f32, f32) {
+        let handler = self.message_handler.borrow();
+        let make_dir = |positive, negative| -> f32 {
+            let mut ret = 0.0;
+            if positive {
+                ret += 1.0;
+            }
+            if negative {
+                ret -= 1.0;
+            }
+            ret
+        };
+        (
+            make_dir(handler.push_W, handler.push_S),
+            make_dir(handler.push_D, handler.push_A),
+            make_dir(handler.push_E, handler.push_Q),
+        )
+    }
+
+    // Drag start pos, darg end pos
+    pub fn effective_darg(&self) -> Option<(i16, i16, i16, i16)> {
+        let handler = self.message_handler.borrow();
+        if let Some((end_x, end_y)) = handler.curr_drag_end_mouse_pos {
+            if let Some((beg_x, beg_y)) = handler.curr_drag_beg_mouse_pos {
+                Some((beg_x, beg_y, end_x, end_y))
+            } else {
+                println!("Window: has end drag pos, but no beg drag pos ?!");
+                Some((end_x, end_y, end_x, end_y))
+            }
+        } else {
+            None
+        }
     }
 }
