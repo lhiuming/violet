@@ -1170,7 +1170,7 @@ fn main() {
         {
             let fov = (90.0f32).to_radians(); // horizontal
 
-            // Camera navifation
+            // Camera navigation
             {
                 // Move (by WASD+EQ)
                 let (forward, right, up) = window.nav_dir();
@@ -1182,8 +1182,6 @@ fn main() {
 
                 // Rotate (by mouse darg with right button pressed)
                 if let Some((beg_x, beg_y, end_x, end_y)) = window.effective_darg() {
-                    println!("Dragging: {}, {} -> {}, {}", beg_x, beg_y, end_x, end_y);
-
                     let w = swapchain.extent.width as f32;
                     let h = swapchain.extent.height as f32;
                     let right_x = (fov * 0.5).tan() * 1.0;
@@ -1202,14 +1200,12 @@ fn main() {
                         let rot_axis = float3::normalize(&rot_axis);
                         let rot_cos = float3::dot(&from_dir, &to_dir);
                         let rot_sin = (1.0 - rot_cos * rot_cos).sqrt();
-                        println!("Rot axis: {:?}, cos {}, sin {}", rot_axis, rot_cos, rot_sin);
                         camera_dir = rot_cos * &camera_dir
                             + rot_sin * &float3::cross(&rot_axis, &camera_dir)
                             + (1.0 - rot_cos) * float3::dot(&rot_axis, &camera_dir) * &rot_axis;
                         camera_dir = float3::normalize(&camera_dir); // avoid precision loss
-                        camera_right = float3::cross(&camera_dir, &up_dir);
-                        camera_down = float3::cross(&camera_dir, &camera_right);
-                        println!("camera dir : {:?}", camera_dir);
+                        camera_right = float3::normalize(&float3::cross(&camera_dir, &up_dir));
+                        camera_down = float3::normalize(&float3::cross(&camera_dir, &camera_right));
                     }
                 }
             }
