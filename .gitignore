@@ -1,1 +1,2 @@
-# Project generated files
+/target
+/Cargo.lock

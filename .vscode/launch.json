@@ -6,16 +6,17 @@
 	"configurations": [
 		{
 			"name": "Debug",
-			"type": "lldb",
+			"type": "cppvsdbg",
 			"request": "launch",
-			"cargo": {
-				"args": [
-					"build"
-				]
-			},
+			"preLaunchTask": "rust: cargo build",
+			"program": "${workspaceFolder}/target/debug/violet.exe",
 			"args": [
-				"../assets/Box/Box.gltf"
-			]
-		},
+				"./assets/Box/Box.gltf"
+			],
+			"stopAtEntry": false,
+			"cwd": "${workspaceFolder}",
+			"environment": [],
+			"console": "integratedTerminal"
+		}
 	]
 }

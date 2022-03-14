@@ -1076,7 +1076,7 @@ fn main() {
         let path_os = std::ffi::OsString::from_str(path_str).unwrap_or_default();
         let path = std::path::Path::new(&path_os);
         match gltf::import(&path) {
-            Err(msg) => println!("{:?}", msg),
+            Err(msg) => println!("Fail to laod from {:?} : {:?}", path, msg),
             Ok((document, buffers, _images)) => {
                 if let Some(mesh) = document.meshes().nth(0) {
                     for primitive in mesh.primitives() {
