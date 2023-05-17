@@ -6,8 +6,8 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-# Using ash from source, to get newest support (for vulkan dynamic_rendering)
-ash = { git = "https://github.com/MaikKlein/ash", rev = "f0c743a" }
+# Vulkan Wrapper
+ash = "0.37.2"
 # Shader compilation runtime tools
 hassle-rs = "0.5.4"
 rspirv-reflect = "0.6.0"

@@ -117,7 +117,7 @@ impl RednerLoop {
                 .level_count(1);
             let image_barrier = vk::ImageMemoryBarrier::builder()
                 .old_layout(swapchain_image_layout)
-                .new_layout(vk::ImageLayout::ATTACHMENT_OPTIMAL_KHR)
+                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                 .subresource_range(*sub_res_range)
                 .image(swapchain.image[image_index as usize]);
             unsafe {

@@ -7,6 +7,7 @@ use ash::extensions::{ext, khr};
 use ash::vk;
 
 pub struct RenderDevice {
+    pub entry: ash::Entry,
     pub instance: ash::Instance,
     pub physical_device: vk::PhysicalDevice,
     pub physical_device_mem_prop: vk::PhysicalDeviceMemoryProperties,
@@ -30,7 +31,7 @@ impl RenderDevice {
     pub fn create(app_handle: u64, window_handle: u64) -> RenderDevice {
         // Load functions
         //let entry = unsafe { ash::Entry::new().expect("Ash entry creation failed") };
-        let entry = ash::Entry::new();
+        let entry = unsafe { ash::Entry::load().expect("Ash: can not load Vulkan. Maybe vulkan runtime is not installed.") };
 
         // Create instance
         let instance = {
@@ -73,6 +74,7 @@ impl RenderDevice {
             debug_report
                 .create_debug_utils_messenger(&create_info, None)
                 .expect("Failed to register debug callback");
+            println!("Vulkan Debug report callback registered.");
         }
 
         // Pick physical device
@@ -247,6 +249,7 @@ impl RenderDevice {
         };
 
         RenderDevice {
+            entry,
             instance,
             physical_device,
             physical_device_mem_prop,
