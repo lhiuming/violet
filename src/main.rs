@@ -1,9 +1,7 @@
 use std::env;
 use std::mem;
-use std::str::FromStr;
 
 use ash::vk;
-use gltf;
 
 mod window;
 use window::Window;
@@ -19,6 +17,9 @@ use shader::{
 
 mod render_loop;
 use render_loop::{RednerLoop, RenderScene};
+
+mod gltf_loader;
+use gltf_loader::{load_gltf, GLTF};
 
 #[repr(C)]
 #[derive(Debug)]
@@ -223,69 +224,19 @@ fn main() {
 
     let args: Vec<String> = env::args().collect();
 
-    // Reading mesh model
-    let mut index_count: u32 = 0;
-    if args.len() > 1 {
-        let path_str = &args[1];
-        let path_os = std::ffi::OsString::from_str(path_str).unwrap_or_default();
-        let path = std::path::Path::new(&path_os);
-        match gltf::import(&path) {
-            Err(msg) => println!("Fail to laod from {:?} : {:?}", path, msg),
-            Ok((document, buffers, _images)) => {
-                if let Some(mesh) = document.meshes().nth(0) {
-                    for primitive in mesh.primitives() {
-                        //println!("{:?}", primitive);
-                        let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
-                        if let Some(indices) = reader.read_indices() {
-                            println!("{:?}", indices);
-                            match indices {
-                                gltf::mesh::util::ReadIndices::U8(_) => todo!(),
-                                gltf::mesh::util::ReadIndices::U16(iter) => {
-                                    let mut offset = 0;
-                                    let ib_u16 = unsafe {
-                                        std::slice::from_raw_parts_mut(
-                                            index_buffer.data as *mut u16,
-                                            index_buffer.size as usize / 2, // 2 bytes per index
-                                        )
-                                    };
-                                    for ind in iter {
-                                        ib_u16[offset] = ind;
-                                        offset += 1;
-                                    }
-                                    index_count = offset as u32;
-                                }
-                                gltf::mesh::util::ReadIndices::U32(_) => todo!(),
-                            }
-                        }
-                        if let Some(iter) = reader.read_positions() {
-                            let mut offset = 0;
-                            let vb_f32 = unsafe {
-                                std::slice::from_raw_parts_mut(
-                                    vertex_buffer.data as *mut f32,
-                                    vertex_buffer.size as usize / 4, // 4 bytes per f32
-                                )
-                            };
-                            for vert_pos in iter {
-                                //println!("{:?}", vert_pos);
-                                vb_f32[offset + 0] = vert_pos[0];
-                                vb_f32[offset + 1] = vert_pos[1];
-                                vb_f32[offset + 2] = vert_pos[2];
-                                offset += 3;
-                            }
-                        }
-                        break;
-                    }
-                }
-            }
-        }
+    // Read the gltf model
+    let gltf = if args.len() > 1 {
+        load_gltf(&args[1], &index_buffer, &vertex_buffer)
+    } else {
+        None
     };
 
     let render_scene = RenderScene {
         vertex_buffer,
         index_buffer,
-        index_count,
         mesh_gfx_pipeline,
         mesh_cs_pipeline,
+        gltf,
     };
 
     let render_loop = RednerLoop::new(&rd);

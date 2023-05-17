@@ -31,7 +31,10 @@ impl RenderDevice {
     pub fn create(app_handle: u64, window_handle: u64) -> RenderDevice {
         // Load functions
         //let entry = unsafe { ash::Entry::new().expect("Ash entry creation failed") };
-        let entry = unsafe { ash::Entry::load().expect("Ash: can not load Vulkan. Maybe vulkan runtime is not installed.") };
+        let entry = unsafe {
+            ash::Entry::load()
+                .expect("Ash: can not load Vulkan. Maybe vulkan runtime is not installed.")
+        };
 
         // Create instance
         let instance = {

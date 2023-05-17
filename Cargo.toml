@@ -12,7 +12,7 @@ ash = "0.37.2"
 hassle-rs = "0.5.4"
 rspirv-reflect = "0.6.0"
 # Mesh assets
-gltf = "0.16"
+gltf = "1.0"
 
 [dependencies.windows-sys]
 version = "0.28.0"
