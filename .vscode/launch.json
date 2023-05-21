@@ -17,6 +17,20 @@
 			"cwd": "${workspaceFolder}",
 			"environment": [],
 			"console": "integratedTerminal"
+		},
+		{
+			"name": "Debug-Duck",
+			"type": "cppvsdbg",
+			"request": "launch",
+			"preLaunchTask": "rust: cargo build",
+			"program": "${workspaceFolder}/target/debug/violet.exe",
+			"args": [
+				"./assets/Duck/Duck.gltf"
+			],
+			"stopAtEntry": false,
+			"cwd": "${workspaceFolder}",
+			"environment": [],
+			"console": "integratedTerminal"
 		}
 	]
 }

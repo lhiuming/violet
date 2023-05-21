@@ -13,6 +13,8 @@ hassle-rs = "0.5.4"
 rspirv-reflect = "0.6.0"
 # Mesh assets
 gltf = "1.0"
+# Linear Algebra
+glam = "0.24"
 
 [dependencies.windows-sys]
 version = "0.28.0"

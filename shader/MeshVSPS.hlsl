@@ -14,6 +14,13 @@ ConstantBuffer<ViewParams> view_params;
 
 Buffer<uint> vertex_buffer;
 
+struct PushConstants
+{
+	float3x4 model_transform;
+};
+[[vk::push_constant]]
+PushConstants push_constant;
+
 void vs_main(uint vert_id : SV_VertexID, out float4 hpos : SV_Position) 
 {
 #if 0
@@ -29,8 +36,10 @@ void vs_main(uint vert_id : SV_VertexID, out float4 hpos : SV_Position)
 		asfloat(vertex_buffer[vert_id * 3 + 0]),
 		asfloat(vertex_buffer[vert_id * 3 + 1]),
 		asfloat(vertex_buffer[vert_id * 3 + 2]));
+	float3x4 model_transform = push_constant.model_transform;
+	float3 wpos = mul(model_transform, float4(v, 1.0f));
 	float4x4 view_proj = view_params.view_proj;
-	hpos =  mul(view_proj, float4(v, 1.0f));
+	hpos =  mul(view_proj, float4(wpos, 1.0f));
 #endif
 }
 

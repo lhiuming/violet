@@ -1,5 +1,8 @@
 use crate::render_device::Buffer;
-use gltf;
+extern crate gltf as gltf_rs;
+
+extern crate glam;
+use glam::{Mat4, Quat, Vec3};
 
 pub struct Material {}
 
@@ -13,12 +16,23 @@ pub struct Mesh {
     pub primitives: Vec<Primitive>,
 }
 
+pub struct Node {
+    pub transform: Mat4,
+    pub mesh_index: Option<u32>,
+    pub material: Option<Material>,
+}
+
+pub struct Scene {
+    pub nodes: Vec<Node>,
+}
+
 pub struct GLTF {
+    pub scenes: Vec<Scene>,
     pub meshes: Vec<Mesh>,
 }
 
 // Load a GLTF file as a bunch of meshes, materials, etc.
-pub fn load_gltf(path: &String, index_buffer: &Buffer, vertex_buffer: &Buffer) -> Option<GLTF> {
+pub fn load(path: &String, index_buffer: &Buffer, vertex_buffer: &Buffer) -> Option<GLTF> {
     // TODO should be passed in if mutiple glTF
     let mut index_buffer_offet = 0u32;
     let mut vertex_buffer_offset = 0u32;
@@ -30,7 +44,7 @@ pub fn load_gltf(path: &String, index_buffer: &Buffer, vertex_buffer: &Buffer) -
 
     let mut meshes = Vec::<Mesh>::new();
 
-    // load meshes
+    // pre-load meshes
     for mesh in document.meshes() {
         let mut primitives = Vec::<Primitive>::new();
 
@@ -123,5 +137,66 @@ pub fn load_gltf(path: &String, index_buffer: &Buffer, vertex_buffer: &Buffer) -
         meshes.push(Mesh { primitives })
     } // end for meshes
 
-    Some(GLTF { meshes })
+    // pre-load textures
+    for image in images {
+        println!(
+            "Image {} {}, {:?}: {:?}",
+            image.width,
+            image.height,
+            image.format,
+            image.pixels.split_at(8).0
+        );
+    }
+
+    // Load nodes in the scenes
+    let mut scenes = Vec::<Scene>::new();
+    for scene in document.scenes().by_ref() {
+        let mut nodes = Vec::<Node>::new();
+        for root in scene.nodes().by_ref() {
+            // Create a statck to fake recursion
+            let mut stack = Vec::<(gltf_rs::Node, Mat4)>::new();
+            stack.push((root, Mat4::IDENTITY));
+
+            // Load nodes recursively
+            while let Some((node, parent_transform)) = stack.pop() {
+                // Get flat transform
+                let local_transform;
+                match node.transform() {
+                    gltf::scene::Transform::Matrix { matrix } => {
+                        println!("Transform Matrix{:?}", matrix);
+                        local_transform = Mat4::from_cols_array_2d(&matrix);
+                    }
+                    gltf::scene::Transform::Decomposed {
+                        translation,
+                        rotation,
+                        scale,
+                    } => {
+                        println!(
+                            "Transform TRS: {:?}, {:?}, {:?}",
+                            translation, rotation, scale
+                        );
+                        local_transform = Mat4::from_scale_rotation_translation(
+                            Vec3::from_array(scale),
+                            Quat::from_array(rotation),
+                            Vec3::from_array(translation),
+                        );
+                    }
+                }
+                let transform = parent_transform * local_transform;
+                // Add the node to output
+                nodes.push(Node {
+                    transform,
+                    mesh_index: node.mesh().map(|mesh| mesh.index() as u32),
+                    material: None,
+                });
+                // Recursively load children
+                for child in node.children().by_ref() {
+                    stack.push((child, transform));
+                }
+            }
+        }
+        scenes.push(Scene { nodes });
+    }
+
+    Some(GLTF { scenes, meshes })
 }

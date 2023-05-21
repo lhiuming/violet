@@ -3,10 +3,9 @@ use std::mem;
 use ash::vk;
 
 use crate::float4x4;
+use crate::gltf_asset::GLTF;
 use crate::render_device::{create_buffer, Buffer, RenderDevice};
 use crate::shader::Pipeline;
-
-use crate::gltf_loader::GLTF;
 
 // Contain everything to be rendered
 pub struct RenderScene {
@@ -248,16 +247,40 @@ impl RednerLoop {
                 //device.cmd_draw(cmd_buf, 3, 1, 0, 0);
                 //device.cmd_draw_indexed(cmd_buf, scene.index_count, 1, 0, 0, 0);
                 if let Some(gltf) = &scene.gltf {
-                    for mesh in &gltf.meshes {
-                        for primitive in &mesh.primitives {
-                            device.cmd_draw_indexed(
-                                cmd_buf,
-                                primitive.index_count,
-                                1,
-                                primitive.index_offset,
-                                primitive.vertex_offset as i32,
-                                0,
-                            );
+                    for scene in &gltf.scenes {
+                        for node in &scene.nodes {
+                            if let Some(mesh_index) = node.mesh_index {
+                                // Send transform with PushConstnat
+                                let mut constants: [u8; 4 * 12] = mem::zeroed();
+                                {
+                                    let dst_ptr = constants.as_mut_ptr() as *mut f32;
+                                    let dst = std::slice::from_raw_parts_mut(dst_ptr.offset(0), 4);
+                                    node.transform.row(0).write_to_slice(dst);
+                                    let dst = std::slice::from_raw_parts_mut(dst_ptr.offset(4), 4);
+                                    node.transform.row(1).write_to_slice(dst);
+                                    let dst = std::slice::from_raw_parts_mut(dst_ptr.offset(8), 4);
+                                    node.transform.row(2).write_to_slice(dst);
+                                }
+                                device.cmd_push_constants(
+                                    cmd_buf, 
+                                    pipeline.layout,
+                                    vk::ShaderStageFlags::VERTEX,
+                                    0, 
+                                    &constants);
+
+                                // Draw mesh
+                                let mesh = &gltf.meshes[mesh_index as usize];
+                                for primitive in &mesh.primitives {
+                                    device.cmd_draw_indexed(
+                                        cmd_buf,
+                                        primitive.index_count,
+                                        1,
+                                        primitive.index_offset,
+                                        primitive.vertex_offset as i32,
+                                        0,
+                                    );
+                                }
+                            }
                         }
                     }
                 }

@@ -15,11 +15,10 @@ use shader::{
     ShaderDefinition, ShaderStage,
 };
 
+mod gltf_asset;
+
 mod render_loop;
 use render_loop::{RednerLoop, RenderScene};
-
-mod gltf_loader;
-use gltf_loader::{load_gltf, GLTF};
 
 #[repr(C)]
 #[derive(Debug)]
@@ -226,7 +225,7 @@ fn main() {
 
     // Read the gltf model
     let gltf = if args.len() > 1 {
-        load_gltf(&args[1], &index_buffer, &vertex_buffer)
+        gltf_asset::load(&args[1], &index_buffer, &vertex_buffer)
     } else {
         None
     };

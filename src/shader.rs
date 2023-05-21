@@ -1,6 +1,6 @@
 use std::ffi::CString;
 
-use ash::vk;
+use ash::vk::{self, PushConstantRange};
 use rspirv_reflect;
 
 use crate::render_device::RenderDevice;
@@ -224,9 +224,23 @@ pub fn create_compute_pipeline(
             }
         });
 
+    // Create all push constant range use in shader
+    let push_constant_range = {
+        let pc_range = reflect_module.get_push_constant_range().unwrap();
+        pc_range.map(|info| { 
+            vk::PushConstantRange{ stage_flags: vk::ShaderStageFlags::COMPUTE, offset: info.offset, size: info.size }
+         })
+    };
+    let mut push_constant_ranges = Vec::<PushConstantRange>::new();
+    if push_constant_range.is_some() {
+        push_constant_ranges.push(push_constant_range.unwrap());
+    }
+
     // Create pipeline layout
     let layout = {
-        let create_info = vk::PipelineLayoutCreateInfo::builder().set_layouts(&set_layouts);
+        let create_info = vk::PipelineLayoutCreateInfo::builder()
+        .set_layouts(&set_layouts)
+        .push_constant_ranges(&push_constant_ranges);
         unsafe { device.create_pipeline_layout(&create_info, None) }.ok()?
     };
 
@@ -333,9 +347,23 @@ pub fn create_graphics_pipeline(
         });
     }
 
+    // Create all push constant ranges use in all stages 
+    let mut push_constant_ranges = Vec::<PushConstantRange>::new();
+    for (stage_flag, shader) in shaders {
+        if let Ok(Some(info)) = shader.program.reflect_module.get_push_constant_range() {
+            push_constant_ranges.push( 
+                vk::PushConstantRange{
+                    stage_flags: stage_flag, offset: info.offset, size: info.size
+                }
+            );
+        }
+    };
+
     // Create pipeline layout
     let layout = {
-        let create_info = vk::PipelineLayoutCreateInfo::builder().set_layouts(&set_layouts);
+        let create_info = vk::PipelineLayoutCreateInfo::builder()
+        .set_layouts(&set_layouts)
+        .push_constant_ranges(&push_constant_ranges);
         unsafe { device.create_pipeline_layout(&create_info, None) }.ok()?
     };
 
