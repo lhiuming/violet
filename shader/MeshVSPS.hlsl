@@ -1,8 +1,14 @@
-// NOTE: SPIRV use columns to represent matrix, while HLSL use rows. HLSL-to-SPIRV codegen does not translate this for us (or translate partially, for some reason, which is confusing).
-// The result is, the actual memory layout is always the opposite of what is in HLSL code. That is, if you tag the matrix as row_major, the data layout in buffer is actually column major, and vice versa.
-// But if you load a matrix from buffer for, e.g., multiplication, the matrix is automatically got transposed and the multiplication order is flipped for you, so the result would 'seems' respecting the intent matrix layout. 
-// You only need to be careful when you are investigating the generated code or raw buffer content.
-// See: https://github.com/Microsoft/DirectXShaderCompiler/blob/master/docs/SPIR-V.rst#vectors-and-matrices
+/* NOTE for Debugging: 
+Conceptually (and as reflected in the way matrix components are accessed), SPIRV use columns to represent matrix, while HLSL use rows. HLSL-to-SPIRV codegen must respect this relationship in order to handle matrix compoenent access properly. 
+
+The result is that, matrix representation is 'transposed' between HLSL srouce code and generated SPIRV, e.g. a float4x3 matrix in HLSL is represented as a 3x4 matrix in generated SPIRV, such that m[0] in HLSL and m[0] in SPIRV refer to the same float3 data.
+
+This also affects the generated packing rule. When HLSL code specify a row-major layout, the generated SPIRV must use column-major layout, and vice versa. Therefore, the below HLSL row_major packing specification is translated to a ColMajor packing in SPIRV, in order to make the packing behave as expected from user's point of view. 
+
+These fact is important when you are investigating the generated SPIRV code or raw buffer content from a debugger, e.g. RenderDoc.
+
+See: https://github.com/Microsoft/DirectXShaderCompiler/blob/master/docs/SPIR-V.rst#vectors-and-matrices
+*/
 #pragma pack_matrix(row_major)
 
 struct ViewParams 
