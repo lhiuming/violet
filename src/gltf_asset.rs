@@ -1,4 +1,6 @@
-use crate::render_device::Buffer;
+use std::{array, mem::size_of};
+
+use crate::{render_loop::AllocBuffer};
 extern crate gltf as gltf_rs;
 
 extern crate glam;
@@ -7,9 +9,12 @@ use glam::{Mat4, Quat, Vec3};
 pub struct Material {}
 
 pub struct Primitive {
-    pub vertex_offset: u32,
     pub index_offset: u32,
     pub index_count: u32,
+
+    pub vertex_count: u32,
+    pub positions_offset: u32,
+    pub texcoords_offsets: [u32; 8],
 }
 
 pub struct Mesh {
@@ -32,11 +37,7 @@ pub struct GLTF {
 }
 
 // Load a GLTF file as a bunch of meshes, materials, etc.
-pub fn load(path: &String, index_buffer: &Buffer, vertex_buffer: &Buffer) -> Option<GLTF> {
-    // TODO should be passed in if mutiple glTF
-    let mut index_buffer_offet = 0u32;
-    let mut vertex_buffer_offset = 0u32;
-
+pub fn load(path: &String, index_buffer: &mut AllocBuffer, vertex_buffer: &mut AllocBuffer) -> Option<GLTF> {
     // Read the document (structure) and blob data (buffers, imanges)
     // NOTE: gltf::Gltf::open only load the document
     let path = std::path::Path::new(&path);
@@ -52,58 +53,69 @@ pub fn load(path: &String, index_buffer: &Buffer, vertex_buffer: &Buffer) -> Opt
             let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
 
             // Load indices
-            let mut index_count = 0;
-            let mut index_offset = index_buffer_offet;
+            let index_offset;
+            let index_count;
             if let Some(indices) = reader.read_indices() {
-                // Fill GPU buffer
-                let mut write_offset = index_offset;
                 //println!("{:?}", indices);
                 match indices {
-                    gltf::mesh::util::ReadIndices::U8(_) => todo!(),
+                    gltf::mesh::util::ReadIndices::U8(_) => todo!("Read u8 indices"),
                     gltf::mesh::util::ReadIndices::U16(iter) => {
-                        let ib_u16 = unsafe {
-                            std::slice::from_raw_parts_mut(
-                                index_buffer.data as *mut u16,
-                                index_buffer.size as usize / 2, // 2 bytes per index
-                            )
-                        };
-                        for ind in iter {
-                            ib_u16[write_offset as usize] = ind;
-                            write_offset += 1;
+                        index_count = iter.len() as u32;
+                        let (ib_u16, pos) = index_buffer.alloc::<u16>(index_count);
+                        for (i, ind) in iter.enumerate() {
+                            ib_u16[i] = ind;
                         }
+                        index_offset = pos / size_of::<u16>() as u32;
                     }
                     gltf::mesh::util::ReadIndices::U32(_) => todo!(),
                 }
-
-                // Allcoate
-                index_count = write_offset - index_buffer_offet;
-                index_buffer_offet = write_offset;
+            } else {
+                index_offset = u32::MAX;
+                index_count = 0;
             }
 
-            // Load vertices
-            let mut vertex_count = 0;
-            let mut vertex_offset = vertex_buffer_offset;
+            // Load positions 
+            let positions_offset;
+            let vertex_count;
             if let Some(iter) = reader.read_positions() {
-                // Fill GPU buffer
-                let mut write_offset = vertex_offset as usize;
-                let vb_f32 = unsafe {
-                    std::slice::from_raw_parts_mut(
-                        vertex_buffer.data as *mut f32,
-                        vertex_buffer.size as usize / 4, // 4 bytes per f32
-                    )
-                };
+                vertex_count = iter.len() as u32;
+                let (vb_f32, pos) = vertex_buffer.alloc::<f32>(vertex_count * 3);
+                let mut write_offset = 0;
                 for vert_pos in iter {
-                    //println!("{:?}", vert_pos);
                     vb_f32[write_offset + 0] = vert_pos[0];
                     vb_f32[write_offset + 1] = vert_pos[1];
                     vb_f32[write_offset + 2] = vert_pos[2];
                     write_offset += 3;
                 }
-
-                // Allocate
-                vertex_count = write_offset as u32 - vertex_offset;
-                vertex_buffer_offset = write_offset as u32;
+                positions_offset = pos / size_of::<f32>() as u32;
+            } else {
+                vertex_count = 0;
+                positions_offset = u32::MAX;
             }
+
+            // Load texcoords
+            let texcoords_offsets: [u32;8] = array::from_fn(|set_index| {
+                if let Some(read_texcoord) = reader.read_tex_coords(set_index as u32) {
+                    match read_texcoord {
+                        gltf_rs::mesh::util::ReadTexCoords::U8(_) => todo!("Read u8 texcoord"),
+                        gltf_rs::mesh::util::ReadTexCoords::U16(_) => todo!("Read u16 texcoord"),
+                        gltf_rs::mesh::util::ReadTexCoords::F32(texcoord_data) => {
+                            let f32_count = texcoord_data.len() as u32 * 2;
+                            let (vb_f32, pos) = vertex_buffer.alloc::<f32>(f32_count);
+                            let mut write_offset = 0;
+                            for texcoord in texcoord_data {
+                                vb_f32[write_offset + 0] = texcoord[0];
+                                vb_f32[write_offset + 1] = texcoord[1];
+                                write_offset += 2;
+                            }
+                            assert_eq!(f32_count / 2, vertex_count);
+                            pos / size_of::<f32>() as u32
+                        },
+                    }
+                } else {
+                    0
+                }
+            });
 
             if reader.read_colors(0).is_some() {
                 println!("GLTF Loader: Colors are ignored")
@@ -120,17 +132,16 @@ pub fn load(path: &String, index_buffer: &Buffer, vertex_buffer: &Buffer) -> Opt
             if reader.read_tangents().is_some() {
                 println!("GLTF Loader: tangents are ignored")
             }
-            if reader.read_tex_coords(0).is_some() {
-                println!("GLTF Loader: tex coords are ignored")
-            }
             if reader.read_weights(0).is_some() {
                 println!("GLTF Loader: weights are ignored")
             }
 
             primitives.push(Primitive {
-                vertex_offset,
                 index_offset,
                 index_count,
+                vertex_count,
+                positions_offset,
+                texcoords_offsets,
             });
         } // end for primitives
 
@@ -200,3 +211,4 @@ pub fn load(path: &String, index_buffer: &Buffer, vertex_buffer: &Buffer) -> Opt
 
     Some(GLTF { scenes, meshes })
 }
+

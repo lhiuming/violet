@@ -20,6 +20,8 @@ mod gltf_asset;
 mod render_loop;
 use render_loop::{RednerLoop, RenderScene};
 
+use crate::render_loop::AllocBuffer;
+
 #[repr(C)]
 #[derive(Debug)]
 pub struct float3 {
@@ -206,26 +208,26 @@ fn main() {
     // Buffer for whole scene
     let ib_size = 4 * 1024 * 1024;
     let vb_size = 4 * 1024 * 1024;
-    let index_buffer = create_buffer(
+    let mut index_buffer = AllocBuffer::new(create_buffer(
         &rd,
         ib_size,
         vk::BufferUsageFlags::INDEX_BUFFER,
         vk::Format::UNDEFINED,
     )
-    .unwrap();
-    let vertex_buffer = create_buffer(
+    .unwrap());
+    let mut vertex_buffer = AllocBuffer::new(create_buffer(
         &rd,
         vb_size,
         vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER,
         vk::Format::R32_UINT,
     )
-    .unwrap();
+    .unwrap());
 
     let args: Vec<String> = env::args().collect();
 
     // Read the gltf model
     let gltf = if args.len() > 1 {
-        gltf_asset::load(&args[1], &index_buffer, &vertex_buffer)
+        gltf_asset::load(&args[1], &mut index_buffer, &mut vertex_buffer)
     } else {
         None
     };

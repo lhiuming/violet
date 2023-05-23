@@ -1,4 +1,4 @@
-use std::mem;
+use std::mem::{self, size_of};
 
 use ash::vk;
 
@@ -7,11 +7,36 @@ use crate::gltf_asset::GLTF;
 use crate::render_device::{create_buffer, Buffer, RenderDevice};
 use crate::shader::Pipeline;
 
+// Allocatable buffer. Alway aligned to 4 bytes.
+pub struct AllocBuffer 
+{
+    pub buffer: Buffer,
+    next_pos: u32,
+}
+
+impl AllocBuffer {
+    pub fn new(buffer: Buffer) -> AllocBuffer {
+        AllocBuffer { buffer: buffer, next_pos: 0 }
+    }
+
+    pub fn alloc<'a, T>(&mut self, count: u32) -> (&'a mut [T], u32) {
+        assert!((size_of::<T>() as u32 * count)<= (self.buffer.size as u32 - self.next_pos));
+        let pos = self.next_pos;
+        let size = size_of::<T>() as u32 * count; 
+        self.next_pos += (size + 3) & !3; // always aligned to 4 bytes
+        let slice = unsafe {
+            let ptr = self.buffer.data.offset(pos as isize);
+            std::slice::from_raw_parts_mut(ptr as *mut T, count as usize)
+        };
+        (slice, pos)
+    }
+}
+
 // Contain everything to be rendered
 pub struct RenderScene {
     // Global buffer to store all loaded meshes
-    pub vertex_buffer: Buffer,
-    pub index_buffer: Buffer,
+    pub vertex_buffer: AllocBuffer,
+    pub index_buffer: AllocBuffer,
 
     // Default shaders/pipelines
     pub mesh_gfx_pipeline: Option<Pipeline>,
@@ -52,6 +77,7 @@ impl RednerLoop {
         let dynamic_rendering_entry = &rd.dynamic_rendering_entry;
         let gfx_queue = &rd.gfx_queue;
         let cmd_buf = rd.cmd_buf;
+        let command_buffer = rd.cmd_buf; // rust naming convention
         let surface = &rd.surface;
         let swapchain = &rd.swapchain;
         let present_semaphore = &rd.present_semaphore;
@@ -193,7 +219,7 @@ impl RednerLoop {
             }
 
             // Bind shader resources
-            if let Some(vb_srv) = scene.vertex_buffer.srv {
+            if let Some(vb_srv) = scene.vertex_buffer.buffer.srv {
                 // TODO map desriptor binding name
                 let buffer_views = [vb_srv];
                 let write = vk::WriteDescriptorSet::builder()
@@ -233,7 +259,7 @@ impl RednerLoop {
             unsafe {
                 device.cmd_bind_index_buffer(
                     cmd_buf,
-                    scene.index_buffer.buffer,
+                    scene.index_buffer.buffer.buffer,
                     0,
                     vk::IndexType::UINT16,
                 );
@@ -251,8 +277,10 @@ impl RednerLoop {
                         for node in &scene.nodes {
                             if let Some(mesh_index) = node.mesh_index {
                                 // Send transform with PushConstnat
-                                let mut constants: [u8; 4 * 12] = mem::zeroed();
+                                // NOTE: 12 floats for model transform, 1 uint for pos_offset, 1 uint for uv_offset
+                                let mut constants: [u8; 4 * 14] = mem::zeroed();
                                 {
+                                    // model_transform
                                     let dst_ptr = constants.as_mut_ptr() as *mut f32;
                                     let dst = std::slice::from_raw_parts_mut(dst_ptr.offset(0), 4);
                                     node.transform.row(0).write_to_slice(dst);
@@ -268,15 +296,29 @@ impl RednerLoop {
                                     0, 
                                     &constants);
 
-                                // Draw mesh
+                                // Draw mesh primitives
                                 let mesh = &gltf.meshes[mesh_index as usize];
                                 for primitive in &mesh.primitives {
+                                    // Geomtry data offset is per primitive
+                                    let mut constants: [u8; 4 * 2] = mem::zeroed();
+                                    {
+                                        let dst = std::slice::from_raw_parts_mut(constants.as_mut_ptr() as *mut u32, 2);
+                                        dst[0] = primitive.positions_offset;
+                                        dst[1] = primitive.texcoords_offsets[0];
+                                    }
+                                    device.cmd_push_constants(
+                                        command_buffer, 
+                                        pipeline.layout,
+                                        vk::ShaderStageFlags::VERTEX,
+                                        4 * 12, 
+                                        &constants);
+
                                     device.cmd_draw_indexed(
                                         cmd_buf,
                                         primitive.index_count,
                                         1,
                                         primitive.index_offset,
-                                        primitive.vertex_offset as i32,
+                                        0,
                                         0,
                                     );
                                 }

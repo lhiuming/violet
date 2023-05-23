@@ -23,11 +23,13 @@ Buffer<uint> vertex_buffer;
 struct PushConstants
 {
 	float3x4 model_transform;
+	uint pos_offset;
+	uint uv_offset;
 };
 [[vk::push_constant]]
-PushConstants push_constant;
+PushConstants pc;
 
-void vs_main(uint vert_id : SV_VertexID, out float4 hpos : SV_Position) 
+void vs_main(uint vert_id : SV_VertexID, out float4 hpos : SV_Position, out float2 uv : TEXCOORD0) 
 {
 #if 0
 	const float2 vbuffer[] = {
@@ -38,18 +40,23 @@ void vs_main(uint vert_id : SV_VertexID, out float4 hpos : SV_Position)
 	float2 v = vbuffer[vert_id % 3];
 	hpos = float4(v, 0.5f, 1.0f);
 #else
-	float3 v = float3( 
-		asfloat(vertex_buffer[vert_id * 3 + 0]),
-		asfloat(vertex_buffer[vert_id * 3 + 1]),
-		asfloat(vertex_buffer[vert_id * 3 + 2]));
-	float3x4 model_transform = push_constant.model_transform;
-	float3 wpos = mul(model_transform, float4(v, 1.0f));
+	float3 pos = float3( 
+		asfloat(vertex_buffer[pc.pos_offset + vert_id * 3 + 0]),
+		asfloat(vertex_buffer[pc.pos_offset + vert_id * 3 + 1]),
+		asfloat(vertex_buffer[pc.pos_offset + vert_id * 3 + 2]));
+	uv = float2(
+		asfloat(vertex_buffer[pc.uv_offset + vert_id * 2 + 0]),
+		asfloat(vertex_buffer[pc.uv_offset + vert_id * 2 + 1]));
+
+	float3x4 model_transform = pc.model_transform;
+	float3 wpos = mul(model_transform, float4(pos, 1.0f));
 	float4x4 view_proj = view_params.view_proj;
 	hpos =  mul(view_proj, float4(wpos, 1.0f));
 #endif
 }
 
-void ps_main(out float4 output : SV_Target0)
+void ps_main(float2 uv: TEXCOORD0, out float4 output : SV_Target0)
 {
-	output = float4(1.0f, 1.0f, 1.0f, 1.0f);
+	//output = float4(1.0f, 1.0f, 1.0f, 1.0f);
+	output = float4(uv, 0.0f, 1.0f);
 } 
