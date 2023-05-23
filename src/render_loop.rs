@@ -53,10 +53,16 @@ pub struct ViewParams {
 
 pub struct RednerLoop {
     pub view_params_cb: Buffer,
+    pub depth_buffer: vk::Image,
+    pub depth_buffer_view: vk::ImageView,
 }
 
 impl RednerLoop {
     pub fn new(rd: &RenderDevice) -> RednerLoop {
+        let surface_size = rd.surface.query_size(&rd.surface_entry, &rd.physical_device);
+        let swapchain_size = rd.swapchain.extent;
+        assert_eq!(surface_size, swapchain_size);
+
         // View parameter constant buffer
         let view_params_cb = create_buffer(
             &rd,
@@ -66,7 +72,51 @@ impl RednerLoop {
         )
         .unwrap();
 
-        RednerLoop { view_params_cb }
+        // Create depth buffer
+        let create_info = vk::ImageCreateInfo::builder()
+        .image_type(vk::ImageType::TYPE_2D)
+        .format(vk::Format::D16_UNORM)
+        .extent(vk::Extent3D {
+            width: surface_size.width,
+            height: surface_size.height,
+            depth: 1,
+        })
+        .array_layers(1)
+        .mip_levels(1)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .initial_layout(vk::ImageLayout::UNDEFINED)
+        .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+        ;
+        let depth_buffer = unsafe { rd.device.create_image(&create_info, None) }.unwrap();
+
+        // Bind depth buffer memory
+        let depth_buffer_memory = {
+            let mem_requirements = unsafe { rd.device.get_image_memory_requirements(depth_buffer) };
+            let momory_type_index = rd.pick_memory_type_index(
+                mem_requirements.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL).unwrap(); // TODO
+            let create_info = vk::MemoryAllocateInfo::builder()
+                .allocation_size(mem_requirements.size)
+                .memory_type_index(momory_type_index);
+            unsafe { rd.device.allocate_memory(&create_info, None) }.unwrap()
+        };
+        unsafe { rd.device.bind_image_memory(depth_buffer, depth_buffer_memory, 0) }.unwrap();
+
+        let create_info = vk::ImageViewCreateInfo::builder()
+        .image(depth_buffer)
+        .view_type(vk::ImageViewType::TYPE_2D)
+        .format(vk::Format::D16_UNORM)
+        .subresource_range(vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::DEPTH,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        })
+        ;
+        let depth_buffer_view = unsafe { rd.device.create_image_view(&create_info, None) }.unwrap();
+
+        RednerLoop { view_params_cb, depth_buffer, depth_buffer_view }
     }
 
     pub fn render(&self, rd: &RenderDevice, scene: &RenderScene, view_proj: float4x4) {
@@ -173,11 +223,21 @@ impl RednerLoop {
             let color_attachment = vk::RenderingAttachmentInfoKHR::builder()
                 .image_view(swapchain.image_view[image_index as usize])
                 .image_layout(swapchain_image_layout)
-                .resolve_mode(vk::ResolveModeFlags::NONE)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .clear_value(vk::ClearValue { color: clear_color });
             let color_attachments = [*color_attachment];
+            let depth_attachment = vk::RenderingAttachmentInfoKHR::builder()
+                .image_view(self.depth_buffer_view)
+                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::CLEAR)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue {
+                    depth_stencil: vk::ClearDepthStencilValue {
+                        depth: 0.0,
+                        stencil: 0,
+                    },
+                });
             let rendering_info = vk::RenderingInfoKHR::builder()
                 .render_area(vk::Rect2D {
                     offset: vk::Offset2D { x: 0, y: 0 },
@@ -185,7 +245,8 @@ impl RednerLoop {
                 })
                 .layer_count(1)
                 .view_mask(0)
-                .color_attachments(&color_attachments);
+                .color_attachments(&color_attachments)
+                .depth_attachment(&depth_attachment);
             unsafe {
                 dynamic_rendering_entry.cmd_begin_rendering(cmd_buf, &rendering_info);
             }
@@ -278,7 +339,7 @@ impl RednerLoop {
                             if let Some(mesh_index) = node.mesh_index {
                                 // Send transform with PushConstnat
                                 // NOTE: 12 floats for model transform, 1 uint for pos_offset, 1 uint for uv_offset
-                                let mut constants: [u8; 4 * 14] = mem::zeroed();
+                                let mut constants: [u8; 4 * 12] = mem::zeroed();
                                 {
                                     // model_transform
                                     let dst_ptr = constants.as_mut_ptr() as *mut f32;

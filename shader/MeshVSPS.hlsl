@@ -55,8 +55,8 @@ void vs_main(uint vert_id : SV_VertexID, out float4 hpos : SV_Position, out floa
 #endif
 }
 
-void ps_main(float2 uv: TEXCOORD0, out float4 output : SV_Target0)
+void ps_main(float4 hpos : SV_Position, float2 uv : TEXCOORD0, out float4 output : SV_Target0)
 {
 	//output = float4(1.0f, 1.0f, 1.0f, 1.0f);
-	output = float4(uv, 0.0f, 1.0f);
+	output = float4(uv, hpos.z / hpos.w, 1.0f);
 } 

@@ -4,7 +4,7 @@ use std::io::Write;
 use std::os::raw::c_void;
 
 use ash::extensions::{ext, khr};
-use ash::vk;
+use ash::vk::{self, MemoryPropertyFlags};
 
 pub struct RenderDevice {
     pub entry: ash::Entry,
@@ -272,6 +272,10 @@ impl RenderDevice {
             present_semaphore,
         }
     }
+
+    pub fn pick_memory_type_index(&self, memory_type_bits: u32, property_flags: MemoryPropertyFlags) -> Option<u32> {
+        pick_memory_type_index(&self.physical_device_mem_prop, memory_type_bits, property_flags)
+    }
 }
 
 // Debug
@@ -437,6 +441,22 @@ pub struct Buffer {
     pub srv: Option<vk::BufferView>,
 }
 
+pub fn pick_memory_type_index(memory_properties: &vk::PhysicalDeviceMemoryProperties, memory_type_bits: u32, property_flags: MemoryPropertyFlags) -> Option<u32> {    
+    let memory_types = &memory_properties.memory_types;
+    for i in 0..memory_properties.memory_type_count {
+        if (memory_type_bits & (1 << i) != 0)
+            && ((memory_types[i as usize].property_flags & property_flags)
+                == property_flags)
+        {
+            return Some(i)
+        }
+    }
+
+    println!(
+        "Vulkan: No compatible device memory type with required properties {:?}", memory_type_bits);
+    return None;
+}
+
 pub fn create_buffer(
     rd: &RenderDevice,
     size: u64,
@@ -459,28 +479,9 @@ pub fn create_buffer(
         let mem_req = unsafe { device.get_buffer_memory_requirements(buffer) };
 
         // Pick memory type
-        let memory_type_index = {
-            let mem_type_bits = mem_req.memory_type_bits;
-            // TODO currently treating all buffer like a staging buffer
-            let mem_prop_flags =
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-
-            || -> Option<u32> {
-                for mem_type_index in 0..memory_properties.memory_type_count {
-                    let mem_type = &memory_properties.memory_types[mem_type_index as usize];
-                    if (mem_type_bits & (1 << mem_type_index) != 0)
-                        && ((mem_type.property_flags & mem_prop_flags) == mem_prop_flags)
-                    {
-                        return Some(mem_type_index);
-                    }
-                }
-                println!(
-                    "Vulkan: No compatible device memory type with required properties {:?}",
-                    mem_req
-                );
-                return None;
-            }()?
-        };
+        // TODO currently treating all buffer like a staging buffer
+        let mem_property_flags = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        let memory_type_index = rd.pick_memory_type_index(mem_req.memory_type_bits, mem_property_flags).unwrap();
 
         let create_info = vk::MemoryAllocateInfo::builder()
             .allocation_size(mem_req.size)
