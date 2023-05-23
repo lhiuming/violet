@@ -168,10 +168,10 @@ fn perspective_projection(
     let width = near_plane * ran;
     let m00 = near_plane / width;
     let m11 = near_plane * width_by_height / width;
-    //let m22 = far_plane * near_plane / (far_plane - near_plane);
+    let m22 = -near_plane / (far_plane - near_plane);
+    //let m23 = far_plane * near_plane / (far_plane - near_plane);
     // NOTE: this allow far_plane -> infinite
-    let m22 = near_plane / (1.0 - near_plane / far_plane);
-    let m23 = -near_plane / (far_plane - near_plane);
+    let m23 = near_plane / (1.0 - near_plane / far_plane);
     float4x4::from_data(&[
         m00, 0.0, 0.0, 0.0, //
         0.0, m11, 0.0, 0.0, //
