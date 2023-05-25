@@ -1,10 +1,10 @@
 use std::mem::{self, size_of};
 
-use ash::vk;
+use ash::vk::{self, WriteDescriptorSet};
 
 use crate::float4x4;
 use crate::gltf_asset::GLTF;
-use crate::render_device::{create_buffer, Buffer, RenderDevice};
+use crate::render_device::{Buffer, RenderDevice, Texture2D};
 use crate::shader::Pipeline;
 
 // Allocatable buffer. Alway aligned to 4 bytes.
@@ -32,11 +32,64 @@ impl AllocBuffer {
     }
 }
 
+// Use a u64 to represent a 8x8 sub-tree,
+// each node is represented as a bit, each parent is the "or" of its children.
+struct BooleanQuadtree {
+    max_depth: u32,
+    data: Vec<u64>,
+}
+
+impl BooleanQuadtree {
+    fn new(max_depth: u32) -> BooleanQuadtree {
+        BooleanQuadtree { max_depth, data: Vec::<u64>::new() }
+    }
+}
+
+// Allocatable texture. Always aligned to 8x8 tile.
+// Allocate a morton code order. (but why?)
+pub struct AllocTexture2D
+{
+    pub texture: Texture2D,
+    occupation: BooleanQuadtree,
+}
+
+impl AllocTexture2D {
+    pub fn new(texture: Texture2D) -> AllocTexture2D {
+        // Clamp to power of 2
+        let width: u32 = 1 << (31 - (texture.width as u32).leading_zeros());
+        let height: u32 = 1 << (31 - (texture.height as u32).leading_zeros());
+        assert!(width <= texture.width);
+        assert!(height <= texture.height);
+
+        // Fit it to a square or rectangle with width/height = 2, such that morton code works
+        // -> 1 <= width/height <= 2
+        assert!(height * 2 > height);
+        let width = std::cmp::min(width, height * 2);
+        let height = std::cmp::min(height, width);
+        if (height != texture.height) || (width != texture.width) {
+            println!("Warning: texture size is not power of 2. {}x{} -> {}x{}. Some memory is watsted", texture.width, texture.height, width, height);
+        }
+
+        let depth = std::cmp::max(width.trailing_zeros(), 3) - 3 + 1;
+        let occupation = BooleanQuadtree::new(depth);
+
+        AllocTexture2D { texture, occupation }
+    }
+
+    pub fn alloc<'a>(&self, width: u32, height: u32) -> (u32, u32) {
+        // TODO actually implement 2D allocation 
+        return (0, 0)
+    }
+}
+
 // Contain everything to be rendered
 pub struct RenderScene {
     // Global buffer to store all loaded meshes
     pub vertex_buffer: AllocBuffer,
     pub index_buffer: AllocBuffer,
+    
+    // Global texture to store all loaded textures
+    pub material_texture: AllocTexture2D,
 
     // Default shaders/pipelines
     pub mesh_gfx_pipeline: Option<Pipeline>,
@@ -52,20 +105,31 @@ pub struct ViewParams {
 }
 
 pub struct RednerLoop {
+    pub command_pool: vk::CommandPool,
+    pub command_buffer: vk::CommandBuffer,
+
+    pub present_finished_fence: vk::Fence,
+    pub present_finished_semephore: vk::Semaphore,
+    pub present_ready_semaphore: vk::Semaphore,
+    pub command_buffer_finished_fence: vk::Fence,
+
+    pub shared_sampler: vk::Sampler, 
+
     pub view_params_cb: Buffer,
-    pub depth_buffer: vk::Image,
-    pub depth_buffer_view: vk::ImageView,
+    pub depth_buffer: Texture2D,
 }
 
 impl RednerLoop {
     pub fn new(rd: &RenderDevice) -> RednerLoop {
+        let command_pool = rd.create_command_pool();
+        let command_buffer = rd.create_command_buffer(command_pool);
+
         let surface_size = rd.surface.query_size(&rd.surface_entry, &rd.physical_device);
         let swapchain_size = rd.swapchain.extent;
         assert_eq!(surface_size, swapchain_size);
 
         // View parameter constant buffer
-        let view_params_cb = create_buffer(
-            &rd,
+        let view_params_cb = rd.create_buffer(
             mem::size_of::<ViewParams>() as u64,
             vk::BufferUsageFlags::UNIFORM_BUFFER,
             vk::Format::UNDEFINED,
@@ -73,50 +137,32 @@ impl RednerLoop {
         .unwrap();
 
         // Create depth buffer
-        let create_info = vk::ImageCreateInfo::builder()
-        .image_type(vk::ImageType::TYPE_2D)
-        .format(vk::Format::D16_UNORM)
-        .extent(vk::Extent3D {
-            width: surface_size.width,
-            height: surface_size.height,
-            depth: 1,
-        })
-        .array_layers(1)
-        .mip_levels(1)
-        .samples(vk::SampleCountFlags::TYPE_1)
-        .initial_layout(vk::ImageLayout::UNDEFINED)
-        .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
-        ;
-        let depth_buffer = unsafe { rd.device.create_image(&create_info, None) }.unwrap();
+        let depth_buffer = rd.create_texture(
+            surface_size.width,
+            surface_size.height,
+            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            vk::Format::D16_UNORM,
+            vk::ImageAspectFlags::DEPTH,
+        )
+        .unwrap();
 
-        // Bind depth buffer memory
-        let depth_buffer_memory = {
-            let mem_requirements = unsafe { rd.device.get_image_memory_requirements(depth_buffer) };
-            let momory_type_index = rd.pick_memory_type_index(
-                mem_requirements.memory_type_bits,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL).unwrap(); // TODO
-            let create_info = vk::MemoryAllocateInfo::builder()
-                .allocation_size(mem_requirements.size)
-                .memory_type_index(momory_type_index);
-            unsafe { rd.device.allocate_memory(&create_info, None) }.unwrap()
+        // Shared samplers
+        let shared_sampler = unsafe {
+            let create_info = vk::SamplerCreateInfo::builder();
+            rd.device.create_sampler(&create_info, None).unwrap()
         };
-        unsafe { rd.device.bind_image_memory(depth_buffer, depth_buffer_memory, 0) }.unwrap();
 
-        let create_info = vk::ImageViewCreateInfo::builder()
-        .image(depth_buffer)
-        .view_type(vk::ImageViewType::TYPE_2D)
-        .format(vk::Format::D16_UNORM)
-        .subresource_range(vk::ImageSubresourceRange {
-            aspect_mask: vk::ImageAspectFlags::DEPTH,
-            base_mip_level: 0,
-            level_count: 1,
-            base_array_layer: 0,
-            layer_count: 1,
-        })
-        ;
-        let depth_buffer_view = unsafe { rd.device.create_image_view(&create_info, None) }.unwrap();
-
-        RednerLoop { view_params_cb, depth_buffer, depth_buffer_view }
+        RednerLoop { 
+            command_pool,
+            command_buffer,
+            present_finished_fence: rd.create_fence(false),
+            present_finished_semephore: rd.create_semaphore(),
+            present_ready_semaphore: rd.create_semaphore(),
+            command_buffer_finished_fence: rd.create_fence(true),
+            shared_sampler,
+            view_params_cb,
+            depth_buffer 
+        }
     }
 
     pub fn render(&self, rd: &RenderDevice, scene: &RenderScene, view_proj: float4x4) {
@@ -126,18 +172,41 @@ impl RednerLoop {
         let swapchain_entry = &rd.swapchain_entry;
         let dynamic_rendering_entry = &rd.dynamic_rendering_entry;
         let gfx_queue = &rd.gfx_queue;
-        let cmd_buf = rd.cmd_buf;
-        let command_buffer = rd.cmd_buf; // rust naming convention
+        let command_buffer = self.command_buffer;
         let surface = &rd.surface;
         let swapchain = &rd.swapchain;
-        let present_semaphore = &rd.present_semaphore;
 
         let surface_size = surface.query_size(&surface_entry, physical_device);
 
-        // wait idle (for now)
+        // Acquire target image
+        let (image_index, b_image_suboptimal) = unsafe {
+            swapchain_entry.entry.acquire_next_image(
+                swapchain.handle,
+                u64::MAX,
+                vk::Semaphore::null(),
+                self.present_finished_fence,
+            )
+        }
+        .expect("Vulkan: failed to acquire swapchain image");
+        if b_image_suboptimal {
+            println!("Vulkan: suboptimal image is get (?)");
+        }
+
+        // Wait for the fence such that the command buffer must be done
+        unsafe { 
+            let fences = [self.present_finished_fence, self.command_buffer_finished_fence];
+            let timeout_in_ns = 500000; // 500ms
+            device.wait_for_fences(&fences, true, timeout_in_ns).expect("Vulkan: wait for fence timtout for 500000");
+
+            // Reset the fence
+            device.reset_fences(&[self.present_finished_fence, self.command_buffer_finished_fence]).unwrap();
+        }
+
+        // Reuse the command buffer
+        // TODO check or wait for fence
         unsafe {
             device
-                .reset_command_buffer(cmd_buf, vk::CommandBufferResetFlags::empty())
+                .reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())
                 .expect("Vulkan: Reset command buffer failed???");
         };
 
@@ -156,20 +225,6 @@ impl RednerLoop {
             }
         }
 
-        // Acquire target image
-        let (image_index, b_image_suboptimal) = unsafe {
-            swapchain_entry.entry.acquire_next_image(
-                swapchain.handle,
-                u64::MAX,
-                *present_semaphore,
-                vk::Fence::default(),
-            )
-        }
-        .expect("Vulkan: failed to acquire swapchain image");
-        if b_image_suboptimal {
-            println!("Vulkan: suboptimal image is get (?)");
-        }
-
         // SIMPLE CONFIGURATION
         let b_clear_using_render_pass = true;
         let clear_color = vk::ClearColorValue {
@@ -186,7 +241,7 @@ impl RednerLoop {
             let begin_info = vk::CommandBufferBeginInfo::builder()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             unsafe {
-                device.begin_command_buffer(cmd_buf, &begin_info).unwrap();
+                device.begin_command_buffer(command_buffer, &begin_info).unwrap();
             }
         }
 
@@ -205,7 +260,7 @@ impl RednerLoop {
                 .image(swapchain.image[image_index as usize]);
             unsafe {
                 device.cmd_pipeline_barrier(
-                    cmd_buf,
+                    command_buffer,
                     vk::PipelineStageFlags::TOP_OF_PIPE,
                     vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                     vk::DependencyFlags::empty(),
@@ -228,7 +283,7 @@ impl RednerLoop {
                 .clear_value(vk::ClearValue { color: clear_color });
             let color_attachments = [*color_attachment];
             let depth_attachment = vk::RenderingAttachmentInfoKHR::builder()
-                .image_view(self.depth_buffer_view)
+                .image_view(self.depth_buffer.srv.unwrap())
                 .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
                 .store_op(vk::AttachmentStoreOp::STORE)
@@ -248,7 +303,7 @@ impl RednerLoop {
                 .color_attachments(&color_attachments)
                 .depth_attachment(&depth_attachment);
             unsafe {
-                dynamic_rendering_entry.cmd_begin_rendering(cmd_buf, &rendering_info);
+                dynamic_rendering_entry.cmd_begin_rendering(command_buffer, &rendering_info);
             }
         }
 
@@ -266,7 +321,7 @@ impl RednerLoop {
                 };
                 let viewports = [viewport];
                 unsafe {
-                    device.cmd_set_viewport(cmd_buf, 0, &viewports);
+                    device.cmd_set_viewport(command_buffer, 0, &viewports);
                 }
 
                 let scissor = vk::Rect2D {
@@ -275,7 +330,7 @@ impl RednerLoop {
                 };
                 let scissors = [scissor];
                 unsafe {
-                    device.cmd_set_scissor(cmd_buf, 0, &scissors);
+                    device.cmd_set_scissor(command_buffer, 0, &scissors);
                 }
             }
 
@@ -299,14 +354,37 @@ impl RednerLoop {
                     .dst_array_element(0)
                     .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                     .buffer_info(&cb_infos);
-                let writes = [*write, *write_cb];
+
+                let image_info = vk::DescriptorImageInfo::builder()
+                .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                .image_view(scene.material_texture.texture.srv.unwrap());
+                let image_infos = [*image_info];
+
+                let write_image = vk::WriteDescriptorSet::builder()
+                .dst_set(pipeline.descriptor_sets[0])
+                .dst_binding(1)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(&image_infos);
+
+                let sampler_info = vk::DescriptorImageInfo::builder()
+                .sampler(self.shared_sampler);
+                let sampler_infos = [*sampler_info];
+                let write_sampler = vk::WriteDescriptorSet::builder()
+                .dst_set(pipeline.descriptor_sets[0])
+                .dst_binding(2)
+                .dst_array_element(0)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .image_info(&sampler_infos);
+
+                let writes = [*write, *write_cb, *write_image, *write_sampler];
                 unsafe {
                     device.update_descriptor_sets(&writes, &[]);
                 }
 
                 unsafe {
                     device.cmd_bind_descriptor_sets(
-                        cmd_buf,
+                        command_buffer,
                         vk::PipelineBindPoint::GRAPHICS,
                         pipeline.layout,
                         0,
@@ -319,7 +397,7 @@ impl RednerLoop {
             // Bind index buffer
             unsafe {
                 device.cmd_bind_index_buffer(
-                    cmd_buf,
+                    command_buffer,
                     scene.index_buffer.buffer.buffer,
                     0,
                     vk::IndexType::UINT16,
@@ -328,7 +406,7 @@ impl RednerLoop {
 
             // Set pipeline and Draw
             unsafe {
-                device.cmd_bind_pipeline(cmd_buf, vk::PipelineBindPoint::GRAPHICS, pipeline.handle);
+                device.cmd_bind_pipeline(command_buffer, vk::PipelineBindPoint::GRAPHICS, pipeline.handle);
             }
             unsafe {
                 //device.cmd_draw(cmd_buf, 3, 1, 0, 0);
@@ -351,7 +429,7 @@ impl RednerLoop {
                                     node.transform.row(2).write_to_slice(dst);
                                 }
                                 device.cmd_push_constants(
-                                    cmd_buf, 
+                                    command_buffer, 
                                     pipeline.layout,
                                     vk::ShaderStageFlags::VERTEX,
                                     0, 
@@ -375,7 +453,7 @@ impl RednerLoop {
                                         &constants);
 
                                     device.cmd_draw_indexed(
-                                        cmd_buf,
+                                        command_buffer,
                                         primitive.index_count,
                                         1,
                                         primitive.index_offset,
@@ -392,7 +470,7 @@ impl RednerLoop {
 
         // End render pass
         unsafe {
-            dynamic_rendering_entry.cmd_end_rendering(cmd_buf);
+            dynamic_rendering_entry.cmd_end_rendering(command_buffer);
         }
 
         // Draw something with compute
@@ -410,7 +488,7 @@ impl RednerLoop {
                     .image(swapchain.image[image_index as usize]);
                 unsafe {
                     device.cmd_pipeline_barrier(
-                        cmd_buf,
+                        command_buffer,
                         vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                         vk::PipelineStageFlags::COMPUTE_SHADER,
                         vk::DependencyFlags::empty(),
@@ -426,7 +504,7 @@ impl RednerLoop {
             {
                 unsafe {
                     device.cmd_bind_pipeline(
-                        cmd_buf,
+                        command_buffer,
                         vk::PipelineBindPoint::COMPUTE,
                         pipeline.handle,
                     )
@@ -450,7 +528,7 @@ impl RednerLoop {
 
                 unsafe {
                     device.cmd_bind_descriptor_sets(
-                        cmd_buf,
+                        command_buffer,
                         vk::PipelineBindPoint::COMPUTE,
                         pipeline.layout,
                         0,
@@ -462,7 +540,7 @@ impl RednerLoop {
                 let dispatch_x = (swapchain.extent.width + 7) / 8;
                 let dispatch_y = (swapchain.extent.height + 3) / 4;
                 unsafe {
-                    device.cmd_dispatch(cmd_buf, dispatch_x, dispatch_y, 1);
+                    device.cmd_dispatch(command_buffer, dispatch_x, dispatch_y, 1);
                 }
             }
         }
@@ -480,7 +558,7 @@ impl RednerLoop {
                 .image(swapchain.image[image_index as usize]);
             unsafe {
                 device.cmd_pipeline_barrier(
-                    cmd_buf,
+                    command_buffer,
                     vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                     vk::PipelineStageFlags::BOTTOM_OF_PIPE,
                     vk::DependencyFlags::empty(),
@@ -494,16 +572,19 @@ impl RednerLoop {
 
         // End command recoding
         unsafe {
-            device.end_command_buffer(cmd_buf).unwrap();
+            device.end_command_buffer(command_buffer).unwrap();
         }
 
         // Submit
         {
-            let command_buffers = [cmd_buf];
-            let submit_info = vk::SubmitInfo::builder().command_buffers(&command_buffers);
+            let command_buffers = [command_buffer];
+            let signal_semaphores = [self.present_ready_semaphore];
+            let submit_info = vk::SubmitInfo::builder()
+            .command_buffers(&command_buffers)
+            .signal_semaphores(&signal_semaphores);
             unsafe {
                 device
-                    .queue_submit(*gfx_queue, &[*submit_info], vk::Fence::null())
+                    .queue_submit(*gfx_queue, &[*submit_info], self.command_buffer_finished_fence)
                     .unwrap();
             }
         }
@@ -512,7 +593,7 @@ impl RednerLoop {
         {
             let mut present_info = vk::PresentInfoKHR::default();
             present_info.wait_semaphore_count = 1;
-            present_info.p_wait_semaphores = present_semaphore;
+            present_info.p_wait_semaphores = &self.present_ready_semaphore;
             present_info.swapchain_count = 1;
             present_info.p_swapchains = &swapchain.handle;
             present_info.p_image_indices = &image_index;
@@ -525,8 +606,6 @@ impl RednerLoop {
         }
 
         // Wait brute-force (ATM)
-        unsafe {
-            device.device_wait_idle().unwrap();
-        }
+        //unsafe { device.device_wait_idle().unwrap(); }
     }
 }

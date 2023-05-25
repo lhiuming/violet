@@ -4,7 +4,7 @@ use std::io::Write;
 use std::os::raw::c_void;
 
 use ash::extensions::{ext, khr};
-use ash::vk::{self, MemoryPropertyFlags};
+use ash::vk::{self, MemoryPropertyFlags, CommandPool};
 
 pub struct RenderDevice {
     pub entry: ash::Entry,
@@ -20,11 +20,9 @@ pub struct RenderDevice {
 
     pub descriptor_pool: vk::DescriptorPool,
     pub gfx_queue: vk::Queue,
-    pub cmd_buf: vk::CommandBuffer,
 
     pub surface: Surface,
     pub swapchain: Swapchain,
-    pub present_semaphore: vk::Semaphore,
 }
 
 impl RenderDevice {
@@ -100,7 +98,7 @@ impl RenderDevice {
             }
             *picked.expect("Vulkan: None physical device?!")
         };
-
+        
         // Create device
         let b_support_dynamic_rendering;
         let gfx_queue_family_index;
@@ -208,35 +206,6 @@ impl RenderDevice {
             swapchain_entry.create(&device, &surface, &surface_size)
         };
 
-        let present_semaphore = unsafe {
-            let create_info = vk::SemaphoreCreateInfo::builder();
-            device.create_semaphore(&create_info, None)
-        }
-        .expect("Vulkan: failed to create semaphore");
-
-        // Command buffer (and pool)
-        let cmd_pool = {
-            let create_info = vk::CommandPoolCreateInfo::builder()
-                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
-                .build();
-            unsafe {
-                device
-                    .create_command_pool(&create_info, None)
-                    .expect("Vulkan: failed to create command pool?!")
-            }
-        };
-        let cmd_buf = {
-            let create_info = vk::CommandBufferAllocateInfo::builder()
-                .command_pool(cmd_pool)
-                .command_buffer_count(1)
-                .build();
-            unsafe {
-                device
-                    .allocate_command_buffers(&create_info)
-                    .expect("Vulkan: failed to allocated command buffer?!")[0]
-            }
-        };
-
         // Descriptor pool
         let descriptor_pool = {
             let pool_sizes = [vk::DescriptorPoolSize {
@@ -265,17 +234,52 @@ impl RenderDevice {
 
             descriptor_pool,
             gfx_queue,
-            cmd_buf,
 
             surface,
             swapchain,
-            present_semaphore,
         }
     }
 
-    pub fn pick_memory_type_index(&self, memory_type_bits: u32, property_flags: MemoryPropertyFlags) -> Option<u32> {
-        pick_memory_type_index(&self.physical_device_mem_prop, memory_type_bits, property_flags)
+    pub fn create_fence(&self, signaled: bool) -> vk::Fence {
+        unsafe { 
+            let create_info = vk::FenceCreateInfo::builder()
+            .flags(if signaled { vk::FenceCreateFlags::SIGNALED } else { vk::FenceCreateFlags::empty() });
+            self.device.create_fence(&create_info, None)
+        }
+        .expect("Vulakn: failed to create fence")
     }
+
+    pub fn create_semaphore(&self) -> vk::Semaphore {
+        unsafe {
+            let create_info = vk::SemaphoreCreateInfo::builder();
+            self.device.create_semaphore(&create_info, None)
+        }
+        .expect("Vulkan: failed to create semaphore")
+    }
+
+    pub fn create_command_pool(&self) -> vk::CommandPool {
+        let create_info = vk::CommandPoolCreateInfo::builder()
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
+            .build();
+        unsafe {
+            self.device
+                .create_command_pool(&create_info, None)
+                .expect("Vulkan: failed to create command pool?!")
+        }
+    }
+
+    pub fn create_command_buffer(&self, command_pool: CommandPool) -> vk::CommandBuffer {
+        let create_info = vk::CommandBufferAllocateInfo::builder()
+            .command_pool(command_pool)
+            .command_buffer_count(1)
+            .build();
+        unsafe {
+            self.device
+                .allocate_command_buffers(&create_info)
+                .expect("Vulkan: failed to allocated command buffer?!")[0]
+        }
+    }
+
 }
 
 // Debug
@@ -441,81 +445,193 @@ pub struct Buffer {
     pub srv: Option<vk::BufferView>,
 }
 
-pub fn pick_memory_type_index(memory_properties: &vk::PhysicalDeviceMemoryProperties, memory_type_bits: u32, property_flags: MemoryPropertyFlags) -> Option<u32> {    
-    let memory_types = &memory_properties.memory_types;
-    for i in 0..memory_properties.memory_type_count {
-        if (memory_type_bits & (1 << i) != 0)
-            && ((memory_types[i as usize].property_flags & property_flags)
-                == property_flags)
-        {
-            return Some(i)
+impl RenderDevice {
+    pub fn pick_memory_type_index(
+        &self,
+        memory_type_bits: u32,
+        property_flags: MemoryPropertyFlags,
+    ) -> Option<u32> {
+        let memory_types = &self.physical_device_mem_prop.memory_types;
+        for i in 0..self.physical_device_mem_prop.memory_type_count {
+            if ((memory_type_bits & (1 << i)) != 0)
+                && ((memory_types[i as usize].property_flags & property_flags) == property_flags)
+            {
+                return Some(i);
+            }
         }
-    }
 
-    println!(
-        "Vulkan: No compatible device memory type with required properties {:?}", memory_type_bits);
-    return None;
+        let mut support_properties= Vec::new();
+        for i in 0..self.physical_device_mem_prop.memory_type_count {
+            if memory_type_bits & (1 << i) != 0
+            {
+                support_properties.push(memory_types[i as usize].property_flags);
+            }
+        }
+
+        println!(
+            "Vulkan: No compatible device memory type with required properties {:?}. Support types are: {:?}",
+            property_flags, support_properties 
+        );
+        return None;
+    }
 }
 
-pub fn create_buffer(
-    rd: &RenderDevice,
-    size: u64,
-    usage: vk::BufferUsageFlags,
-    srv_format: vk::Format,
-) -> Option<Buffer> {
-    let device = &rd.device;
-    let memory_properties = &rd.physical_device_mem_prop;
+impl RenderDevice {
+    pub fn create_buffer(
+        &self,
+        size: u64,
+        usage: vk::BufferUsageFlags,
+        srv_format: vk::Format,
+    ) -> Option<Buffer> {
+        let device = &self.device;
 
-    // Create the vk buffer object
-    // TODO drop buffer if later stage failed
-    let buffer = {
-        let create_info = vk::BufferCreateInfo::builder().size(size).usage(usage);
-        unsafe { device.create_buffer(&create_info, None) }.ok()?
-    };
+        // Create the vk buffer object
+        // TODO drop buffer if later stage failed
+        let buffer = {
+            let create_info = vk::BufferCreateInfo::builder().size(size).usage(usage);
+            unsafe { device.create_buffer(&create_info, None) }.ok()?
+        };
 
-    // Allocate memory for ths buffer
-    // TODO drop device_memory if later stage failed
-    let memory = {
-        let mem_req = unsafe { device.get_buffer_memory_requirements(buffer) };
+        // Allocate memory for ths buffer
+        // TODO drop device_memory if later stage failed
+        let memory = {
+            let mem_req = unsafe { device.get_buffer_memory_requirements(buffer) };
 
-        // Pick memory type
-        // TODO currently treating all buffer like a staging buffer
-        let mem_property_flags = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-        let memory_type_index = rd.pick_memory_type_index(mem_req.memory_type_bits, mem_property_flags).unwrap();
+            // Pick memory type
+            // TODO currently treating all buffer like a staging buffer
+            let mem_property_flags =
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+            let memory_type_index = self
+                .pick_memory_type_index(mem_req.memory_type_bits, mem_property_flags)
+                .unwrap();
 
-        let create_info = vk::MemoryAllocateInfo::builder()
-            .allocation_size(mem_req.size)
-            .memory_type_index(memory_type_index);
-        unsafe { device.allocate_memory(&create_info, None) }.ok()?
-    };
+            let create_info = vk::MemoryAllocateInfo::builder()
+                .allocation_size(mem_req.size)
+                .memory_type_index(memory_type_index);
+            unsafe { device.allocate_memory(&create_info, None) }.ok()?
+        };
 
-    // Bind
-    let offset: vk::DeviceSize = 0;
-    unsafe { device.bind_buffer_memory(buffer, memory, offset) }.ok()?;
+        // Bind
+        let offset: vk::DeviceSize = 0;
+        unsafe { device.bind_buffer_memory(buffer, memory, offset) }.ok()?;
 
-    // Map (staging buffer) persistently
-    // TODO unmap if later stage failed
-    let map_flags = vk::MemoryMapFlags::default(); // dummy parameter
-    let data = unsafe { device.map_memory(memory, offset, size, map_flags) }.ok()?;
+        // Map (staging buffer) persistently
+        // TODO unmap if later stage failed
+        let map_flags = vk::MemoryMapFlags::default(); // dummy parameter
+        let data = unsafe { device.map_memory(memory, offset, size, map_flags) }.ok()?;
 
-    // Create SRV
-    let srv = if srv_format != vk::Format::UNDEFINED {
-        let create_info = vk::BufferViewCreateInfo::builder()
-            .buffer(buffer)
-            .format(srv_format)
-            .offset(0)
-            .range(vk::WHOLE_SIZE);
-        let srv = unsafe { device.create_buffer_view(&create_info, None) }.ok()?;
-        Some(srv)
-    } else {
-        None
-    };
+        // Create SRV
+        let srv = if srv_format != vk::Format::UNDEFINED {
+            let create_info = vk::BufferViewCreateInfo::builder()
+                .buffer(buffer)
+                .format(srv_format)
+                .offset(0)
+                .range(vk::WHOLE_SIZE);
+            let srv = unsafe { device.create_buffer_view(&create_info, None) }.ok()?;
+            Some(srv)
+        } else {
+            None
+        };
 
-    Some(Buffer {
-        buffer,
-        memory,
-        size,
-        data,
-        srv,
-    })
+        Some(Buffer {
+            buffer,
+            memory,
+            size,
+            data,
+            srv,
+        })
+    }
+}
+
+pub struct Texture2D {
+    pub image: vk::Image,
+    pub memory: vk::DeviceMemory,
+    pub width: u32,
+    pub height: u32,
+    pub srv: Option<vk::ImageView>,
+    pub srv_format: vk::Format,
+}
+
+impl RenderDevice {
+    pub fn create_texture(
+        &self,
+        width: u32,
+        height: u32,
+        usage: vk::ImageUsageFlags,
+        srv_format: vk::Format,
+        srv_aspect: vk::ImageAspectFlags,
+    ) -> Option<Texture2D> {
+        let device = &self.device;
+
+        let format_prop = unsafe { 
+            self.instance.get_physical_device_image_format_properties(self.physical_device, srv_format, vk::ImageType::TYPE_2D, vk::ImageTiling::default(), usage, vk::ImageCreateFlags::default())
+        };
+        if let Err(e) = format_prop {
+            println!("Error: texture creation for {:?} failed: {:?}. Try something else.", srv_format, e);
+            return None
+        }
+
+        // TODO proper mapping of image format from srv_format
+        let image_format = srv_format;
+
+        // Create image object
+        let initial_layout = vk::ImageLayout::UNDEFINED;
+        let create_info = vk::ImageCreateInfo::builder()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(image_format)
+            .extent(vk::Extent3D {
+                width,
+                height,
+                depth: 1,
+            })
+            .array_layers(1)
+            .mip_levels(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .initial_layout(initial_layout)
+            .usage(usage)
+            ;
+        let image = unsafe { device.create_image(&create_info, None) }.unwrap();
+
+        // Bind memory
+        let device_memory = {
+            let mem_requirements = unsafe { device.get_image_memory_requirements(image) };
+            let momory_type_index = self.pick_memory_type_index(
+                    mem_requirements.memory_type_bits,
+                    vk::MemoryPropertyFlags::DEVICE_LOCAL // That's basically what texture can have
+                )?;
+            let create_info = vk::MemoryAllocateInfo::builder()
+                .allocation_size(mem_requirements.size)
+                .memory_type_index(momory_type_index);
+            unsafe { device.allocate_memory(&create_info, None) }.unwrap()
+        };
+        unsafe { device.bind_image_memory(image, device_memory, 0) }.unwrap();
+
+        // Create a default ImageView 
+        let srv = if srv_format != vk::Format::UNDEFINED {
+            let create_info = vk::ImageViewCreateInfo::builder()
+                .image(image)
+                .view_type(vk::ImageViewType::TYPE_2D)
+                .format(srv_format)
+                .subresource_range(vk::ImageSubresourceRange {
+                    aspect_mask: srv_aspect,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                });
+            let srv = unsafe { device.create_image_view(&create_info, None) }.unwrap();
+            Some(srv)
+        } else {
+            None
+        };
+
+        Some(Texture2D {
+            image,
+            memory: device_memory,
+            width,
+            height,
+            srv,
+            srv_format
+        })
+    }
 }

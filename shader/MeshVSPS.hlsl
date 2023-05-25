@@ -19,6 +19,8 @@ struct ViewParams
 ConstantBuffer<ViewParams> view_params;
 
 Buffer<uint> vertex_buffer;
+Texture2D material_texture;
+SamplerState material_texture_sampler;
 
 struct PushConstants
 {
@@ -58,5 +60,7 @@ void vs_main(uint vert_id : SV_VertexID, out float4 hpos : SV_Position, out floa
 void ps_main(float4 hpos : SV_Position, float2 uv : TEXCOORD0, out float4 output : SV_Target0)
 {
 	//output = float4(1.0f, 1.0f, 1.0f, 1.0f);
-	output = float4(uv, hpos.z / hpos.w, 1.0f);
+	float4 tex = material_texture.Sample(material_texture_sampler, uv);
+	//output = float4(uv, hpos.z / hpos.w, 1.0f);
+	output = tex;
 } 

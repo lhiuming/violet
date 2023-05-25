@@ -7,7 +7,7 @@ mod window;
 use window::Window;
 
 mod render_device;
-use render_device::{create_buffer, RenderDevice};
+use render_device::RenderDevice;
 
 mod shader;
 use shader::{
@@ -20,7 +20,9 @@ mod gltf_asset;
 mod render_loop;
 use render_loop::{RednerLoop, RenderScene};
 
+use crate::gltf_asset::UploadContext;
 use crate::render_loop::AllocBuffer;
+use crate::render_loop::AllocTexture2D;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -208,26 +210,36 @@ fn main() {
     // Buffer for whole scene
     let ib_size = 4 * 1024 * 1024;
     let vb_size = 4 * 1024 * 1024;
-    let mut index_buffer = AllocBuffer::new(create_buffer(
-        &rd,
+    let mut index_buffer = AllocBuffer::new(rd.create_buffer(
         ib_size,
         vk::BufferUsageFlags::INDEX_BUFFER,
         vk::Format::UNDEFINED,
     )
     .unwrap());
-    let mut vertex_buffer = AllocBuffer::new(create_buffer(
-        &rd,
+    let mut vertex_buffer = AllocBuffer::new(rd.create_buffer(
         vb_size,
         vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER,
         vk::Format::R32_UINT,
     )
     .unwrap());
 
+    // Texture for whole scene
+    let tex_width = 512;
+    let tex_height = 512;
+    let mut material_texture = AllocTexture2D::new(rd.create_texture(
+        tex_width,
+        tex_height,
+        vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+        vk::Format::R8G8B8A8_SRGB,
+        vk::ImageAspectFlags::COLOR).unwrap());
+
     let args: Vec<String> = env::args().collect();
+
+    let upload_context = UploadContext::new(&rd);
 
     // Read the gltf model
     let gltf = if args.len() > 1 {
-        gltf_asset::load(&args[1], &mut index_buffer, &mut vertex_buffer)
+        gltf_asset::load(&args[1], &rd, &upload_context, &mut index_buffer, &mut vertex_buffer, &mut material_texture)
     } else {
         None
     };
@@ -235,6 +247,7 @@ fn main() {
     let render_scene = RenderScene {
         vertex_buffer,
         index_buffer,
+        material_texture,
         mesh_gfx_pipeline,
         mesh_cs_pipeline,
         gltf,

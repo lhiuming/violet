@@ -1,9 +1,10 @@
 use std::{array, mem::size_of};
 
-use crate::{render_loop::AllocBuffer};
+use crate::{render_loop::{AllocBuffer, AllocTexture2D}, render_device::RenderDevice};
 extern crate gltf as gltf_rs;
 
 extern crate glam;
+use ash::vk::{self, BufferUsageFlags};
 use glam::{Mat4, Quat, Vec3};
 
 pub struct Material {}
@@ -36,8 +37,51 @@ pub struct GLTF {
     pub meshes: Vec<Mesh>,
 }
 
+pub struct UploadContext
+{
+    pub command_pool: vk::CommandPool,
+    pub command_buffer: vk::CommandBuffer,
+}
+
+impl UploadContext
+{
+    pub fn new(rd: &RenderDevice) -> Self {
+        let command_pool = rd.create_command_pool();
+        let command_buffer = rd.create_command_buffer(command_pool);
+        Self {
+            command_pool,
+            command_buffer,
+        }
+    }
+
+    pub fn immediate_submit<F>(&self, rd: &RenderDevice, f: F) where F: FnOnce(vk::CommandBuffer) {
+        // TOOD we will need fence for multiple immediate submit or reusing command buffer
+        // TODO we will need semaphore to sync with rendering which will depends on operation here
+
+        let device = &rd.device;
+        let command_buffer = self.command_buffer;
+
+        // TODO check finished?
+
+        let begin_info = vk::CommandBufferBeginInfo::builder()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        unsafe { device.begin_command_buffer(command_buffer, &begin_info) }.unwrap();
+
+        f(command_buffer);
+
+        unsafe { device.end_command_buffer(command_buffer) }.unwrap();
+
+        let command_buffers = [command_buffer];
+        let submit_info = vk::SubmitInfo::builder().command_buffers(&command_buffers);
+        unsafe {
+            device.queue_submit(rd.gfx_queue, &[*submit_info], vk::Fence::null()).unwrap();
+        }
+    }
+
+}
+
 // Load a GLTF file as a bunch of meshes, materials, etc.
-pub fn load(path: &String, index_buffer: &mut AllocBuffer, vertex_buffer: &mut AllocBuffer) -> Option<GLTF> {
+pub fn load(path: &String, rd: &RenderDevice, upload_context: &UploadContext, index_buffer: &mut AllocBuffer, vertex_buffer: &mut AllocBuffer, material_texture: &mut AllocTexture2D) -> Option<GLTF> {
     // Read the document (structure) and blob data (buffers, imanges)
     // NOTE: gltf::Gltf::open only load the document
     let path = std::path::Path::new(&path);
@@ -151,12 +195,111 @@ pub fn load(path: &String, index_buffer: &mut AllocBuffer, vertex_buffer: &mut A
     // pre-load textures
     for image in images {
         println!(
-            "Image {} {}, {:?}: {:?}",
+            "Loading Image {} {}, {:?}: {:?}",
             image.width,
             image.height,
             image.format,
             image.pixels.split_at(8).0
         );
+
+        if (image.format == gltf_rs::image::Format::R8G8B8)
+        && (material_texture.texture.srv_format == vk::Format::R8G8B8A8_SRGB) {
+
+            let texel_count = image.width * image.height;
+
+            // Create staging buffer
+            let staging_buffer = rd.create_buffer(texel_count as u64 * 4, BufferUsageFlags::TRANSFER_SRC, vk::Format::UNDEFINED).unwrap();
+
+            // Read to staging buffer
+            let staging_slice = unsafe { std::slice::from_raw_parts_mut(staging_buffer.data as *mut u8, texel_count as usize * 4) };
+            for y in 0..image.height {
+                for x in 0..image.width {
+                    let offset = (y * image.width + x) as usize;
+                    let (r, g, b) = (
+                        image.pixels[offset * 3 + 0],
+                        image.pixels[offset * 3 + 1],
+                        image.pixels[offset * 3 + 2],
+                    );
+                    staging_slice[offset * 4 + 0] = r;
+                    staging_slice[offset * 4 + 1] = g;
+                    staging_slice[offset * 4 + 2] = b;
+                    staging_slice[offset * 4 + 3] = 255;
+                }
+            }
+
+            // Transfer to material texture
+            let offset = material_texture.alloc(image.width, image.height);
+            upload_context.immediate_submit(rd, |command_buffer| {
+                // Transfer to proper image layout
+                unsafe {
+                    let barrier = vk::ImageMemoryBarrier::builder()
+                    .image(material_texture.texture.image)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    });
+                    rd.device.cmd_pipeline_barrier(
+                        command_buffer, 
+                        vk::PipelineStageFlags::TOP_OF_PIPE,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[*barrier]);
+                }
+
+                // Copy
+                let dst_image_layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
+                let region = vk::BufferImageCopy::builder()
+                .buffer_row_length(0) // zero means tightly packed
+                .buffer_image_height(0) // zero means tightly packed
+                .image_subresource(vk::ImageSubresourceLayers {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    mip_level: 0,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                })
+                .image_offset(vk::Offset3D { x: offset.0 as i32, y: offset.1 as i32, z: 0 })
+                .image_extent(vk::Extent3D { width: image.width, height: image.height, depth: 1, });
+                let regions = [*region];
+                unsafe { rd.device.cmd_copy_buffer_to_image(command_buffer, staging_buffer.buffer, material_texture.texture.image, dst_image_layout, &regions) }
+
+                // Transfer to shader ready layout
+                unsafe {
+                    let barrier = vk::ImageMemoryBarrier::builder()
+                    .image(material_texture.texture.image)
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: 1,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    });
+                    rd.device.cmd_pipeline_barrier(
+                        command_buffer, 
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[*barrier]);
+                }
+            });
+
+        } else {
+            println!("Warning: GLTF Loader: Unsupported texture format: {:?} to {:?}", image.format, material_texture.texture.srv_format);
+        }
     }
 
     // Load nodes in the scenes
