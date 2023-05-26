@@ -21,6 +21,7 @@ mod render_loop;
 use render_loop::{RednerLoop, RenderScene};
 
 use crate::gltf_asset::UploadContext;
+use crate::render_device::TextureDesc;
 use crate::render_loop::AllocBuffer;
 use crate::render_loop::AllocTexture2D;
 
@@ -224,22 +225,28 @@ fn main() {
     .unwrap());
 
     // Texture for whole scene
-    let tex_width = 512;
-    let tex_height = 512;
-    let mut material_texture = AllocTexture2D::new(rd.create_texture(
-        tex_width,
-        tex_height,
-        vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
-        vk::Format::R8G8B8A8_SRGB,
-        vk::ImageAspectFlags::COLOR).unwrap());
+    let tex_width = 2048;
+    let tex_height = 2048;
+    let tex_array_len = 5;
+    let mut material_texture = {
+        let texture = rd.create_texture(TextureDesc::new_2d_array(
+            tex_width,
+            tex_height,
+            tex_array_len,
+            vk::Format::R8G8B8A8_SRGB,
+            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+        )).unwrap();
+        let texture_view = rd.create_texture_view(&texture, texture.desc.format, vk::ImageAspectFlags::COLOR).unwrap();
+        AllocTexture2D::new(texture, texture_view)
+    };
 
     let args: Vec<String> = env::args().collect();
 
-    let upload_context = UploadContext::new(&rd);
+    let mut upload_context = UploadContext::new(&rd);
 
     // Read the gltf model
     let gltf = if args.len() > 1 {
-        gltf_asset::load(&args[1], &rd, &upload_context, &mut index_buffer, &mut vertex_buffer, &mut material_texture)
+        gltf_asset::load(&args[1], &rd, &mut upload_context, &mut index_buffer, &mut vertex_buffer, &mut material_texture)
     } else {
         None
     };

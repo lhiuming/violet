@@ -543,52 +543,64 @@ impl RenderDevice {
     }
 }
 
-pub struct Texture2D {
-    pub image: vk::Image,
-    pub memory: vk::DeviceMemory,
+pub struct TextureDesc {
     pub width: u32,
     pub height: u32,
-    pub srv: Option<vk::ImageView>,
-    pub srv_format: vk::Format,
+    pub array_len: u32,
+    pub format: vk::Format,
+    pub usage: vk::ImageUsageFlags,
+}
+
+impl TextureDesc {
+    pub fn new_2d(width: u32, height: u32, format: vk::Format, usage: vk::ImageUsageFlags) -> TextureDesc {
+        TextureDesc { width, height, array_len: 1, format, usage }
+    }
+
+    pub fn new_2d_array(width: u32, height: u32, array_len: u32, format: vk::Format, usage: vk::ImageUsageFlags) -> TextureDesc {
+        TextureDesc { width, height, array_len, format, usage }
+    }
+}
+
+pub struct Texture {
+    pub desc: TextureDesc,
+    pub image: vk::Image,
+    pub memory: vk::DeviceMemory,
+
+}
+
+pub struct TextureView {
+    pub image_view: vk::ImageView,
+    pub format: vk::Format,
+    pub aspect: vk::ImageAspectFlags,
 }
 
 impl RenderDevice {
-    pub fn create_texture(
-        &self,
-        width: u32,
-        height: u32,
-        usage: vk::ImageUsageFlags,
-        srv_format: vk::Format,
-        srv_aspect: vk::ImageAspectFlags,
-    ) -> Option<Texture2D> {
+    pub fn create_texture(&self, desc: TextureDesc) -> Option<Texture> {
         let device = &self.device;
 
         let format_prop = unsafe { 
-            self.instance.get_physical_device_image_format_properties(self.physical_device, srv_format, vk::ImageType::TYPE_2D, vk::ImageTiling::default(), usage, vk::ImageCreateFlags::default())
+            self.instance.get_physical_device_image_format_properties(self.physical_device, desc.format, vk::ImageType::TYPE_2D, vk::ImageTiling::default(), desc.usage, vk::ImageCreateFlags::default())
         };
         if let Err(e) = format_prop {
-            println!("Error: texture creation for {:?} failed: {:?}. Try something else.", srv_format, e);
+            println!("Error: texture creation for {:?} failed: {:?}. Try something else.", desc.format, e);
             return None
         }
-
-        // TODO proper mapping of image format from srv_format
-        let image_format = srv_format;
 
         // Create image object
         let initial_layout = vk::ImageLayout::UNDEFINED;
         let create_info = vk::ImageCreateInfo::builder()
             .image_type(vk::ImageType::TYPE_2D)
-            .format(image_format)
+            .format(desc.format)
             .extent(vk::Extent3D {
-                width,
-                height,
+                width: desc.width,
+                height: desc.height,
                 depth: 1,
             })
-            .array_layers(1)
+            .array_layers(desc.array_len)
             .mip_levels(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .initial_layout(initial_layout)
-            .usage(usage)
+            .usage(desc.usage)
             ;
         let image = unsafe { device.create_image(&create_info, None) }.unwrap();
 
@@ -606,32 +618,34 @@ impl RenderDevice {
         };
         unsafe { device.bind_image_memory(image, device_memory, 0) }.unwrap();
 
-        // Create a default ImageView 
-        let srv = if srv_format != vk::Format::UNDEFINED {
-            let create_info = vk::ImageViewCreateInfo::builder()
-                .image(image)
+
+
+        Some(Texture {
+            desc,
+            image,
+            memory: device_memory,
+        })
+    }
+
+    pub fn create_texture_view(&self, texture: &Texture, format: vk::Format, aspect: vk::ImageAspectFlags) -> Option<TextureView> {
+        let device = &self.device;
+        let create_info = vk::ImageViewCreateInfo::builder()
+                .image(texture.image)
                 .view_type(vk::ImageViewType::TYPE_2D)
-                .format(srv_format)
+                .format(format)
                 .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: srv_aspect,
+                    aspect_mask: aspect,
                     base_mip_level: 0,
                     level_count: 1,
                     base_array_layer: 0,
                     layer_count: 1,
                 });
-            let srv = unsafe { device.create_image_view(&create_info, None) }.unwrap();
-            Some(srv)
-        } else {
-            None
-        };
+        let image_view = unsafe { device.create_image_view(&create_info, None) }.ok()?;
 
-        Some(Texture2D {
-            image,
-            memory: device_memory,
-            width,
-            height,
-            srv,
-            srv_format
+        Some(TextureView {
+            image_view,
+            format,
+            aspect,
         })
     }
 }

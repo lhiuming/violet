@@ -9,6 +9,14 @@ use glam::{Mat4, Quat, Vec3};
 
 pub struct Material {}
 
+pub struct Texture {
+    pub width: u32,
+    pub height: u32,
+    pub offset_x: u32,
+    pub offset_y: u32,
+    pub layer: u32,
+}
+
 pub struct Primitive {
     pub index_offset: u32,
     pub index_count: u32,
@@ -35,33 +43,50 @@ pub struct Scene {
 pub struct GLTF {
     pub scenes: Vec<Scene>,
     pub meshes: Vec<Mesh>,
+    pub textures : Vec<Texture>,
 }
 
 pub struct UploadContext
 {
     pub command_pool: vk::CommandPool,
-    pub command_buffer: vk::CommandBuffer,
+    pub command_buffers: Vec<vk::CommandBuffer>,
+    pub finished_fences: Vec<vk::Fence>,
 }
 
 impl UploadContext
 {
     pub fn new(rd: &RenderDevice) -> Self {
         let command_pool = rd.create_command_pool();
-        let command_buffer = rd.create_command_buffer(command_pool);
-        Self {
-            command_pool,
-            command_buffer,
-        }
+        Self { command_pool, command_buffers: Vec::new(), finished_fences: Vec::new() }
     }
 
-    pub fn immediate_submit<F>(&self, rd: &RenderDevice, f: F) where F: FnOnce(vk::CommandBuffer) {
-        // TOOD we will need fence for multiple immediate submit or reusing command buffer
+    fn pick_command_buffer(&mut self, rd: &RenderDevice) -> (vk::CommandBuffer, vk::Fence) {
+        // Find an existing command buffer that's ready to be used
+        for i in 0..self.command_buffers.len() {
+            let fence = self.finished_fences[i];
+            let finished = unsafe { rd.device.get_fence_status(fence) }.unwrap();
+            if finished {
+                let fences = [fence];
+                unsafe { rd.device.reset_fences(&fences) }.unwrap();
+                return (self.command_buffers[i], fence)
+            }
+        }
+
+        // If every buffer is pending, allocate a new one
+        let command_buffer = rd.create_command_buffer(self.command_pool);
+        let fence = rd.create_fence(false);
+
+        self.command_buffers.push(command_buffer);
+        self.finished_fences.push(fence);
+
+        return (command_buffer, fence);
+    }
+
+    pub fn immediate_submit<F>(&mut self, rd: &RenderDevice, f: F) where F: FnOnce(vk::CommandBuffer) {
         // TODO we will need semaphore to sync with rendering which will depends on operation here
 
         let device = &rd.device;
-        let command_buffer = self.command_buffer;
-
-        // TODO check finished?
+        let (command_buffer, finished_fence) = self.pick_command_buffer(rd);
 
         let begin_info = vk::CommandBufferBeginInfo::builder()
             .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
@@ -74,20 +99,21 @@ impl UploadContext
         let command_buffers = [command_buffer];
         let submit_info = vk::SubmitInfo::builder().command_buffers(&command_buffers);
         unsafe {
-            device.queue_submit(rd.gfx_queue, &[*submit_info], vk::Fence::null()).unwrap();
+            device.queue_submit(rd.gfx_queue, &[*submit_info], finished_fence).unwrap();
         }
     }
 
 }
 
 // Load a GLTF file as a bunch of meshes, materials, etc.
-pub fn load(path: &String, rd: &RenderDevice, upload_context: &UploadContext, index_buffer: &mut AllocBuffer, vertex_buffer: &mut AllocBuffer, material_texture: &mut AllocTexture2D) -> Option<GLTF> {
+pub fn load(path: &String, rd: &RenderDevice, upload_context: &mut UploadContext, index_buffer: &mut AllocBuffer, vertex_buffer: &mut AllocBuffer, material_texture: &mut AllocTexture2D) -> Option<GLTF> {
     // Read the document (structure) and blob data (buffers, imanges)
     // NOTE: gltf::Gltf::open only load the document
     let path = std::path::Path::new(&path);
     let (document, buffers, images) = gltf::import(path).ok()?;
 
     let mut meshes = Vec::<Mesh>::new();
+    let mut textures = Vec::<Texture>::new();
 
     // pre-load meshes
     for mesh in document.meshes() {
@@ -203,7 +229,7 @@ pub fn load(path: &String, rd: &RenderDevice, upload_context: &UploadContext, in
         );
 
         if (image.format == gltf_rs::image::Format::R8G8B8)
-        && (material_texture.texture.srv_format == vk::Format::R8G8B8A8_SRGB) {
+        && (material_texture.texture.desc.format == vk::Format::R8G8B8A8_SRGB) {
 
             let texel_count = image.width * image.height;
 
@@ -228,7 +254,8 @@ pub fn load(path: &String, rd: &RenderDevice, upload_context: &UploadContext, in
             }
 
             // Transfer to material texture
-            let offset = material_texture.alloc(image.width, image.height);
+            let (dst_x, dst_y, dst_layer) = material_texture.alloc(image.width, image.height).unwrap();
+            println!("/t Writing to material texture: x {}, y {}, layer {}", dst_x, dst_y, dst_layer);
             upload_context.immediate_submit(rd, |command_buffer| {
                 // Transfer to proper image layout
                 unsafe {
@@ -242,7 +269,7 @@ pub fn load(path: &String, rd: &RenderDevice, upload_context: &UploadContext, in
                         aspect_mask: vk::ImageAspectFlags::COLOR,
                         base_mip_level: 0,
                         level_count: 1,
-                        base_array_layer: 0,
+                        base_array_layer: dst_layer,
                         layer_count: 1,
                     });
                     rd.device.cmd_pipeline_barrier(
@@ -263,10 +290,10 @@ pub fn load(path: &String, rd: &RenderDevice, upload_context: &UploadContext, in
                 .image_subresource(vk::ImageSubresourceLayers {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
                     mip_level: 0,
-                    base_array_layer: 0,
+                    base_array_layer: dst_layer,
                     layer_count: 1,
                 })
-                .image_offset(vk::Offset3D { x: offset.0 as i32, y: offset.1 as i32, z: 0 })
+                .image_offset(vk::Offset3D { x: dst_x as i32, y: dst_y as i32, z: 0 })
                 .image_extent(vk::Extent3D { width: image.width, height: image.height, depth: 1, });
                 let regions = [*region];
                 unsafe { rd.device.cmd_copy_buffer_to_image(command_buffer, staging_buffer.buffer, material_texture.texture.image, dst_image_layout, &regions) }
@@ -283,7 +310,7 @@ pub fn load(path: &String, rd: &RenderDevice, upload_context: &UploadContext, in
                         aspect_mask: vk::ImageAspectFlags::COLOR,
                         base_mip_level: 0,
                         level_count: 1,
-                        base_array_layer: 0,
+                        base_array_layer: dst_layer,
                         layer_count: 1,
                     });
                     rd.device.cmd_pipeline_barrier(
@@ -297,8 +324,10 @@ pub fn load(path: &String, rd: &RenderDevice, upload_context: &UploadContext, in
                 }
             });
 
+            textures.push(Texture { width: image.width, height: image.height, offset_x: dst_x, offset_y: dst_y, layer: dst_layer });
+
         } else {
-            println!("Warning: GLTF Loader: Unsupported texture format: {:?} to {:?}", image.format, material_texture.texture.srv_format);
+            println!("Warning: GLTF Loader: Unsupported texture format: {:?} to {:?}", image.format, material_texture.texture.desc.format);
         }
     }
 
@@ -352,6 +381,6 @@ pub fn load(path: &String, rd: &RenderDevice, upload_context: &UploadContext, in
         scenes.push(Scene { nodes });
     }
 
-    Some(GLTF { scenes, meshes })
+    Some(GLTF { scenes, meshes, textures })
 }
 
