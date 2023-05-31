@@ -568,10 +568,30 @@ pub struct Texture {
 
 }
 
-pub struct TextureView {
-    pub image_view: vk::ImageView,
+pub struct TextureViewDesc {
+    pub view_type: vk::ImageViewType,
     pub format: vk::Format,
     pub aspect: vk::ImageAspectFlags,
+}
+
+impl TextureViewDesc {
+    pub fn default(texture: &Texture) -> TextureViewDesc {
+        let tex_desc = &texture.desc;
+        let view_type = if texture.desc.array_len > 1 { vk::ImageViewType::TYPE_2D_ARRAY } else { vk::ImageViewType::TYPE_2D };
+        let format = tex_desc.format;
+        let is_depth = format == vk::Format::D16_UNORM;
+        let aspect = if is_depth { vk::ImageAspectFlags::DEPTH } else { vk::ImageAspectFlags::COLOR };
+        TextureViewDesc {
+            view_type,
+            format: tex_desc.format,
+            aspect
+        }
+    }
+}
+
+pub struct TextureView {
+    pub desc: TextureViewDesc,
+    pub image_view: vk::ImageView,
 }
 
 impl RenderDevice {
@@ -627,25 +647,24 @@ impl RenderDevice {
         })
     }
 
-    pub fn create_texture_view(&self, texture: &Texture, format: vk::Format, aspect: vk::ImageAspectFlags) -> Option<TextureView> {
+    pub fn create_texture_view(&self, texture: &Texture, desc: TextureViewDesc) -> Option<TextureView> {
         let device = &self.device;
         let create_info = vk::ImageViewCreateInfo::builder()
                 .image(texture.image)
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(format)
+                .view_type(desc.view_type)
+                .format(desc.format)
                 .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: aspect,
+                    aspect_mask: desc.aspect,
                     base_mip_level: 0,
                     level_count: 1,
                     base_array_layer: 0,
-                    layer_count: 1,
+                    layer_count: texture.desc.array_len,
                 });
         let image_view = unsafe { device.create_image_view(&create_info, None) }.ok()?;
 
         Some(TextureView {
+            desc,
             image_view,
-            format,
-            aspect,
         })
     }
 }

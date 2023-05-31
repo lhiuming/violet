@@ -22,6 +22,7 @@ use render_loop::{RednerLoop, RenderScene};
 
 use crate::gltf_asset::UploadContext;
 use crate::render_device::TextureDesc;
+use crate::render_device::TextureViewDesc;
 use crate::render_loop::AllocBuffer;
 use crate::render_loop::AllocTexture2D;
 
@@ -236,7 +237,7 @@ fn main() {
             vk::Format::R8G8B8A8_SRGB,
             vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
         )).unwrap();
-        let texture_view = rd.create_texture_view(&texture, texture.desc.format, vk::ImageAspectFlags::COLOR).unwrap();
+        let texture_view = rd.create_texture_view(&texture, TextureViewDesc::default(&texture)).unwrap();
         AllocTexture2D::new(texture, texture_view)
     };
 

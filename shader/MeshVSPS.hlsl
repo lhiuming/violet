@@ -19,14 +19,19 @@ struct ViewParams
 ConstantBuffer<ViewParams> view_params;
 
 Buffer<uint> vertex_buffer;
-Texture2D material_texture;
+Texture2DArray material_texture;
 SamplerState material_texture_sampler;
 
 struct PushConstants
 {
 	float3x4 model_transform;
+	// Geometry
 	uint pos_offset;
 	uint uv_offset;
+	// Materials
+	uint2 base_color;
+	uint2 normal;
+	uint2 metal_rough;
 };
 [[vk::push_constant]]
 PushConstants pc;
@@ -57,10 +62,30 @@ void vs_main(uint vert_id : SV_VertexID, out float4 hpos : SV_Position, out floa
 #endif
 }
 
+float4 unpack_unorm(uint packed_value)
+{
+	return float4(
+		((packed_value >> 0) & 0xFF) / 255.0f,
+		((packed_value >> 8) & 0xFF) / 255.0f,
+		((packed_value >> 16) & 0xFF) / 255.0f,
+		((packed_value >> 24) & 0xFF) / 255.0f
+	);
+}
+
+float4 sample_material_texture(float2 local_uv, uint2 packed_params)
+{
+	float4 scale_offset = unpack_unorm(packed_params.x);
+	float2 uv = local_uv * scale_offset.xy + scale_offset.zw;
+	return material_texture.Sample(material_texture_sampler, float3(uv, packed_params.y));
+}
+
 void ps_main(float4 hpos : SV_Position, float2 uv : TEXCOORD0, out float4 output : SV_Target0)
 {
+	float4 base_color = sample_material_texture(uv, pc.base_color);
+	float4 normal = sample_material_texture(uv, pc.normal);
+	float4 metal_rough = sample_material_texture(uv, pc.metal_rough);
+
 	//output = float4(1.0f, 1.0f, 1.0f, 1.0f);
-	float4 tex = material_texture.Sample(material_texture_sampler, uv);
 	//output = float4(uv, hpos.z / hpos.w, 1.0f);
-	output = tex;
+	output = metal_rough;
 } 

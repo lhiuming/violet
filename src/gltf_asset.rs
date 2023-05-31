@@ -7,7 +7,11 @@ extern crate glam;
 use ash::vk::{self, BufferUsageFlags};
 use glam::{Mat4, Quat, Vec3};
 
-pub struct Material {}
+pub struct Material {
+    pub base_color_index: Option<u32>,
+    pub metal_rough_index: Option<u32>,
+    pub normal_index: Option<u32>,
+}
 
 pub struct Texture {
     pub width: u32,
@@ -24,6 +28,8 @@ pub struct Primitive {
     pub vertex_count: u32,
     pub positions_offset: u32,
     pub texcoords_offsets: [u32; 8],
+
+    pub material_index: u32,
 }
 
 pub struct Mesh {
@@ -33,7 +39,6 @@ pub struct Mesh {
 pub struct Node {
     pub transform: Mat4,
     pub mesh_index: Option<u32>,
-    pub material: Option<Material>,
 }
 
 pub struct Scene {
@@ -44,6 +49,7 @@ pub struct GLTF {
     pub scenes: Vec<Scene>,
     pub meshes: Vec<Mesh>,
     pub textures : Vec<Texture>,
+    pub materials : Vec<Material>,
 }
 
 pub struct UploadContext
@@ -120,6 +126,14 @@ pub fn load(path: &String, rd: &RenderDevice, upload_context: &mut UploadContext
         let mut primitives = Vec::<Primitive>::new();
 
         for primitive in mesh.primitives() {
+
+            let material_index = if let Some(index) = primitive.material().index() {
+                index as u32
+            } else {
+                println!("Warning: GLTF primitive has no material; ignored");
+                continue
+            };
+
             let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
 
             // Load indices
@@ -212,6 +226,7 @@ pub fn load(path: &String, rd: &RenderDevice, upload_context: &mut UploadContext
                 vertex_count,
                 positions_offset,
                 texcoords_offsets,
+                material_index,
             });
         } // end for primitives
 
@@ -331,14 +346,72 @@ pub fn load(path: &String, rd: &RenderDevice, upload_context: &mut UploadContext
         }
     }
 
+    // Load materials
+    let mut materials = Vec::<Material>::new();
+    for material in document.materials() {
+        let pbr_texs = material.pbr_metallic_roughness();
+
+        let base_color_index = if let Some(base_color) = pbr_texs.base_color_texture() {
+            if base_color.tex_coord() != 0 {
+                println!("Warning: GLTF Loader: Only texture coordinate 0 is supported");
+            }
+            println!("Material base color texture: {}", base_color.texture().index());
+
+            Some(base_color.texture().index() as u32)
+        } else {
+            None
+        };
+
+        let metal_rough_index = if let Some(metal_rough) = pbr_texs.metallic_roughness_texture() {
+            if metal_rough.tex_coord() != 0 {
+                println!("Warning: GLTF Loader: Only texture coordinate 0 is supported");
+            }
+            println!("Material metal rough texture: {}", metal_rough.texture().index());
+
+            Some(metal_rough.texture().index() as u32)
+        } else {
+            None
+        };
+
+        let normal_index = if let Some(normal) =  material.normal_texture() {
+            if normal.tex_coord() != 0 {
+                println!("Warning: GLTF Loader: Only texture coordinate 0 is supported");
+            }
+            println!("Material normal texture: {}", normal.texture().index());
+
+            Some(normal.texture().index() as u32)
+        } else {
+            None
+        };
+
+        if material.emissive_texture().is_some() {
+            println!("Warning: GLTF Loader: Emissive textures are not supported yet");
+        }
+        if material.occlusion_texture().is_some() {
+            println!("Warning: GLTF Loader: Occlusion textures are not supported yet");
+        }
+
+        materials.push(Material {
+            base_color_index,
+            metal_rough_index,
+            normal_index,
+        })
+    }
+
     // Load nodes in the scenes
     let mut scenes = Vec::<Scene>::new();
     for scene in document.scenes().by_ref() {
         let mut nodes = Vec::<Node>::new();
         for root in scene.nodes().by_ref() {
+            // Rotate the model to match the coordinate system
+            // glTF: Y up, right-handed
+            // Here: Z up, right-handed
+            // So we gonna rotate the model by 90 degrees around X axis
+            let root_rotation = Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2);
+
             // Create a statck to fake recursion
             let mut stack = Vec::<(gltf_rs::Node, Mat4)>::new();
-            stack.push((root, Mat4::IDENTITY));
+            stack.push((root, root_rotation));
 
             // Load nodes recursively
             while let Some((node, parent_transform)) = stack.pop() {
@@ -370,7 +443,6 @@ pub fn load(path: &String, rd: &RenderDevice, upload_context: &mut UploadContext
                 nodes.push(Node {
                     transform,
                     mesh_index: node.mesh().map(|mesh| mesh.index() as u32),
-                    material: None,
                 });
                 // Recursively load children
                 for child in node.children().by_ref() {
@@ -381,6 +453,6 @@ pub fn load(path: &String, rd: &RenderDevice, upload_context: &mut UploadContext
         scenes.push(Scene { nodes });
     }
 
-    Some(GLTF { scenes, meshes, textures })
+    Some(GLTF { scenes, meshes, textures, materials })
 }
 
