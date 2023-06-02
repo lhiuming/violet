@@ -16,6 +16,7 @@ use shader::{
 };
 
 mod gltf_asset;
+mod model;
 
 mod render_loop;
 use render_loop::{RednerLoop, RenderScene};
@@ -212,32 +213,40 @@ fn main() {
     // Buffer for whole scene
     let ib_size = 4 * 1024 * 1024;
     let vb_size = 4 * 1024 * 1024;
-    let mut index_buffer = AllocBuffer::new(rd.create_buffer(
-        ib_size,
-        vk::BufferUsageFlags::INDEX_BUFFER,
-        vk::Format::UNDEFINED,
-    )
-    .unwrap());
-    let mut vertex_buffer = AllocBuffer::new(rd.create_buffer(
-        vb_size,
-        vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER,
-        vk::Format::R32_UINT,
-    )
-    .unwrap());
+    let mut index_buffer = AllocBuffer::new(
+        rd.create_buffer(
+            ib_size,
+            vk::BufferUsageFlags::INDEX_BUFFER,
+            vk::Format::UNDEFINED,
+        )
+        .unwrap(),
+    );
+    let mut vertex_buffer = AllocBuffer::new(
+        rd.create_buffer(
+            vb_size,
+            vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER,
+            vk::Format::R32_UINT,
+        )
+        .unwrap(),
+    );
 
     // Texture for whole scene
     let tex_width = 2048;
     let tex_height = 2048;
     let tex_array_len = 5;
     let mut material_texture = {
-        let texture = rd.create_texture(TextureDesc::new_2d_array(
-            tex_width,
-            tex_height,
-            tex_array_len,
-            vk::Format::R8G8B8A8_SRGB,
-            vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
-        )).unwrap();
-        let texture_view = rd.create_texture_view(&texture, TextureViewDesc::default(&texture)).unwrap();
+        let texture = rd
+            .create_texture(TextureDesc::new_2d_array(
+                tex_width,
+                tex_height,
+                tex_array_len,
+                vk::Format::R8G8B8A8_SRGB,
+                vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+            ))
+            .unwrap();
+        let texture_view = rd
+            .create_texture_view(&texture, TextureViewDesc::default(&texture))
+            .unwrap();
         AllocTexture2D::new(texture, texture_view)
     };
 
@@ -247,12 +256,21 @@ fn main() {
 
     // Read the gltf model
     let gltf = if args.len() > 1 {
-        gltf_asset::load(&args[1], &rd, &mut upload_context, &mut index_buffer, &mut vertex_buffer, &mut material_texture)
+        gltf_asset::load(
+            &args[1],
+            &rd,
+            &mut upload_context,
+            &mut index_buffer,
+            &mut vertex_buffer,
+            &mut material_texture,
+        )
     } else {
         None
     };
 
-    let render_scene = RenderScene {
+    let model = model::load_gltf(&args[1]);
+
+    let mut render_scene = RenderScene {
         vertex_buffer,
         index_buffer,
         material_texture,

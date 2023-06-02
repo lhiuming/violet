@@ -4,8 +4,12 @@ use ash::vk::{self};
 
 use crate::float4x4;
 use crate::gltf_asset::GLTF;
-use crate::render_device::{Buffer, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc};
+use crate::render_device::{
+    Buffer, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
+};
 use crate::shader::Pipeline;
+
+use crate::model::Model;
 
 // Allocatable buffer. Alway aligned to 4 bytes.
 pub struct AllocBuffer {
@@ -164,23 +168,28 @@ impl AllocTexture2D {
     }
 }
 
-fn clamp<T>(v: T, min: T, max: T) -> T where T: PartialOrd {
-    if min > v { return min; }
-    if max < v { return max; }
+fn clamp<T>(v: T, min: T, max: T) -> T
+where
+    T: PartialOrd,
+{
+    if min > v {
+        return min;
+    }
+    if max < v {
+        return max;
+    }
     v
 }
 
 fn float_to_unorm(v: f32) -> u32 {
-    unsafe {
-        clamp( (v * 255.0).round().to_int_unchecked(), 0, 255)
-    }
+    unsafe { clamp((v * 255.0).round().to_int_unchecked(), 0, 255) }
 }
 
 fn pack_unorm(x: f32, y: f32, z: f32, w: f32) -> u32 {
     float_to_unorm(x)
-    | (float_to_unorm(y) << 8)
-    | (float_to_unorm(z) << 16)
-    | (float_to_unorm(w) << 24)
+        | (float_to_unorm(y) << 8)
+        | (float_to_unorm(z) << 16)
+        | (float_to_unorm(w) << 24)
 }
 
 // Contain everything to be rendered
@@ -198,6 +207,10 @@ pub struct RenderScene {
 
     // The loaded GLFT. We have only one :)
     pub gltf: Option<GLTF>,
+}
+
+impl RenderScene {
+    pub fn add(&mut self, model: Model) {}
 }
 
 #[repr(C)]
@@ -251,7 +264,7 @@ impl RednerLoop {
             ))
             .unwrap();
         let depth_buffer_view = rd
-            .create_texture_view(&depth_buffer,TextureViewDesc::default(&depth_buffer))
+            .create_texture_view(&depth_buffer, TextureViewDesc::default(&depth_buffer))
             .unwrap();
 
         // Shared samplers
@@ -319,16 +332,19 @@ impl RednerLoop {
                 let timeout_in_ns = 500000; // 500ms
                 loop {
                     match device.wait_for_fences(&fences, true, timeout_in_ns) {
-                        Ok(_) => { return },
+                        Ok(_) => return,
                         Err(_) => {
                             println!("Vulkan: Faild to wait {}, keep trying...", msg)
-                        },
+                        }
                     }
                 }
             };
 
             wait_fence(self.present_finished_fence, "present_finished");
-            wait_fence(self.command_buffer_finished_fence, "command_buffer_finished");
+            wait_fence(
+                self.command_buffer_finished_fence,
+                "command_buffer_finished",
+            );
 
             // Reset the fence
             device
@@ -753,18 +769,26 @@ impl RednerLoop {
                                 // Fill material
                                 let cal_texture_scale_offset_layer = |tex_index| {
                                     let tex = &gltf.textures[tex_index as usize];
-                                    let mt_width = render_scene.material_texture.texture.desc.width as f32;
-                                    let mt_height= render_scene.material_texture.texture.desc.height as f32;
-                                    (pack_unorm(
-                                        tex.width as f32 / mt_width,
-                                        tex.height as f32 / mt_height,
-                                        tex.offset_x as f32 / mt_width,
-                                        tex.offset_y as f32 / mt_height),
-                                        tex.layer)
+                                    let mt_width =
+                                        render_scene.material_texture.texture.desc.width as f32;
+                                    let mt_height =
+                                        render_scene.material_texture.texture.desc.height as f32;
+                                    (
+                                        pack_unorm(
+                                            tex.width as f32 / mt_width,
+                                            tex.height as f32 / mt_height,
+                                            tex.offset_x as f32 / mt_width,
+                                            tex.offset_y as f32 / mt_height,
+                                        ),
+                                        tex.layer,
+                                    )
                                 };
-                                (dst[2], dst[3]) = cal_texture_scale_offset_layer(mat.base_color_index.unwrap());
-                                (dst[4], dst[5]) = cal_texture_scale_offset_layer(mat.normal_index.unwrap());
-                                (dst[6], dst[7]) = cal_texture_scale_offset_layer(mat.metal_rough_index.unwrap());
+                                (dst[2], dst[3]) =
+                                    cal_texture_scale_offset_layer(mat.base_color_index.unwrap());
+                                (dst[4], dst[5]) =
+                                    cal_texture_scale_offset_layer(mat.normal_index.unwrap());
+                                (dst[6], dst[7]) =
+                                    cal_texture_scale_offset_layer(mat.metal_rough_index.unwrap());
                             }
 
                             device.cmd_push_constants(
