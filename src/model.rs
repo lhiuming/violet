@@ -1,12 +1,20 @@
 use glam::{Mat4, Vec3, Vec4};
+use rkyv::{ser::Serializer, Archive, Deserialize, Serialize};
+use std::{
+    fs::{File, OpenOptions},
+    io::{Read, Write},
+    path::{Path, PathBuf},
+};
 
+#[derive(Archive, Deserialize, Serialize)]
 pub struct Model {
     pub meshes: Vec<TriangleMesh>, // aggregated by material index
     pub materials: Vec<Material>,
     pub images: Vec<Image>,
 }
 
-#[derive(Debug)]
+// TODO geometry compression/32bit-packing
+#[derive(Archive, Deserialize, Serialize, Debug)]
 pub struct TriangleMesh {
     pub positions: Vec<[f32; 3]>,
     pub indicies: Vec<u16>,
@@ -27,6 +35,7 @@ impl TriangleMesh {
     }
 }
 
+#[derive(Archive, Deserialize, Serialize)]
 pub struct Material {
     pub base_color_map: Option<MaterialMap>,
     pub metallic_roughness_map: Option<MaterialMap>,
@@ -35,17 +44,26 @@ pub struct Material {
     pub roughness_factor: f32,
 }
 
+#[derive(Archive, Deserialize, Serialize)]
 pub struct MaterialMap {
     pub image_index: u32,
 }
 
+// TODO image compression
+#[derive(Archive, Deserialize, Serialize)]
 pub struct Image {
     pub width: u32,
     pub height: u32,
     pub data: Vec<u8>, // RGBA
 }
 
-pub type Result<T> = std::result::Result<T, String>;
+pub type Result<T> = std::result::Result<T, Error>;
+
+#[derive(Debug)]
+pub enum Error {
+    NotExist(String),
+    General(String),
+}
 
 fn iterate_on_nodes<F>(node: &gltf::Node, xform: Mat4, f: &mut F)
 where
@@ -108,13 +126,123 @@ impl mikktspace::Geometry for MikktspaceGeometry<'_> {
     }
 }
 
-pub fn load_gltf(path: &str) -> Result<Model> {
+// Load a model from cache, or
+// if model is not in cache, load the original gltf file and store it in cache.
+pub fn load(path: &Path) -> Result<Model> {
+    // Try to load from caceh
+    match try_load_from_cache(path) {
+        Ok(model) => Ok(model),
+        Err(err) => {
+            match err {
+                Error::NotExist(cache_path) => {
+                    // Import if cache not exist
+                    println!(
+                        "Model cache ({}) not exist ... import the gltf.",
+                        cache_path
+                    );
+                    import_gltf(path)
+                }
+                Error::General(msg) => Err(Error::General(msg)),
+            }
+        }
+    }
+}
+
+pub fn to_cache_path(path: &Path) -> Result<PathBuf> {
+    let asset_name = if path.is_absolute() {
+        let cur_dir = match std::env::current_dir() {
+            Ok(dir) => dir,
+            Err(err) => {
+                return Err(Error::General(err.to_string()));
+            }
+        };
+        let asset_dir = cur_dir.join("asset");
+        path.strip_prefix(&asset_dir)
+            .expect("Faild to strip asset dir")
+    } else {
+        let asset_dir = Path::new("./assets");
+        path.strip_prefix(&asset_dir).unwrap_or(path)
+    };
+
+    let mut cache_path = PathBuf::new();
+    cache_path.push(".");
+    cache_path.push("cache");
+    cache_path.push(asset_name);
+    cache_path.set_extension("cache");
+    Ok(cache_path)
+}
+
+pub fn try_load_from_cache(path: &Path) -> Result<Model> {
+    let cache_path = to_cache_path(path).expect(&format!(
+        "Failed to get cache path for asset: {}",
+        path.to_string_lossy()
+    ));
+    if cache_path.exists() {
+        return Model::new_from_file(&cache_path);
+    } else {
+        return Err(Error::NotExist(cache_path.to_string_lossy().to_string()));
+    }
+}
+
+impl Model {
+    fn save_to_file(&self, path: &Path) {
+        let mut serializer = rkyv::ser::serializers::AllocSerializer::<4096>::default();
+        let size = serializer
+            .serialize_value(self)
+            .expect("Failed to serialize model");
+
+        std::fs::create_dir_all(path.parent().unwrap()).expect(&format!(
+            "Failed to create dirs for: {}",
+            path.to_string_lossy()
+        ));
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .open(path)
+            .expect(&format!(
+                "Failed to create file at: {}",
+                path.to_string_lossy()
+            ));
+
+        file.write_all(serializer.into_serializer().into_inner().as_ref())
+            .expect("Failed to write to file");
+
+        println!("Saved model to cache: {}. size {}", path.display(), size);
+    }
+
+    fn new_from_file(path: &Path) -> Result<Model> {
+        let mut file = File::open(path).expect("Failed to open file");
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).expect("Failed to read file");
+        let model = unsafe { rkyv::from_bytes_unchecked::<Model>(&buf) }
+            .expect("Failed to deserialize model from cache");
+
+        println!("Loaded model from cache: {}", path.display());
+        Ok(model)
+    }
+}
+
+pub fn import_gltf(path: &Path) -> Result<Model> {
+    let model = import_gltf_uncached(path);
+    if let Ok(model) = &model {
+        let cache_path = to_cache_path(path).expect(&format!(
+            "Failed to get cached path for: {}",
+            path.to_string_lossy()
+        ));
+        model.save_to_file(&cache_path);
+    }
+    model
+}
+
+pub fn import_gltf_uncached(path: &Path) -> Result<Model> {
     // Read the document (structure) and blob data (buffers, imanges)
-    let path = std::path::Path::new(&path);
     let (document, buffers, images) = match gltf::import(path) {
         Ok(ret) => ret,
         Err(_) => {
-            return Err(format!("Failed to load glTF file: {}", path.display()));
+            return Err(Error::General(format!(
+                "Failed to load glTF file: {}",
+                path.display()
+            )));
         }
     };
     println!("Loaded glTF file: {}", path.display());
@@ -296,7 +424,7 @@ pub fn load_gltf(path: &str) -> Result<Model> {
             iterate_on_nodes(&root, root_xform, &mut process_node);
         }
     } else {
-        return Err("No default scene found.".to_string());
+        return Err(Error::General("No default scene found.".to_string()));
     }
 
     // Clean up meshes

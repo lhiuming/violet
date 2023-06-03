@@ -1,5 +1,6 @@
 use std::env;
 use std::mem;
+use std::path::Path;
 
 use ash::vk;
 
@@ -251,6 +252,7 @@ fn main() {
     };
 
     let args: Vec<String> = env::args().collect();
+    let model = model::load(Path::new(&args[1]));
 
     let mut upload_context = UploadContext::new(&rd);
 
@@ -267,8 +269,6 @@ fn main() {
     } else {
         None
     };
-
-    let model = model::load_gltf(&args[1]);
 
     let mut render_scene = RenderScene {
         vertex_buffer,

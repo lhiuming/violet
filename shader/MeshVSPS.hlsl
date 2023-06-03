@@ -36,7 +36,7 @@ struct PushConstants
 [[vk::push_constant]]
 PushConstants pc;
 
-void vs_main(uint vert_id : SV_VertexID, out float4 hpos : SV_Position, out float2 uv : TEXCOORD0) 
+void vs_main(uint vert_id : SV_VertexID, out float4 hpos : SV_Position, out float2 uv : TEXCOORD0, out float2 screen_pos : TEXCOORD1) 
 {
 #if 0
 	const float2 vbuffer[] = {
@@ -59,6 +59,7 @@ void vs_main(uint vert_id : SV_VertexID, out float4 hpos : SV_Position, out floa
 	float3 wpos = mul(model_transform, float4(pos, 1.0f));
 	float4x4 view_proj = view_params.view_proj;
 	hpos =  mul(view_proj, float4(wpos, 1.0f));
+	screen_pos = hpos.xy / hpos.w * 0.5f + 0.5f;
 #endif
 }
 
@@ -79,7 +80,7 @@ float4 sample_material_texture(float2 local_uv, uint2 packed_params)
 	return material_texture.Sample(material_texture_sampler, float3(uv, packed_params.y));
 }
 
-void ps_main(float4 hpos : SV_Position, float2 uv : TEXCOORD0, out float4 output : SV_Target0)
+void ps_main(float4 hpos : SV_Position, float2 uv : TEXCOORD0, noperspective float2 screen_pos : TEXCOORD1, out float4 output : SV_Target0)
 {
 	float4 base_color = sample_material_texture(uv, pc.base_color);
 	float4 normal = sample_material_texture(uv, pc.normal);
@@ -87,5 +88,11 @@ void ps_main(float4 hpos : SV_Position, float2 uv : TEXCOORD0, out float4 output
 
 	//output = float4(1.0f, 1.0f, 1.0f, 1.0f);
 	//output = float4(uv, hpos.z / hpos.w, 1.0f);
-	output = metal_rough;
+	float u = frac(screen_pos.x * 3);
+	if (u < 0.33f)
+		output = base_color;
+	else if (u < 0.66f)
+		output = normal;
+	else
+		output = metal_rough;
 } 
