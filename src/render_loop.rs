@@ -1,9 +1,9 @@
 use std::mem::{self, size_of};
 
 use ash::vk::{self};
+use glam::{Mat4, UVec2, Vec2};
 
 use crate::float4x4;
-use crate::gltf_asset::GLTF;
 use crate::render_device::{
     Buffer, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
 };
@@ -148,6 +148,13 @@ impl AllocTexture2D {
         }
     }
 
+    pub fn size(&self) -> UVec2 {
+        UVec2 {
+            x: self.texture.desc.width,
+            y: self.texture.desc.height,
+        }
+    }
+
     pub fn alloc<'a>(&mut self, width: u32, height: u32) -> Option<(u32, u32, u32)> {
         let tile_size = 256;
 
@@ -192,8 +199,126 @@ fn pack_unorm(x: f32, y: f32, z: f32, w: f32) -> u32 {
         | (float_to_unorm(w) << 24)
 }
 
+// Struct for asset uploading to GPU
+pub struct UploadContext {
+    pub command_pool: vk::CommandPool,
+    pub command_buffers: Vec<vk::CommandBuffer>,
+    pub finished_fences: Vec<vk::Fence>,
+}
+
+impl UploadContext {
+    pub fn new(rd: &RenderDevice) -> Self {
+        let command_pool = rd.create_command_pool();
+        Self {
+            command_pool,
+            command_buffers: Vec::new(),
+            finished_fences: Vec::new(),
+        }
+    }
+
+    fn pick_command_buffer(&mut self, rd: &RenderDevice) -> (vk::CommandBuffer, vk::Fence) {
+        // Find an existing command buffer that's ready to be used
+        for i in 0..self.command_buffers.len() {
+            let fence = self.finished_fences[i];
+            let finished = unsafe { rd.device.get_fence_status(fence) }.unwrap();
+            if finished {
+                let fences = [fence];
+                unsafe { rd.device.reset_fences(&fences) }.unwrap();
+                return (self.command_buffers[i], fence);
+            }
+        }
+
+        // If every buffer is pending, allocate a new one
+        let command_buffer = rd.create_command_buffer(self.command_pool);
+        let fence = rd.create_fence(false);
+
+        self.command_buffers.push(command_buffer);
+        self.finished_fences.push(fence);
+
+        return (command_buffer, fence);
+    }
+
+    pub fn immediate_submit<F>(&mut self, rd: &RenderDevice, f: F)
+    where
+        F: FnOnce(vk::CommandBuffer),
+    {
+        // TODO we will need semaphore to sync with rendering which will depends on operation here
+
+        let device = &rd.device;
+        let (command_buffer, finished_fence) = self.pick_command_buffer(rd);
+
+        let begin_info = vk::CommandBufferBeginInfo::builder()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        unsafe { device.begin_command_buffer(command_buffer, &begin_info) }.unwrap();
+
+        f(command_buffer);
+
+        unsafe { device.end_command_buffer(command_buffer) }.unwrap();
+
+        let command_buffers = [command_buffer];
+        let submit_info = vk::SubmitInfo::builder().command_buffers(&command_buffers);
+        unsafe {
+            device
+                .queue_submit(rd.gfx_queue, &[*submit_info], finished_fence)
+                .unwrap();
+        }
+    }
+}
+
+pub struct TextureParams {
+    pub size: UVec2,
+    pub offset: UVec2,
+    pub layer: u32,
+    pub uv_scale: Vec2,
+    pub uv_offset: Vec2,
+}
+
+pub struct MaterialParams {
+    pub base_color_index: u32,
+    pub metallic_roughness_index: u32,
+    pub normal_index: u32,
+}
+
+pub struct MeshParams {
+    pub index_offset: u32,
+    pub index_count: u32,
+
+    pub positions_offset: u32,
+    pub texcoords_offset: u32,
+    pub normals_offset: u32,
+    pub tangents_offset: u32,
+
+    pub material_index: u32,
+}
+
+struct PushConstantsBuilder {
+    data: Vec<u8>,
+}
+
+impl PushConstantsBuilder {
+    pub fn new() -> Self {
+        Self { data: Vec::new() }
+    }
+
+    pub fn push<T>(&mut self, value: &T) -> &mut Self {
+        let size = std::mem::size_of::<T>();
+        let offset = self.data.len();
+        self.data.resize(offset + size, 0);
+        self.data[offset..offset + size].copy_from_slice(unsafe {
+            std::slice::from_raw_parts(value as *const T as *const u8, size)
+        });
+        self
+    }
+
+    pub fn build(&self) -> &[u8] {
+        &self.data
+    }
+}
+
 // Contain everything to be rendered
 pub struct RenderScene {
+    pub upload_context: UploadContext,
+
     // Global buffer to store all loaded meshes
     pub vertex_buffer: AllocBuffer,
     pub index_buffer: AllocBuffer,
@@ -205,17 +330,221 @@ pub struct RenderScene {
     pub mesh_gfx_pipeline: Option<Pipeline>,
     pub mesh_cs_pipeline: Option<Pipeline>,
 
-    // The loaded GLFT. We have only one :)
-    pub gltf: Option<GLTF>,
+    // Stuff to be rendered
+    pub texture_params: Vec<TextureParams>,
+    pub material_parmas: Vec<MaterialParams>,
+    pub mesh_params: Vec<MeshParams>,
 }
 
 impl RenderScene {
-    pub fn add(&mut self, model: Model) {}
+    pub fn add(&mut self, rd: &RenderDevice, model: &Model) {
+        let upload_context = &mut self.upload_context;
+        let material_texture = &mut self.material_texture;
+        let index_buffer = &mut self.index_buffer;
+        let vertex_buffer = &mut self.vertex_buffer;
+
+        let texture_index_offset = self.texture_params.len() as u32;
+        for image in &model.images {
+            let texel_count = image.width * image.height;
+
+            // Create staging buffer
+            let staging_buffer = rd
+                .create_buffer(
+                    texel_count as u64 * 4,
+                    vk::BufferUsageFlags::TRANSFER_SRC,
+                    vk::Format::UNDEFINED,
+                )
+                .unwrap();
+
+            // Read to staging buffer
+            let staging_slice = unsafe {
+                std::slice::from_raw_parts_mut(
+                    staging_buffer.data as *mut u8,
+                    texel_count as usize * 4,
+                )
+            };
+            staging_slice.copy_from_slice(&image.data);
+
+            // Transfer to material texture
+            let (dst_x, dst_y, dst_layer) =
+                material_texture.alloc(image.width, image.height).unwrap();
+            println!(
+                "/t Writing to material texture: x {}, y {}, layer {}",
+                dst_x, dst_y, dst_layer
+            );
+            upload_context.immediate_submit(rd, |command_buffer| {
+                // Transfer to proper image layout
+                unsafe {
+                    let barrier = vk::ImageMemoryBarrier::builder()
+                        .image(material_texture.texture.image)
+                        .old_layout(vk::ImageLayout::UNDEFINED)
+                        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                        .src_access_mask(vk::AccessFlags::empty())
+                        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: dst_layer,
+                            layer_count: 1,
+                        });
+                    rd.device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::TOP_OF_PIPE,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[*barrier],
+                    );
+                }
+
+                // Copy
+                let dst_image_layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
+                let region = vk::BufferImageCopy::builder()
+                    .buffer_row_length(0) // zero means tightly packed
+                    .buffer_image_height(0) // zero means tightly packed
+                    .image_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: dst_layer,
+                        layer_count: 1,
+                    })
+                    .image_offset(vk::Offset3D {
+                        x: dst_x as i32,
+                        y: dst_y as i32,
+                        z: 0,
+                    })
+                    .image_extent(vk::Extent3D {
+                        width: image.width,
+                        height: image.height,
+                        depth: 1,
+                    });
+                let regions = [*region];
+                unsafe {
+                    rd.device.cmd_copy_buffer_to_image(
+                        command_buffer,
+                        staging_buffer.buffer,
+                        material_texture.texture.image,
+                        dst_image_layout,
+                        &regions,
+                    )
+                }
+
+                // Transfer to shader ready layout
+                unsafe {
+                    let barrier = vk::ImageMemoryBarrier::builder()
+                        .image(material_texture.texture.image)
+                        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                        .src_access_mask(vk::AccessFlags::empty())
+                        .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                        .subresource_range(vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: dst_layer,
+                            layer_count: 1,
+                        });
+                    rd.device.cmd_pipeline_barrier(
+                        command_buffer,
+                        vk::PipelineStageFlags::TRANSFER,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                        vk::DependencyFlags::empty(),
+                        &[],
+                        &[],
+                        &[*barrier],
+                    );
+                }
+            });
+
+            let size = UVec2::new(image.width, image.height);
+            let offset = UVec2 { x: dst_x, y: dst_y };
+            self.texture_params.push(TextureParams {
+                size,
+                offset,
+                layer: dst_layer,
+                uv_scale: size.as_vec2() / material_texture.size().as_vec2(),
+                uv_offset: offset.as_vec2() / material_texture.size().as_vec2(),
+            });
+        }
+
+        let material_index_offset = self.material_parmas.len() as u32;
+        for material in &model.materials {
+            // TODO default textures
+            let resolve = |map: &Option<crate::model::MaterialMap>| match map {
+                Some(map) => texture_index_offset + map.image_index,
+                None => 0,
+            };
+
+            self.material_parmas.push(MaterialParams {
+                base_color_index: resolve(&material.base_color_map),
+                metallic_roughness_index: resolve(&material.metallic_roughness_map),
+                normal_index: resolve(&material.normal_map),
+            });
+        }
+
+        for (material_index, mesh) in model.meshes.iter().enumerate() {
+            // Upload indices
+            let index_offset;
+            let index_count;
+            {
+                index_count = mesh.indicies.len() as u32;
+                let (dst, offset) = index_buffer.alloc(index_count);
+                index_offset = offset / 4;
+                dst.copy_from_slice(&mesh.indicies);
+            }
+            // Upload position
+            let positions_offset;
+            {
+                let (dst, offset) = vertex_buffer.alloc::<[f32; 3]>(mesh.positions.len() as u32);
+                positions_offset = offset / 4;
+                dst.copy_from_slice(&mesh.positions);
+            }
+            // Upload normal
+            let normals_offset;
+            if let Some(normals) = &mesh.normals {
+                let (dst, offset) = vertex_buffer.alloc::<[f32; 3]>(normals.len() as u32);
+                normals_offset = offset / 4;
+                dst.copy_from_slice(&normals);
+            } else {
+                normals_offset = u32::MAX;
+            }
+            // Upload texcoords
+            let texcoords_offset;
+            if let Some(texcoords) = &mesh.texcoords {
+                let (dst, offset) = vertex_buffer.alloc::<[f32; 2]>(texcoords.len() as u32);
+                texcoords_offset = offset / 4;
+                dst.copy_from_slice(&texcoords);
+            } else {
+                texcoords_offset = u32::MAX;
+            }
+            // Upload tangents
+            let tangents_offset;
+            if let Some(tangents) = &mesh.tangents {
+                let (dst, offset) = vertex_buffer.alloc::<[f32; 4]>(tangents.len() as u32);
+                tangents_offset = offset / 4;
+                dst.copy_from_slice(&tangents);
+            } else {
+                tangents_offset = u32::MAX;
+            }
+
+            self.mesh_params.push(MeshParams {
+                index_offset,
+                index_count,
+                positions_offset,
+                normals_offset,
+                texcoords_offset,
+                tangents_offset,
+                material_index: material_index_offset + material_index as u32,
+            });
+        }
+    }
 }
 
 #[repr(C)]
 pub struct ViewParams {
-    pub view_proj: float4x4,
+    pub view_proj: Mat4,
 }
 
 pub struct RednerLoop {
@@ -365,6 +694,15 @@ impl RednerLoop {
 
         // Update GPU ViewParams const buffer
         {
+            // From row major float4x4 to column major Mat4
+            // TODO use GLAM instead
+            let view_proj = Mat4 {
+                x_axis: view_proj.rows[0].glam(),
+                y_axis: view_proj.rows[1].glam(),
+                z_axis: view_proj.rows[2].glam(),
+                w_axis: view_proj.rows[3].glam(),
+            }
+            .transpose();
             let view_params = ViewParams {
                 view_proj: view_proj,
             };
@@ -566,9 +904,7 @@ impl RednerLoop {
                     pipeline.handle,
                 );
             }
-            if let Some(gltf) = &scene.gltf {
-                self.draw_gltf(device, command_buffer, pipeline, scene, gltf);
-            }
+            self.draw_geometry(device, command_buffer, pipeline, scene);
         }
 
         // End render pass
@@ -716,100 +1052,62 @@ impl RednerLoop {
         //unsafe { device.device_wait_idle().unwrap(); }
     }
 
-    fn draw_gltf(
+    fn draw_geometry(
         &self,
         device: &ash::Device,
         command_buffer: vk::CommandBuffer,
         pipeline: &Pipeline,
         render_scene: &RenderScene,
-        gltf: &GLTF,
     ) {
-        for scene in &gltf.scenes {
-            for node in &scene.nodes {
-                if let Some(mesh_index) = node.mesh_index {
-                    // Send transform with PushConstnat
-                    // NOTE: 12 floats for model transform, 1 uint for pos_offset, 1 uint for uv_offset
-                    unsafe {
-                        let mut constants: [u8; 4 * 12] = mem::zeroed();
-                        {
-                            // model_transform
-                            let dst_ptr = constants.as_mut_ptr() as *mut f32;
-                            let dst = std::slice::from_raw_parts_mut(dst_ptr.offset(0), 4);
-                            node.transform.row(0).write_to_slice(dst);
-                            let dst = std::slice::from_raw_parts_mut(dst_ptr.offset(4), 4);
-                            node.transform.row(1).write_to_slice(dst);
-                            let dst = std::slice::from_raw_parts_mut(dst_ptr.offset(8), 4);
-                            node.transform.row(2).write_to_slice(dst);
-                        }
-                        device.cmd_push_constants(
-                            command_buffer,
-                            pipeline.layout,
-                            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                            0,
-                            &constants,
-                        );
+        for mesh_params in &render_scene.mesh_params {
+            let material_params =
+                &render_scene.material_parmas[mesh_params.material_index as usize];
+            // PushConstant for everything per-draw
+            let mut constants = PushConstantsBuilder::new();
+            {
+                // model_transform
+                let model_xform = glam::Mat4::IDENTITY; // Not used for now
+                constants.push(&model_xform.to_cols_array());
+                // vertex attributes
+                constants.push(&mesh_params.positions_offset);
+                constants.push(&mesh_params.texcoords_offset);
+                constants.push(&mesh_params.normals_offset);
+                constants.push(&mesh_params.tangents_offset);
+                // material params
+                let encode_tex = |tex_index| {
+                    let tex_params = &render_scene.texture_params[tex_index as usize];
+                    let scale_offset = pack_unorm(
+                        tex_params.uv_scale.x,
+                        tex_params.uv_scale.y,
+                        tex_params.uv_offset.x,
+                        tex_params.uv_offset.y,
+                    );
+                    UVec2 {
+                        x: scale_offset,
+                        y: tex_params.layer,
                     }
+                };
+                constants.push(&encode_tex(material_params.base_color_index));
+                constants.push(&encode_tex(material_params.normal_index));
+                constants.push(&encode_tex(material_params.metallic_roughness_index));
+            }
+            unsafe {
+                device.cmd_push_constants(
+                    command_buffer,
+                    pipeline.layout,
+                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, // TODO use reflection to automate this?
+                    0,
+                    &constants.build(),
+                );
 
-                    // Draw mesh primitives
-                    let mesh = &gltf.meshes[mesh_index as usize];
-                    for primitive in &mesh.primitives {
-                        let mat = &gltf.materials[primitive.material_index as usize];
-
-                        // Geomtry data offset and material info is per primitive
-                        unsafe {
-                            let mut constants: [u8; 4 * 8] = mem::zeroed();
-                            {
-                                let dst = std::slice::from_raw_parts_mut(
-                                    constants.as_mut_ptr() as *mut u32,
-                                    8,
-                                );
-                                // Fill geometry
-                                dst[0] = primitive.positions_offset;
-                                dst[1] = primitive.texcoords_offsets[0];
-                                // Fill material
-                                let cal_texture_scale_offset_layer = |tex_index| {
-                                    let tex = &gltf.textures[tex_index as usize];
-                                    let mt_width =
-                                        render_scene.material_texture.texture.desc.width as f32;
-                                    let mt_height =
-                                        render_scene.material_texture.texture.desc.height as f32;
-                                    (
-                                        pack_unorm(
-                                            tex.width as f32 / mt_width,
-                                            tex.height as f32 / mt_height,
-                                            tex.offset_x as f32 / mt_width,
-                                            tex.offset_y as f32 / mt_height,
-                                        ),
-                                        tex.layer,
-                                    )
-                                };
-                                (dst[2], dst[3]) =
-                                    cal_texture_scale_offset_layer(mat.base_color_index.unwrap());
-                                (dst[4], dst[5]) =
-                                    cal_texture_scale_offset_layer(mat.normal_index.unwrap());
-                                (dst[6], dst[7]) =
-                                    cal_texture_scale_offset_layer(mat.metal_rough_index.unwrap());
-                            }
-
-                            device.cmd_push_constants(
-                                command_buffer,
-                                pipeline.layout,
-                                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                                4 * 12,
-                                &constants,
-                            );
-
-                            device.cmd_draw_indexed(
-                                command_buffer,
-                                primitive.index_count,
-                                1,
-                                primitive.index_offset,
-                                0,
-                                0,
-                            )
-                        };
-                    }
-                }
+                device.cmd_draw_indexed(
+                    command_buffer,
+                    mesh_params.index_count,
+                    1,
+                    mesh_params.index_offset,
+                    0,
+                    0,
+                );
             }
         }
     }

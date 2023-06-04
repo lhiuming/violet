@@ -3,6 +3,7 @@ use std::mem;
 use std::path::Path;
 
 use ash::vk;
+use glam::Mat4;
 
 mod window;
 use window::Window;
@@ -16,17 +17,16 @@ use shader::{
     ShaderDefinition, ShaderStage,
 };
 
-mod gltf_asset;
 mod model;
 
 mod render_loop;
 use render_loop::{RednerLoop, RenderScene};
 
-use crate::gltf_asset::UploadContext;
 use crate::render_device::TextureDesc;
 use crate::render_device::TextureViewDesc;
 use crate::render_loop::AllocBuffer;
 use crate::render_loop::AllocTexture2D;
+use crate::render_loop::UploadContext;
 
 #[repr(C)]
 #[derive(Debug)]
@@ -114,6 +114,9 @@ impl float4 {
             z: xyz.z,
             w: w,
         }
+    }
+    pub fn glam(&self) -> glam::Vec4 {
+        glam::Vec4::new(self.x, self.y, self.z, self.w)
     }
 }
 
@@ -214,7 +217,7 @@ fn main() {
     // Buffer for whole scene
     let ib_size = 4 * 1024 * 1024;
     let vb_size = 4 * 1024 * 1024;
-    let mut index_buffer = AllocBuffer::new(
+    let index_buffer = AllocBuffer::new(
         rd.create_buffer(
             ib_size,
             vk::BufferUsageFlags::INDEX_BUFFER,
@@ -222,7 +225,7 @@ fn main() {
         )
         .unwrap(),
     );
-    let mut vertex_buffer = AllocBuffer::new(
+    let vertex_buffer = AllocBuffer::new(
         rd.create_buffer(
             vb_size,
             vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER,
@@ -235,7 +238,7 @@ fn main() {
     let tex_width = 2048;
     let tex_height = 2048;
     let tex_array_len = 5;
-    let mut material_texture = {
+    let material_texture = {
         let texture = rd
             .create_texture(TextureDesc::new_2d_array(
                 tex_width,
@@ -251,33 +254,30 @@ fn main() {
         AllocTexture2D::new(texture, texture_view)
     };
 
-    let args: Vec<String> = env::args().collect();
-    let model = model::load(Path::new(&args[1]));
-
-    let mut upload_context = UploadContext::new(&rd);
-
-    // Read the gltf model
-    let gltf = if args.len() > 1 {
-        gltf_asset::load(
-            &args[1],
-            &rd,
-            &mut upload_context,
-            &mut index_buffer,
-            &mut vertex_buffer,
-            &mut material_texture,
-        )
-    } else {
-        None
-    };
-
+    // TODO need a new() method
     let mut render_scene = RenderScene {
+        upload_context: UploadContext::new(&rd),
         vertex_buffer,
         index_buffer,
         material_texture,
         mesh_gfx_pipeline,
         mesh_cs_pipeline,
-        gltf,
+        texture_params: Vec::new(),
+        material_parmas: Vec::new(),
+        mesh_params: Vec::new(),
     };
+
+    let args: Vec<String> = env::args().collect();
+    let model = model::load(Path::new(&args[1]));
+    if let Ok(model) = model {
+        render_scene.add(&rd, &model);
+    } else {
+        println!(
+            "Failed to load model ({}): {:?}",
+            &args[1],
+            model.err().unwrap()
+        );
+    }
 
     let render_loop = RednerLoop::new(&rd);
 

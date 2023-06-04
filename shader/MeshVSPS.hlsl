@@ -3,13 +3,14 @@ Conceptually (and as reflected in the way matrix components are accessed), SPIRV
 
 The result is that, matrix representation is 'transposed' between HLSL srouce code and generated SPIRV, e.g. a float4x3 matrix in HLSL is represented as a 3x4 matrix in generated SPIRV, such that m[0] in HLSL and m[0] in SPIRV refer to the same float3 data.
 
-This also affects the generated packing rule. When HLSL code specify a row-major layout, the generated SPIRV must use column-major layout, and vice versa. Therefore, the below HLSL row_major packing specification is translated to a ColMajor packing in SPIRV, in order to make the packing behave as expected from user's point of view. 
+This also affects the generated packing rule. When HLSL code specify a row-major layout, the generated SPIRV must use column-major layout, and vice versa. Therefore, the below HLSL column_major packing specification is translated to a (transposed) RowMajor packing in SPIRV, in order to make the packing behave as expected from user's point of view. 
 
 These fact is important when you are investigating the generated SPIRV code or raw buffer content from a debugger, e.g. RenderDoc.
 
 See: https://github.com/Microsoft/DirectXShaderCompiler/blob/master/docs/SPIR-V.rst#vectors-and-matrices
 */
-#pragma pack_matrix(row_major)
+// Use column-major as GLAM
+#pragma pack_matrix(column_major)
 
 struct ViewParams 
 {
@@ -24,10 +25,12 @@ SamplerState material_texture_sampler;
 
 struct PushConstants
 {
-	float3x4 model_transform;
+	float4x4 model_transform;
 	// Geometry
-	uint pos_offset;
-	uint uv_offset;
+	uint positions_offset;
+	uint texcoords_offset;
+	uint normals_offset;
+	uint tangnets_offset;
 	// Materials
 	uint2 base_color;
 	uint2 normal;
@@ -48,15 +51,15 @@ void vs_main(uint vert_id : SV_VertexID, out float4 hpos : SV_Position, out floa
 	hpos = float4(v, 0.5f, 1.0f);
 #else
 	float3 pos = float3( 
-		asfloat(vertex_buffer[pc.pos_offset + vert_id * 3 + 0]),
-		asfloat(vertex_buffer[pc.pos_offset + vert_id * 3 + 1]),
-		asfloat(vertex_buffer[pc.pos_offset + vert_id * 3 + 2]));
+		asfloat(vertex_buffer[pc.positions_offset + vert_id * 3 + 0]),
+		asfloat(vertex_buffer[pc.positions_offset + vert_id * 3 + 1]),
+		asfloat(vertex_buffer[pc.positions_offset + vert_id * 3 + 2]));
 	uv = float2(
-		asfloat(vertex_buffer[pc.uv_offset + vert_id * 2 + 0]),
-		asfloat(vertex_buffer[pc.uv_offset + vert_id * 2 + 1]));
+		asfloat(vertex_buffer[pc.texcoords_offset + vert_id * 2 + 0]),
+		asfloat(vertex_buffer[pc.texcoords_offset + vert_id * 2 + 1]));
 
 	float3x4 model_transform = pc.model_transform;
-	float3 wpos = mul(model_transform, float4(pos, 1.0f));
+	float3 wpos = mul(model_transform, float4(pos, 1.0f)).xyz;
 	float4x4 view_proj = view_params.view_proj;
 	hpos =  mul(view_proj, float4(wpos, 1.0f));
 	screen_pos = hpos.xy / hpos.w * 0.5f + 0.5f;

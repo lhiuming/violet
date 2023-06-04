@@ -18,9 +18,9 @@ pub struct Model {
 pub struct TriangleMesh {
     pub positions: Vec<[f32; 3]>,
     pub indicies: Vec<u16>,
-    pub normals: Vec<[f32; 3]>,
-    pub texcoords: Vec<[f32; 2]>,
-    pub tangents: Vec<[f32; 4]>,
+    pub normals: Option<Vec<[f32; 3]>>,
+    pub texcoords: Option<Vec<[f32; 2]>>,
+    pub tangents: Option<Vec<[f32; 4]>>,
 }
 
 impl TriangleMesh {
@@ -28,9 +28,9 @@ impl TriangleMesh {
         TriangleMesh {
             positions: Vec::new(),
             indicies: Vec::new(),
-            normals: Vec::new(),
-            texcoords: Vec::new(),
-            tangents: Vec::new(),
+            normals: Some(Vec::new()),
+            texcoords: Some(Vec::new()),
+            tangents: Some(Vec::new()),
         }
     }
 }
@@ -391,14 +391,18 @@ pub fn import_gltf_uncached(path: &Path) -> Result<Model> {
                         .map(|x| x + indice_offset)
                         .collect(),
                 );
-                model_mesh.texcoords.append(&mut model_texcoords);
-                model_mesh.normals.append(
+                model_mesh
+                    .texcoords
+                    .as_mut()
+                    .unwrap()
+                    .append(&mut model_texcoords);
+                model_mesh.normals.as_mut().unwrap().append(
                     &mut model_normals
                         .into_iter()
                         .map(|v| xform.transform_vector3(Vec3::from(v)).to_array())
                         .collect(),
                 );
-                model_mesh.tangents.append(
+                model_mesh.tangents.as_mut().unwrap().append(
                     &mut model_tangent
                         .into_iter()
                         .map(|v| {
@@ -430,18 +434,18 @@ pub fn import_gltf_uncached(path: &Path) -> Result<Model> {
     // Clean up meshes
     for (index, model_mesh) in model_meshes.iter_mut().enumerate() {
         let vertex_count = model_mesh.positions.len();
-        if model_mesh.texcoords.len() != vertex_count {
-            model_mesh.texcoords.clear();
-            model_mesh.tangents.clear();
+        if model_mesh.texcoords.as_mut().unwrap().len() != vertex_count {
+            model_mesh.texcoords = None;
+            model_mesh.tangents = None;
             println!("Warning: Mesh {} has incomplete texcoords.", index);
         }
-        if model_mesh.normals.len() != vertex_count {
-            model_mesh.normals.clear();
-            model_mesh.tangents.clear();
+        if model_mesh.normals.as_mut().unwrap().len() != vertex_count {
+            model_mesh.normals = None;
+            model_mesh.tangents = None;
             println!("Warning: Mesh {} has incomplete normals.", index);
         }
-        if model_mesh.tangents.len() != vertex_count {
-            model_mesh.tangents.clear();
+        if model_mesh.tangents.as_mut().unwrap().len() != vertex_count {
+            model_mesh.tangents = None;
             println!("Warning: Mesh {} has incomplete tangents.", index);
         }
     }
