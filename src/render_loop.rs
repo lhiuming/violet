@@ -3,13 +3,11 @@ use std::mem::{self, size_of};
 use ash::vk::{self};
 use glam::{Mat4, UVec2, Vec2};
 
-use crate::float4x4;
+use crate::model::Model;
 use crate::render_device::{
     Buffer, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
 };
 use crate::shader::Pipeline;
-
-use crate::model::Model;
 
 // Allocatable buffer. Alway aligned to 4 bytes.
 pub struct AllocBuffer {
@@ -616,7 +614,7 @@ impl RednerLoop {
         }
     }
 
-    pub fn render(&self, rd: &RenderDevice, scene: &RenderScene, view_proj: float4x4) {
+    pub fn render(&self, rd: &RenderDevice, scene: &RenderScene, view_proj: Mat4) {
         let device = &rd.device;
         let physical_device = &rd.physical_device;
         let surface_entry = &rd.surface_entry;
@@ -695,17 +693,7 @@ impl RednerLoop {
         // Update GPU ViewParams const buffer
         {
             // From row major float4x4 to column major Mat4
-            // TODO use GLAM instead
-            let view_proj = Mat4 {
-                x_axis: view_proj.rows[0].glam(),
-                y_axis: view_proj.rows[1].glam(),
-                z_axis: view_proj.rows[2].glam(),
-                w_axis: view_proj.rows[3].glam(),
-            }
-            .transpose();
-            let view_params = ViewParams {
-                view_proj: view_proj,
-            };
+            let view_params = ViewParams { view_proj };
 
             unsafe {
                 std::ptr::copy_nonoverlapping(
