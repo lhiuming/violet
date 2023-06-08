@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::ffi::CString;
 
 use ash::vk::{self, PushConstantRange};
@@ -28,6 +29,71 @@ pub struct PipelineProgram {
     pub entry_point_c: CString,
 }
 
+pub struct Shaders {
+    pipeline_device: PipelineDevice,
+    gfx_pipelines: HashMap<(ShaderDefinition, ShaderDefinition), Pipeline>,
+    compute_pipelines: HashMap<ShaderDefinition, Pipeline>,
+}
+
+impl Shaders {
+    pub fn new(rd: &RenderDevice) -> Shaders {
+        Shaders {
+            pipeline_device: PipelineDevice::new(&rd),
+            gfx_pipelines: HashMap::new(),
+            compute_pipelines: HashMap::new(),
+        }
+    }
+
+    pub fn get_gfx_pipeline(
+        &mut self,
+        vs_def: &ShaderDefinition,
+        ps_def: &ShaderDefinition,
+    ) -> Option<&Pipeline> {
+        // look from cache
+        // If not in cache, create and push into cache
+        // TODO currenty need to query twice even if cache can hit (constians_key, get)
+
+        let key = (*vs_def, *ps_def);
+        let cache = &mut self.gfx_pipelines;
+        let create = || {
+            let vs = load_shader(&self.pipeline_device, &vs_def)?;
+            let ps = load_shader(&self.pipeline_device, &ps_def)?;
+            create_graphics_pipeline(&self.pipeline_device, &vs, &ps)
+        };
+
+        if !cache.contains_key(&key) {
+            if let Some(pipeline) = create() {
+                cache.insert(key, pipeline);
+            }
+        }
+
+        return cache.get(&key);
+    }
+
+    pub fn get_compute_pipeline(&mut self, cs_def: &ShaderDefinition) -> Option<&Pipeline> {
+        let key = cs_def;
+        let cache = &mut self.compute_pipelines;
+        let create = || {
+            let cs = load_shader(&self.pipeline_device, &cs_def)?;
+            create_compute_pipeline(&self.pipeline_device, &cs_def, &cs)
+        };
+
+        if !cache.contains_key(key) {
+            if let Some(pipeline) = create() {
+                cache.insert(*key, pipeline);
+            }
+        }
+
+        cache.get(key)
+    }
+
+    pub fn reload_all(&mut self) {
+        // TODO reload all shaders by checking file timestamps (and checksum?)
+        self.gfx_pipelines.clear();
+        self.compute_pipelines.clear();
+    }
+}
+
 fn create_pipeline_program(
     device: &PipelineDevice,
     binary: &[u8],
@@ -46,11 +112,11 @@ fn create_pipeline_program(
 
     // Get reflect info
     let reflect_module = match rspirv_reflect::Reflection::new_from_spirv(binary) {
-        Ok(refl) => { Some(refl) },
+        Ok(refl) => Some(refl),
         Err(refl_err) => {
             println!("Error: Failed to reflect shader module: {:?}", refl_err);
             None
-        },
+        }
     }?;
 
     // Debug: print the reflect content
@@ -68,7 +134,7 @@ fn create_pipeline_program(
         }
     }
 
-    let entry_point_c = shader_def.entry_point.to_cstring();
+    let entry_point_c = CString::new(shader_def.entry_point).unwrap();
 
     Some(PipelineProgram {
         shader_module,
@@ -91,23 +157,29 @@ impl ToCString for String {
     }
 }
 
+#[derive(Hash, Eq, PartialEq, Copy, Clone)]
 pub enum ShaderStage {
     Compute,
     Vert,
     Frag,
 }
 
+#[derive(Hash, Eq, PartialEq, Copy, Clone)]
 pub struct ShaderDefinition {
-    pub virtual_path: String,
-    pub entry_point: String,
+    pub virtual_path: &'static str,
+    pub entry_point: &'static str,
     pub stage: ShaderStage,
 }
 
 impl ShaderDefinition {
-    pub fn new(virtual_path: &str, entry_point: &str, stage: ShaderStage) -> ShaderDefinition {
+    pub fn new(
+        virtual_path: &'static str,
+        entry_point: &'static str,
+        stage: ShaderStage,
+    ) -> ShaderDefinition {
         ShaderDefinition {
-            virtual_path: virtual_path.to_string(),
-            entry_point: entry_point.to_string(),
+            virtual_path,
+            entry_point,
             stage,
         }
     }
@@ -149,18 +221,18 @@ pub fn load_shader(
         ShaderStage::Frag => "ps_5_0",
     };
     // NOTE: -fspv-debug=vulkan-with-source requires extended instruction set support form the reflector
-    // NOTE: -fspv-reflect requires Google extention in vulkan 
+    // NOTE: -fspv-reflect requires Google extention in vulkan
     let compile_result = hassle_rs::compile_hlsl(
         file_name,
         &text,
         &shader_def.entry_point,
         target_profile,
         //&["-spirv"],
-        //&["-spirv", "-Zi", "-fspv-reflect"], 
-        &["-spirv", "-Zi"], 
+        //&["-spirv", "-Zi", "-fspv-reflect"],
+        &["-spirv", "-Zi"],
         &[],
     );
-    
+
     let compiled_binary = match compile_result {
         Ok(bin) => bin,
         Err(reason) => {
@@ -238,9 +310,11 @@ pub fn create_compute_pipeline(
     // Create all push constant range use in shader
     let push_constant_range = {
         let pc_range = reflect_module.get_push_constant_range().unwrap();
-        pc_range.map(|info| { 
-            vk::PushConstantRange{ stage_flags: vk::ShaderStageFlags::COMPUTE, offset: info.offset, size: info.size }
-         })
+        pc_range.map(|info| vk::PushConstantRange {
+            stage_flags: vk::ShaderStageFlags::COMPUTE,
+            offset: info.offset,
+            size: info.size,
+        })
     };
     let mut push_constant_ranges = Vec::<PushConstantRange>::new();
     if push_constant_range.is_some() {
@@ -250,8 +324,8 @@ pub fn create_compute_pipeline(
     // Create pipeline layout
     let layout = {
         let create_info = vk::PipelineLayoutCreateInfo::builder()
-        .set_layouts(&set_layouts)
-        .push_constant_ranges(&push_constant_ranges);
+            .set_layouts(&set_layouts)
+            .push_constant_ranges(&push_constant_ranges);
         unsafe { device.create_pipeline_layout(&create_info, None) }.ok()?
     };
 
@@ -358,23 +432,23 @@ pub fn create_graphics_pipeline(
         });
     }
 
-    // Create all push constant ranges use in all stages 
+    // Create all push constant ranges use in all stages
     let mut push_constant_ranges = Vec::<PushConstantRange>::new();
     for (stage_flag, shader) in shaders {
         if let Ok(Some(info)) = shader.program.reflect_module.get_push_constant_range() {
-            push_constant_ranges.push( 
-                vk::PushConstantRange{
-                    stage_flags: stage_flag, offset: info.offset, size: info.size
-                }
-            );
+            push_constant_ranges.push(vk::PushConstantRange {
+                stage_flags: stage_flag,
+                offset: info.offset,
+                size: info.size,
+            });
         }
-    };
+    }
 
     // Create pipeline layout
     let layout = {
         let create_info = vk::PipelineLayoutCreateInfo::builder()
-        .set_layouts(&set_layouts)
-        .push_constant_ranges(&push_constant_ranges);
+            .set_layouts(&set_layouts)
+            .push_constant_ranges(&push_constant_ranges);
         unsafe { device.create_pipeline_layout(&create_info, None) }.ok()?
     };
 
@@ -413,9 +487,9 @@ pub fn create_graphics_pipeline(
     let multisample = vk::PipelineMultisampleStateCreateInfo::builder()
         .rasterization_samples(vk::SampleCountFlags::TYPE_1);
     let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::builder()
-    .depth_write_enable(true)
-    .depth_test_enable(true)
-    .depth_compare_op(vk::CompareOp::GREATER);
+        .depth_write_enable(true)
+        .depth_test_enable(true)
+        .depth_compare_op(vk::CompareOp::GREATER);
     let attachment = vk::PipelineColorBlendAttachmentState::builder()
         .color_write_mask(vk::ColorComponentFlags::from_raw(0xFFFFFFFF));
     let attachments = [attachment.build()];
@@ -424,8 +498,7 @@ pub fn create_graphics_pipeline(
     let dynamic_state =
         vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states);
 
-
-    // Extention: PipelineRendering 
+    // Extention: PipelineRendering
     let mut pipeline_rendering = vk::PipelineRenderingCreateInfo::builder()
     .depth_attachment_format(vk::Format::D16_UNORM)
     //.color_attachment_formats(&[vk::Format::R8G8B8A8_UNORM])
@@ -442,8 +515,7 @@ pub fn create_graphics_pipeline(
         .color_blend_state(&color_blend)
         .layout(layout)
         .dynamic_state(&dynamic_state)
-        .push_next(&mut pipeline_rendering)
-        ;
+        .push_next(&mut pipeline_rendering);
     let create_infos = [create_info.build()];
     let result =
         unsafe { device.create_graphics_pipelines(pipeline_cache, &create_infos, None) }.ok()?;

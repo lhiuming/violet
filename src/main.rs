@@ -13,7 +13,7 @@ use render_device::RenderDevice;
 mod shader;
 use shader::{
     create_compute_pipeline, create_graphics_pipeline, load_shader, PipelineDevice,
-    ShaderDefinition, ShaderStage,
+    ShaderDefinition, ShaderStage, Shaders,
 };
 
 mod model;
@@ -69,72 +69,10 @@ fn main() {
     let swapchain = &rd.swapchain;
 
     // Initialize shaders
-    let pipeline_device = PipelineDevice::new(&rd);
-    let mesh_cs_def = ShaderDefinition::new("MeshCS.hlsl", "main", ShaderStage::Compute);
-    let mesh_cs_pipeline = {
-        let shader = load_shader(&pipeline_device, &mesh_cs_def).unwrap();
-        create_compute_pipeline(&pipeline_device, &mesh_cs_def, &shader)
-    };
-    let mesh_vs_def = ShaderDefinition::new("MeshVSPS.hlsl", "vs_main", ShaderStage::Vert);
-    let mesh_ps_def = ShaderDefinition::new("MeshVSPS.hlsl", "ps_main", ShaderStage::Frag);
-    let mesh_gfx_pipeline = {
-        let vs = load_shader(&pipeline_device, &mesh_vs_def).unwrap();
-        let ps = load_shader(&pipeline_device, &mesh_ps_def).unwrap();
-        create_graphics_pipeline(&pipeline_device, &vs, &ps)
-    };
+    let mut shaders = Shaders::new(&rd);
 
-    // Buffer for whole scene
-    let ib_size = 4 * 1024 * 1024;
-    let vb_size = 4 * 1024 * 1024;
-    let index_buffer = AllocBuffer::new(
-        rd.create_buffer(
-            ib_size,
-            vk::BufferUsageFlags::INDEX_BUFFER,
-            vk::Format::UNDEFINED,
-        )
-        .unwrap(),
-    );
-    let vertex_buffer = AllocBuffer::new(
-        rd.create_buffer(
-            vb_size,
-            vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER,
-            vk::Format::R32_UINT,
-        )
-        .unwrap(),
-    );
-
-    // Texture for whole scene
-    let tex_width = 2048;
-    let tex_height = 2048;
-    let tex_array_len = 5;
-    let material_texture = {
-        let texture = rd
-            .create_texture(TextureDesc::new_2d_array(
-                tex_width,
-                tex_height,
-                tex_array_len,
-                vk::Format::R8G8B8A8_SRGB,
-                vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
-            ))
-            .unwrap();
-        let texture_view = rd
-            .create_texture_view(&texture, TextureViewDesc::default(&texture))
-            .unwrap();
-        AllocTexture2D::new(texture, texture_view)
-    };
-
-    // TODO need a new() method
-    let mut render_scene = RenderScene {
-        upload_context: UploadContext::new(&rd),
-        vertex_buffer,
-        index_buffer,
-        material_texture,
-        mesh_gfx_pipeline,
-        mesh_cs_pipeline,
-        texture_params: Vec::new(),
-        material_parmas: Vec::new(),
-        mesh_params: Vec::new(),
-    };
+    // Set up the scene
+    let mut render_scene = RenderScene::new(&rd);
 
     let args: Vec<String> = env::args().collect();
     let model = model::load(Path::new(&args[1]));
@@ -164,6 +102,11 @@ fn main() {
 
     while !window.should_close() {
         window.poll_events();
+
+        // Reload shaders
+        if window.click_R() {
+            shaders.reload_all();
+        }
 
         // Time udpate
         let delta_seconds;
@@ -241,6 +184,6 @@ fn main() {
             view_proj = proj * view;
         }
 
-        render_loop.render(&rd, &render_scene, view_proj);
+        render_loop.render(&rd, &mut shaders, &render_scene, view_proj);
     }
 }

@@ -7,7 +7,7 @@ use crate::model::Model;
 use crate::render_device::{
     Buffer, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
 };
-use crate::shader::Pipeline;
+use crate::shader::{Pipeline, ShaderDefinition, ShaderStage, Shaders};
 
 // Allocatable buffer. Alway aligned to 4 bytes.
 pub struct AllocBuffer {
@@ -324,10 +324,6 @@ pub struct RenderScene {
     // Global texture to store all loaded textures
     pub material_texture: AllocTexture2D,
 
-    // Default shaders/pipelines
-    pub mesh_gfx_pipeline: Option<Pipeline>,
-    pub mesh_cs_pipeline: Option<Pipeline>,
-
     // Stuff to be rendered
     pub texture_params: Vec<TextureParams>,
     pub material_parmas: Vec<MaterialParams>,
@@ -335,6 +331,58 @@ pub struct RenderScene {
 }
 
 impl RenderScene {
+    pub fn new(rd: &RenderDevice) -> RenderScene {
+        // Buffer for whole scene
+        let ib_size = 4 * 1024 * 1024;
+        let vb_size = 4 * 1024 * 1024;
+        let index_buffer = AllocBuffer::new(
+            rd.create_buffer(
+                ib_size,
+                vk::BufferUsageFlags::INDEX_BUFFER,
+                vk::Format::UNDEFINED,
+            )
+            .unwrap(),
+        );
+        let vertex_buffer = AllocBuffer::new(
+            rd.create_buffer(
+                vb_size,
+                vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER,
+                vk::Format::R32_UINT,
+            )
+            .unwrap(),
+        );
+
+        // Texture for whole scene
+        let tex_width = 2048;
+        let tex_height = 2048;
+        let tex_array_len = 5;
+        let material_texture = {
+            let texture = rd
+                .create_texture(TextureDesc::new_2d_array(
+                    tex_width,
+                    tex_height,
+                    tex_array_len,
+                    vk::Format::R8G8B8A8_SRGB,
+                    vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+                ))
+                .unwrap();
+            let texture_view = rd
+                .create_texture_view(&texture, TextureViewDesc::default(&texture))
+                .unwrap();
+            AllocTexture2D::new(texture, texture_view)
+        };
+
+        RenderScene {
+            upload_context: UploadContext::new(rd),
+            vertex_buffer: vertex_buffer,
+            index_buffer: index_buffer,
+            material_texture: material_texture,
+            texture_params: Vec::new(),
+            material_parmas: Vec::new(),
+            mesh_params: Vec::new(),
+        }
+    }
+
     pub fn add(&mut self, rd: &RenderDevice, model: &Model) {
         let upload_context = &mut self.upload_context;
         let material_texture = &mut self.material_texture;
@@ -614,7 +662,13 @@ impl RednerLoop {
         }
     }
 
-    pub fn render(&self, rd: &RenderDevice, scene: &RenderScene, view_proj: Mat4) {
+    pub fn render(
+        &self,
+        rd: &RenderDevice,
+        shaders: &mut Shaders,
+        scene: &RenderScene,
+        view_proj: Mat4,
+    ) {
         let device = &rd.device;
         let physical_device = &rd.physical_device;
         let surface_entry = &rd.surface_entry;
@@ -789,7 +843,11 @@ impl RednerLoop {
         }
 
         // Draw mesh
-        if let Some(pipeline) = &scene.mesh_gfx_pipeline {
+        let mesh_gfx_pipeline = shaders.get_gfx_pipeline(
+            &ShaderDefinition::new("MeshVSPS.hlsl", "vs_main", ShaderStage::Vert),
+            &ShaderDefinition::new("MeshVSPS.hlsl", "ps_main", ShaderStage::Frag),
+        );
+        if let Some(pipeline) = mesh_gfx_pipeline {
             // Set viewport and scissor
             {
                 let viewport = vk::Viewport {
@@ -892,7 +950,7 @@ impl RednerLoop {
                     pipeline.handle,
                 );
             }
-            self.draw_geometry(device, command_buffer, pipeline, scene);
+            self.draw_geometry(device, command_buffer, &pipeline, scene);
         }
 
         // End render pass
@@ -901,7 +959,12 @@ impl RednerLoop {
         }
 
         // Draw something with compute
-        if let Some(pipeline) = &scene.mesh_cs_pipeline {
+        let mesh_cs_pipeline = shaders.get_compute_pipeline(&ShaderDefinition::new(
+            "MeshCS.hlsl",
+            "main",
+            ShaderStage::Compute,
+        ));
+        if let Some(pipeline) = mesh_cs_pipeline {
             // Transition for compute
             {
                 let sub_res_range = vk::ImageSubresourceRange::builder()

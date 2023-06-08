@@ -117,6 +117,7 @@ struct MessageHandler {
     pub push_D: bool,
     pub push_Q: bool,
     pub push_E: bool,
+    pub click_R: bool,
 }
 
 impl MessageHandler {
@@ -134,6 +135,7 @@ impl MessageHandler {
             push_D: false,
             push_E: false,
             push_Q: false,
+            click_R: false,
         }
     }
 
@@ -145,6 +147,7 @@ impl MessageHandler {
             None
         };
         self.curr_drag_end_mouse_pos = None;
+        self.click_R = false;
     }
 }
 
@@ -253,6 +256,7 @@ unsafe extern "system" fn wnd_callback(
                 VK_D => handler.borrow_mut().push_D = false,
                 VK_E => handler.borrow_mut().push_E = false,
                 VK_Q => handler.borrow_mut().push_Q = false,
+                VK_R => handler.borrow_mut().click_R = true,
                 _ => {
                     //println!("Win32 message: unhandle key up {}", vk_code);
                     return DefWindowProcW(hwnd, msg, w_param, l_param);
@@ -453,5 +457,9 @@ impl Window {
         } else {
             None
         }
+    }
+
+    pub fn click_R(&self) -> bool {
+        self.message_handler.borrow().click_R
     }
 }
