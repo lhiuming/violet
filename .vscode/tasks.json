@@ -1,0 +1,34 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"type": "cargo",
+			"command": "build",
+			"problemMatcher": [
+				"$rustc",
+				"$rust-panic"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"label": "rust: cargo build"
+		},
+		{
+			"type": "cargo",
+			"command": "+nightly",
+			"args": [
+				"build",
+			],
+			"problemMatcher": [
+				"$rustc",
+				"$rust-panic"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": false
+			},
+			"label": "rust: cargo build nightly"
+		}
+	]
+}

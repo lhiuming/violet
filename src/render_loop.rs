@@ -7,7 +7,9 @@ use crate::model::Model;
 use crate::render_device::{
     Buffer, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
 };
-use crate::shader::{Pipeline, ShaderDefinition, ShaderStage, Shaders};
+use crate::shader::{
+    DescriptorSetUpdater, Pipeline, PushConstantsBuilder, ShaderDefinition, ShaderStage, Shaders,
+};
 
 // Allocatable buffer. Alway aligned to 4 bytes.
 pub struct AllocBuffer {
@@ -287,30 +289,6 @@ pub struct MeshParams {
     pub tangents_offset: u32,
 
     pub material_index: u32,
-}
-
-struct PushConstantsBuilder {
-    data: Vec<u8>,
-}
-
-impl PushConstantsBuilder {
-    pub fn new() -> Self {
-        Self { data: Vec::new() }
-    }
-
-    pub fn push<T>(&mut self, value: &T) -> &mut Self {
-        let size = std::mem::size_of::<T>();
-        let offset = self.data.len();
-        self.data.resize(offset + size, 0);
-        self.data[offset..offset + size].copy_from_slice(unsafe {
-            std::slice::from_raw_parts(value as *const T as *const u8, size)
-        });
-        self
-    }
-
-    pub fn build(&self) -> &[u8] {
-        &self.data
-    }
 }
 
 // Contain everything to be rendered
@@ -874,62 +852,21 @@ impl RednerLoop {
             }
 
             // Bind shader resources
-            if let Some(vb_srv) = scene.vertex_buffer.buffer.srv {
-                // TODO map desriptor binding name
-                let buffer_views = [vb_srv];
-                let write = vk::WriteDescriptorSet::builder()
-                    .dst_set(pipeline.descriptor_sets[0])
-                    .dst_binding(0)
-                    .dst_array_element(0)
-                    .descriptor_type(vk::DescriptorType::UNIFORM_TEXEL_BUFFER)
-                    .texel_buffer_view(&buffer_views);
-                let cb_info = vk::DescriptorBufferInfo::builder()
-                    .buffer(self.view_params_cb.buffer)
-                    .range(vk::WHOLE_SIZE);
-                let cb_infos = [*cb_info];
-                let write_cb = vk::WriteDescriptorSet::builder()
-                    .dst_set(pipeline.descriptor_sets[1])
-                    .dst_binding(0)
-                    .dst_array_element(0)
-                    .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
-                    .buffer_info(&cb_infos);
-
-                let image_info = vk::DescriptorImageInfo::builder()
-                    .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                    .image_view(scene.material_texture.view.image_view);
-                let image_infos = [*image_info];
-
-                let write_image = vk::WriteDescriptorSet::builder()
-                    .dst_set(pipeline.descriptor_sets[0])
-                    .dst_binding(1)
-                    .dst_array_element(0)
-                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                    .image_info(&image_infos);
-
-                let sampler_info = vk::DescriptorImageInfo::builder().sampler(self.shared_sampler);
-                let sampler_infos = [*sampler_info];
-                let write_sampler = vk::WriteDescriptorSet::builder()
-                    .dst_set(pipeline.descriptor_sets[0])
-                    .dst_binding(2)
-                    .dst_array_element(0)
-                    .descriptor_type(vk::DescriptorType::SAMPLER)
-                    .image_info(&sampler_infos);
-
-                let writes = [*write, *write_cb, *write_image, *write_sampler];
-                unsafe {
-                    device.update_descriptor_sets(&writes, &[]);
-                }
-
-                unsafe {
-                    device.cmd_bind_descriptor_sets(
-                        command_buffer,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        pipeline.layout,
-                        0,
-                        &pipeline.descriptor_sets,
-                        &[],
-                    );
-                }
+            DescriptorSetUpdater::new(pipeline)
+                .buffer("vertex_buffer", &scene.vertex_buffer.buffer.srv.unwrap())
+                .constant_buffer("view_params", &self.view_params_cb.buffer)
+                .image("material_texture", &scene.material_texture.view.image_view)
+                .sampler("material_texture_sampler", &self.shared_sampler)
+                .update(&device);
+            unsafe {
+                device.cmd_bind_descriptor_sets(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    pipeline.layout,
+                    0,
+                    &pipeline.descriptor_sets,
+                    &[],
+                );
             }
 
             // Bind index buffer
@@ -1114,7 +1051,7 @@ impl RednerLoop {
             let material_params =
                 &render_scene.material_parmas[mesh_params.material_index as usize];
             // PushConstant for everything per-draw
-            let mut constants = PushConstantsBuilder::new();
+            let mut constants = PushConstantsBuilder::new(pipeline);
             {
                 // model_transform
                 let model_xform = glam::Mat4::IDENTITY; // Not used for now
@@ -1146,7 +1083,7 @@ impl RednerLoop {
                 device.cmd_push_constants(
                     command_buffer,
                     pipeline.layout,
-                    vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT, // TODO use reflection to automate this?
+                    pipeline.push_constant_ranges[0].stage_flags, // TODO finer flags
                     0,
                     &constants.build(),
                 );

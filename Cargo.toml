@@ -11,6 +11,8 @@ ash = "0.37.2"
 # Shader compilation runtime tools
 hassle-rs = "0.5.4"
 rspirv-reflect = "0.6.0"
+# alternative shader reflection
+spirq = "0.6.4"
 # Mesh/Texture assets
 gltf = "1.0"
 mikktspace = "0.3.0"

@@ -1,7 +1,7 @@
+#![feature(core_intrinsics)]
 use std::env;
 use std::path::Path;
 
-use ash::vk;
 use glam::{Mat4, Vec3, Vec4};
 
 mod window;
@@ -11,21 +11,12 @@ mod render_device;
 use render_device::RenderDevice;
 
 mod shader;
-use shader::{
-    create_compute_pipeline, create_graphics_pipeline, load_shader, PipelineDevice,
-    ShaderDefinition, ShaderStage, Shaders,
-};
+use shader::Shaders;
 
 mod model;
 
 mod render_loop;
 use render_loop::{RednerLoop, RenderScene};
-
-use crate::render_device::TextureDesc;
-use crate::render_device::TextureViewDesc;
-use crate::render_loop::AllocBuffer;
-use crate::render_loop::AllocTexture2D;
-use crate::render_loop::UploadContext;
 
 // Assumming positive Z; mapping near-plane to 1, far-plane to 0 (reversed Z).
 // Never flip y (or x).

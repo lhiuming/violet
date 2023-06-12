@@ -12,6 +12,63 @@ See: https://github.com/Microsoft/DirectXShaderCompiler/blob/master/docs/SPIR-V.
 // Use column-major as GLAM
 #pragma pack_matrix(column_major)
 
+
+//// BRDF
+
+#define PI 3.14159265359
+
+// Fresnel with f90
+// https://google.github.io/filament/Filament.md.html#materialsystem/specularbrdf
+float3 F_Schlick_with_f90(float u, float3 f0, float f90) {
+    return f0 + (f90.xxx - f0) * pow(1.0 - u, 5.0);
+}
+
+// Fresnel 
+// https://google.github.io/filament/Filament.md.html#materialsystem/specularbrdf
+float3 F_Schlick(float u, float3 f0) {
+	// Replace f90 with 1.0 in F_Schlick, and some refactoring
+    float f = pow(1.0 - u, 5.0);
+    return f + f0 * (1.0 - f);
+}
+
+// Fresnel with single channel
+// https://google.github.io/filament/Filament.md.html#materialsystem/specularbrdf
+float F_Schlick_single(float u, float f0, float f90) {
+	return f0 + (f90 - f0) * pow(1.0 - u, 5.0);
+}
+
+// https://google.github.io/filament/Filament.md.html#materialsystem/specularbrdf
+float D_GGX(float NoH, float roughness) {
+    float a = NoH * roughness;
+    float k = roughness / (1.0 - NoH * NoH + a * a);
+    return k * k * (1.0 / PI);
+}
+
+// https://google.github.io/filament/Filament.md.html#materialsystem/specularbrdf
+float V_SmithGGXCorrelated(float NoV, float NoL, float roughness) {
+    float a2 = roughness * roughness;
+    float GGXV = NoL * sqrt(NoV * NoV * (1.0 - a2) + a2);
+    float GGXL = NoV * sqrt(NoL * NoL * (1.0 - a2) + a2);
+    return 0.5 / (GGXV + GGXL);
+}
+
+// https://google.github.io/filament/Filament.md.html#materialsystem/specularbrdf
+float Fd_Lambert() {
+    return 1.0 / PI;
+}
+
+// Disney BRDF
+// https://google.github.io/filament/Filament.md.html#materialsystem/brdf
+float Fd_Burley(float NoV, float NoL, float LoH, float roughness) {
+    float f90 = 0.5 + 2.0 * roughness * LoH * LoH;
+    float lightScatter = F_Schlick_single(NoL, 1.0, f90);
+    float viewScatter = F_Schlick_single(NoV, 1.0, f90);
+    return lightScatter * viewScatter * (1.0 / PI);
+}
+
+// End BRDF
+
+
 struct ViewParams 
 {
 	float4x4 view_proj;
@@ -39,7 +96,7 @@ struct PushConstants
 [[vk::push_constant]]
 PushConstants pc;
 
-void vs_main(uint vert_id : SV_VertexID, out float4 hpos : SV_Position, out float2 uv : TEXCOORD0, out float2 screen_pos : TEXCOORD1) 
+void vs_main(uint vert_id : SV_VertexID, out float4 hpos : SV_Position, out float2 uv : TEXCOORD0, out float3 normal : TEXCOORD1, out float4 tangent : TEXCOORD2, out float2 screen_pos : TEXCOORD3, out float3 bitangent : TEXCOORD4)
 {
 #if 0
 	const float2 vbuffer[] = {
@@ -57,8 +114,19 @@ void vs_main(uint vert_id : SV_VertexID, out float4 hpos : SV_Position, out floa
 	uv = float2(
 		asfloat(vertex_buffer[pc.texcoords_offset + vert_id * 2 + 0]),
 		asfloat(vertex_buffer[pc.texcoords_offset + vert_id * 2 + 1]));
+	normal = float3(
+		asfloat(vertex_buffer[pc.normals_offset + vert_id * 3 + 0]),
+		asfloat(vertex_buffer[pc.normals_offset + vert_id * 3 + 1]),
+		asfloat(vertex_buffer[pc.normals_offset + vert_id * 3 + 2]));
+	tangent = float4(
+		asfloat(vertex_buffer[pc.tangnets_offset + vert_id * 4 + 0]),
+		asfloat(vertex_buffer[pc.tangnets_offset + vert_id * 4 + 1]),
+		asfloat(vertex_buffer[pc.tangnets_offset + vert_id * 4 + 2]),
+		asfloat(vertex_buffer[pc.tangnets_offset + vert_id * 4 + 3]));
 
-	float3x4 model_transform = pc.model_transform;
+	bitangent = normalize(tangent.w * cross(normal, tangent.xyz));
+
+	float4x4 model_transform = pc.model_transform;
 	float3 wpos = mul(model_transform, float4(pos, 1.0f)).xyz;
 	float4x4 view_proj = view_params.view_proj;
 	hpos =  mul(view_proj, float4(wpos, 1.0f));
@@ -83,19 +151,79 @@ float4 sample_material_texture(float2 local_uv, uint2 packed_params)
 	return material_texture.Sample(material_texture_sampler, float3(uv, packed_params.y));
 }
 
-void ps_main(float4 hpos : SV_Position, float2 uv : TEXCOORD0, noperspective float2 screen_pos : TEXCOORD1, out float4 output : SV_Target0)
+float3 cal_lighting(float3 v /*view*/, float3 l /*light*/, float3 n /*normal*/, float perceptualRoughness, float3 diffuseColor, float3 specularColor)
+{
+	float3 h = normalize(v + l);
+
+    float NoV = abs(dot(n, v)) + 1e-5;
+    float NoL = clamp(dot(n, l), 0.0, 1.0);
+    float NoH = clamp(dot(n, h), 0.0, 1.0);
+    float LoH = clamp(dot(l, h), 0.0, 1.0);
+
+    // perceptually linear roughness to roughness (see parameterization)
+    float roughness = perceptualRoughness * perceptualRoughness;
+
+    float D = D_GGX(NoH, roughness);
+    float3 F = F_Schlick(LoH, specularColor);
+    float V = V_SmithGGXCorrelated(NoV, NoL, roughness);
+
+    // specular BRDF
+    float3 Fr = (D * V) * F;
+
+    // diffuse BRDF
+    float3 Fd = diffuseColor * Fd_Lambert();
+
+	return Fd + Fr;
+}
+
+void ps_main(
+	// Input
+	float4 hpos : SV_Position, 
+	float2 uv : TEXCOORD0,
+	float3 normal : TEXCOORD1,
+	float4 tangent : TEXCOORD2,
+	noperspective float2 screen_pos : TEXCOORD3,
+	float3 bitangent : TEXCOORD4,
+	// Output
+	out float4 output : SV_Target0)
 {
 	float4 base_color = sample_material_texture(uv, pc.base_color);
-	float4 normal = sample_material_texture(uv, pc.normal);
+	float4 normal_map = sample_material_texture(uv, pc.normal);
 	float4 metal_rough = sample_material_texture(uv, pc.metal_rough);
 
-	//output = float4(1.0f, 1.0f, 1.0f, 1.0f);
-	//output = float4(uv, hpos.z / hpos.w, 1.0f);
-	float u = frac(screen_pos.x * 3);
-	if (u < 0.33f)
-		output = base_color;
-	else if (u < 0.66f)
-		output = normal;
-	else
-		output = metal_rough;
+	// normal mapping
+	// vNt is the tangent space normal
+	bitangent = normalize(tangent.w * cross(normal, tangent.xyz));
+	float3 normal_ws = normalize( normal_map.x * tangent.xyz + normal_map.y * bitangent + normal_map.z * normal );
+
+	float3 view = float3(0.0f, -1.0f, 0.0f);// todo
+	float3 light = float3(0.0f, 0.0f, 1.0f);
+	float metallic = metal_rough.b;
+	float roughness = metal_rough.g;
+	float3 diffuseColor = base_color.rgb * (1.0f - metallic);
+	float3 specularColor = lerp(float3(0.04f, 0.04f, 0.04f), base_color.rgb, metallic);
+	float3 lighting = cal_lighting(view, light, normal_ws, roughness, diffuseColor, specularColor);
+
+	// Material inspect rect
+	if ( (screen_pos.x > 0.25f) && (screen_pos.x < 0.3f)
+		&& (screen_pos.y > 0.25f) && (screen_pos.y < 0.3f) )
+	{
+		float u = frac(screen_pos.x / 0.05f);
+		if (u < 0.33f)
+			output = base_color;
+		else if (u < 0.66f)
+			output = normal_map;
+		else
+			output = metal_rough;
+		return;
+	}
+
+#if 1
+//	output = float4(normal.xyz * .5f + .5f, 1.0f);
+	output = float4(normal_ws * .5f + .5f, 1.0f);
+	return;
+#endif
+	output = float4(lighting, 1.0f);
 } 
+
+

@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::collections::{hash_map::Entry, HashMap};
 use std::ffi::CString;
 
 use ash::vk::{self, PushConstantRange};
 use rspirv_reflect::{self};
+use spirq::{self};
 
 use crate::render_device::RenderDevice;
 
@@ -26,6 +27,7 @@ impl PipelineDevice {
 pub struct PipelineProgram {
     pub shader_module: vk::ShaderModule,
     pub reflect_module: rspirv_reflect::Reflection,
+    pub spirq_module: spirq::EntryPoint,
     pub entry_point_c: CString,
 }
 
@@ -119,6 +121,19 @@ fn create_pipeline_program(
         }
     }?;
 
+    // Get spirq info (alternative reflection)
+    let spirq_module = {
+        let binary_u32 =
+            unsafe { std::slice::from_raw_parts(binary.as_ptr() as *const u32, binary.len() / 4) };
+
+        let entry_points = spirq::ReflectConfig::new()
+            .spv(binary_u32)
+            .reflect()
+            .unwrap();
+        assert!(entry_points.len() == 1);
+        entry_points[0].to_owned()
+    };
+
     // Debug: print the reflect content
     {
         println!(
@@ -139,6 +154,7 @@ fn create_pipeline_program(
     Some(PipelineProgram {
         shader_module,
         reflect_module,
+        spirq_module,
         entry_point_c,
     })
 }
@@ -190,7 +206,26 @@ pub struct CompiledShader {
     pub program: PipelineProgram,
 }
 
+// Load shader with retry
 pub fn load_shader(
+    device: &PipelineDevice,
+    shader_def: &ShaderDefinition,
+) -> Option<CompiledShader> {
+    loop {
+        let shader = load_shader_once(device, shader_def);
+
+        // Breakpoint to let user fix shader
+        if shader.is_none() {
+            unsafe {
+                std::intrinsics::breakpoint();
+            }
+        } else {
+            return shader;
+        }
+    }
+}
+
+pub fn load_shader_once(
     device: &PipelineDevice,
     shader_def: &ShaderDefinition,
 ) -> Option<CompiledShader> {
@@ -249,11 +284,23 @@ pub fn load_shader(
     Some(CompiledShader { program: program })
 }
 
+#[derive(Eq, PartialEq, Debug)]
+pub struct PipelineDescriptorInfo {
+    pub set_index: u32,
+    pub binding_index: u32,
+    pub descriptor_type: vk::DescriptorType,
+    // TODO type? array len?
+}
+
 pub struct Pipeline {
     pub handle: vk::Pipeline,
     //pub set_layouts: Vec<vk::DescriptorSetLayout>,
     pub layout: vk::PipelineLayout,
     pub descriptor_sets: Vec<vk::DescriptorSet>,
+
+    // reflection info
+    pub descriptor_infos: HashMap<String, PipelineDescriptorInfo>,
+    pub push_constant_ranges: Vec<vk::PushConstantRange>,
 }
 
 pub fn create_compute_pipeline(
@@ -354,11 +401,16 @@ pub fn create_compute_pipeline(
         result[0]
     };
 
+    // Reflection info
+    let descriptor_infos = HashMap::new();
+
     Some(Pipeline {
         handle: pipeline,
         //set_layouts,
         layout,
         descriptor_sets,
+        descriptor_infos,
+        push_constant_ranges,
     })
 }
 
@@ -376,8 +428,10 @@ pub fn create_graphics_pipeline(
         (vk::ShaderStageFlags::FRAGMENT, ps),
     ];
 
+    // Reflection info for descriptors
+    let mut descriptor_infos = HashMap::new();
+
     // Collect and merge descriptor set from all stages
-    use std::collections::hash_map::{Entry, HashMap};
     type MergedSet = HashMap<u32, vk::DescriptorSetLayoutBinding>;
     type MergedLayout = HashMap<u32, MergedSet>;
     let mut merged_layout = MergedLayout::new();
@@ -410,6 +464,21 @@ pub fn create_graphics_pipeline(
                         .stage_flags(stage);
                     merged_set.insert(*binding, binding_info.build());
                 }
+
+                // Collect properties for later use
+                let prop_info = PipelineDescriptorInfo {
+                    set_index: *set,
+                    binding_index: *binding,
+                    descriptor_type,
+                };
+                match descriptor_infos.entry(descriptor_info.name.clone()) {
+                    Entry::Occupied(entry) => {
+                        assert_eq!(entry.get(), &prop_info);
+                    }
+                    Entry::Vacant(entry) => {
+                        entry.insert(prop_info);
+                    }
+                }
             }
         }
     }
@@ -436,11 +505,23 @@ pub fn create_graphics_pipeline(
     let mut push_constant_ranges = Vec::<PushConstantRange>::new();
     for (stage_flag, shader) in shaders {
         if let Ok(Some(info)) = shader.program.reflect_module.get_push_constant_range() {
-            push_constant_ranges.push(vk::PushConstantRange {
-                stage_flags: stage_flag,
-                offset: info.offset,
-                size: info.size,
-            });
+            // merge to prev range
+            let mut merged = false;
+            for range in &mut push_constant_ranges {
+                if (range.offset == info.offset) && (range.size == info.size) {
+                    range.stage_flags |= stage_flag;
+                    merged = true;
+                    break;
+                }
+            }
+            // else, this is a new range
+            if !merged {
+                push_constant_ranges.push(vk::PushConstantRange {
+                    stage_flags: stage_flag,
+                    offset: info.offset,
+                    size: info.size,
+                });
+            }
         }
     }
 
@@ -526,5 +607,171 @@ pub fn create_graphics_pipeline(
         //set_layouts,
         layout,
         descriptor_sets,
+        descriptor_infos,
+        push_constant_ranges,
     })
+}
+
+pub struct DescriptorSetUpdater<'a> {
+    pipeline: &'a Pipeline,
+    buffer_views: Vec<(&'a str, &'a vk::BufferView)>,
+    buffers: Vec<(&'a str, &'a vk::Buffer)>,
+    image_views: Vec<(&'a str, &'a vk::ImageView)>,
+    samplers: Vec<(&'a str, &'a vk::Sampler)>,
+}
+
+impl<'a> DescriptorSetUpdater<'a> {
+    pub fn new(pipeline: &'a Pipeline) -> Self {
+        Self {
+            pipeline,
+            buffer_views: Vec::new(),
+            buffers: Vec::new(),
+            image_views: Vec::new(),
+            samplers: Vec::new(),
+        }
+    }
+
+    pub fn update(&mut self, device: &ash::Device) {
+        let num_entry = self.buffer_views.len();
+        let mut writes = Vec::with_capacity(num_entry);
+
+        for (name, buffer_view) in &self.buffer_views {
+            if let Some(info) = self.pipeline.descriptor_infos.get(*name) {
+                let set = self.pipeline.descriptor_sets[info.set_index as usize];
+                let write = vk::WriteDescriptorSet::builder()
+                    .dst_set(set)
+                    .dst_binding(info.binding_index)
+                    .dst_array_element(0)
+                    .descriptor_type(info.descriptor_type)
+                    .texel_buffer_view(std::slice::from_ref(buffer_view));
+                writes.push(*write);
+            }
+        }
+
+        let buffer_infos: Vec<vk::DescriptorBufferInfo> = self
+            .buffers
+            .iter()
+            .map(|e| vk::DescriptorBufferInfo {
+                buffer: *e.1,
+                offset: 0,
+                range: vk::WHOLE_SIZE,
+            })
+            .collect();
+        for (name, buffer) in &self.buffers {
+            if let Some(info) = self.pipeline.descriptor_infos.get(*name) {
+                let set = self.pipeline.descriptor_sets[info.set_index as usize];
+                let write = vk::WriteDescriptorSet::builder()
+                    .dst_set(set)
+                    .dst_binding(info.binding_index)
+                    .dst_array_element(0)
+                    .descriptor_type(info.descriptor_type)
+                    .buffer_info(&buffer_infos[0..1]);
+                writes.push(*write);
+            }
+        }
+
+        let image_infos: Vec<_> = self
+            .image_views
+            .iter()
+            .map(|e| vk::DescriptorImageInfo {
+                sampler: vk::Sampler::null(),
+                image_view: *e.1,
+                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            })
+            .collect();
+        for (name, image_view) in &self.image_views {
+            if let Some(info) = self.pipeline.descriptor_infos.get(*name) {
+                let set = self.pipeline.descriptor_sets[info.set_index as usize];
+                let write = vk::WriteDescriptorSet::builder()
+                    .dst_set(set)
+                    .dst_binding(info.binding_index)
+                    .dst_array_element(0)
+                    .descriptor_type(info.descriptor_type)
+                    .image_info(&image_infos[0..1]);
+                writes.push(*write);
+            }
+        }
+
+        let sampler_info: Vec<_> = self
+            .samplers
+            .iter()
+            .map(|e| vk::DescriptorImageInfo {
+                sampler: *e.1,
+                image_view: vk::ImageView::null(),
+                image_layout: vk::ImageLayout::UNDEFINED,
+            })
+            .collect();
+        for (name, sampler) in &self.samplers {
+            if let Some(info) = self.pipeline.descriptor_infos.get(*name) {
+                let set = self.pipeline.descriptor_sets[info.set_index as usize];
+                let write = vk::WriteDescriptorSet::builder()
+                    .dst_set(set)
+                    .dst_binding(info.binding_index)
+                    .dst_array_element(0)
+                    .descriptor_type(info.descriptor_type)
+                    .image_info(&sampler_info[0..1]);
+                writes.push(*write);
+            }
+        }
+
+        unsafe {
+            device.update_descriptor_sets(&writes, &[]);
+        }
+    }
+
+    #[inline]
+    pub fn buffer(&'a mut self, name: &'a str, buffer_view: &'a vk::BufferView) -> &mut Self {
+        self.buffer_views.push((name, buffer_view));
+        self
+    }
+
+    #[inline]
+    pub fn constant_buffer(&mut self, name: &'a str, buffer: &'a vk::Buffer) -> &mut Self {
+        self.buffers.push((name, buffer));
+        self
+    }
+
+    #[inline]
+    pub fn image(&mut self, name: &'a str, image_view: &'a vk::ImageView) -> &mut Self {
+        self.image_views.push((name, image_view));
+        self
+    }
+
+    #[inline]
+    pub fn sampler(&mut self, name: &'a str, sampler: &'a vk::Sampler) -> &mut Self {
+        self.samplers.push((name, sampler));
+        self
+    }
+}
+
+pub struct PushConstantsBuilder<'a> {
+    pipeline: &'a Pipeline,
+    data: Vec<u8>,
+}
+
+impl<'a> PushConstantsBuilder<'a> {
+    pub fn new(pipeline: &'a Pipeline) -> Self {
+        Self {
+            data: Vec::new(),
+            pipeline,
+        }
+    }
+
+    pub fn add<T>(&mut self, name: &str, value: &T) -> &mut Self {
+        self
+    }
+
+    pub fn push<T>(&mut self, value: &T) -> &mut Self {
+        let size = std::mem::size_of::<T>();
+        let offset = self.data.len();
+        self.data.resize(offset + size, 0);
+        self.data[offset..offset + size].copy_from_slice(unsafe {
+            std::slice::from_raw_parts(value as *const T as *const u8, size)
+        });
+        self
+    }
+
+    pub fn build(&self) -> &[u8] {
+        &self.data
+    }
 }
