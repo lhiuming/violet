@@ -4,7 +4,7 @@ use std::io::Write;
 use std::os::raw::c_void;
 
 use ash::extensions::{ext, khr};
-use ash::vk::{self, MemoryPropertyFlags, CommandPool};
+use ash::vk::{self, CommandPool, MemoryPropertyFlags};
 
 pub struct RenderDevice {
     pub entry: ash::Entry,
@@ -14,11 +14,10 @@ pub struct RenderDevice {
     pub device: ash::Device,
     pub swapchain_entry: SwapchainEntry,
     pub surface_entry: khr::Surface,
-    pub dynamic_rendering_entry: khr::DynamicRendering,
 
     pub b_support_dynamic_rendering: bool,
+    pub b_support_bindless: bool,
 
-    pub descriptor_pool: vk::DescriptorPool,
     pub gfx_queue: vk::Queue,
 
     pub surface: Surface,
@@ -36,7 +35,7 @@ impl RenderDevice {
 
         // Create instance
         let instance = {
-            let app_info = vk::ApplicationInfo::builder().api_version(vk::API_VERSION_1_2);
+            let app_info = vk::ApplicationInfo::builder().api_version(vk::API_VERSION_1_3);
 
             let layer_names = [
                 CString::new("VK_LAYER_KHRONOS_validation").unwrap(), // Debug
@@ -45,9 +44,8 @@ impl RenderDevice {
 
             let ext_names_raw = [
                 khr::Surface::name().as_ptr(),
-                khr::GetPhysicalDeviceProperties2::name().as_ptr(), // Required by dynamic_rendering
-                khr::Win32Surface::name().as_ptr(),                 // Platform: Windows
-                ext::DebugUtils::name().as_ptr(),                   // Debug
+                khr::Win32Surface::name().as_ptr(), // Platform: Windows
+                ext::DebugUtils::name().as_ptr(),   // Debug
             ];
 
             let create_info = vk::InstanceCreateInfo::builder()
@@ -98,9 +96,10 @@ impl RenderDevice {
             }
             *picked.expect("Vulkan: None physical device?!")
         };
-        
+
         // Create device
         let b_support_dynamic_rendering;
+        let b_support_bindless;
         let gfx_queue_family_index;
         let device = {
             // Enumerate and pick queue families to create with the device
@@ -134,36 +133,32 @@ impl RenderDevice {
                     .build(),
             ];
             // Specify device extensions
-            let enabled_extension_names = [
-                khr::Swapchain::name().as_ptr(),
-                khr::DynamicRendering::name().as_ptr(),
-            ];
+            let enabled_extension_names = [khr::Swapchain::name().as_ptr()];
             // Query supported features
-            let mut dynamic_rendering_ft = vk::PhysicalDeviceDynamicRenderingFeaturesKHR::default();
-            let mut supported_features =
-                vk::PhysicalDeviceFeatures2::builder().push_next(&mut dynamic_rendering_ft);
+            let mut vulkan12_features = vk::PhysicalDeviceVulkan12Features::default();
+            let mut vulkan13_features = vk::PhysicalDeviceVulkan13Features::default();
+            let mut supported_features = vk::PhysicalDeviceFeatures2::builder()
+                .push_next(&mut vulkan12_features)
+                .push_next(&mut vulkan13_features)
+                .build();
             unsafe {
                 instance.get_physical_device_features2(physical_device, &mut supported_features);
             };
-            // Enable all supported features
-            let enabled_features = supported_features.features;
-            b_support_dynamic_rendering = dynamic_rendering_ft.dynamic_rendering == vk::TRUE;
-            // Finally, create the device
+            // Check features
+            b_support_dynamic_rendering = vulkan13_features.dynamic_rendering == vk::TRUE;
+            b_support_bindless = (vulkan12_features.descriptor_binding_partially_bound == vk::TRUE)
+                & (vulkan12_features.runtime_descriptor_array == vk::TRUE);
+            // Finally, create the device, with all supproted feature enabled (for simplicity)
             let create_info = vk::DeviceCreateInfo::builder()
                 .queue_create_infos(&queue_create_infos)
                 .enabled_extension_names(&enabled_extension_names)
-                .enabled_features(&enabled_features)
-                .push_next(&mut dynamic_rendering_ft);
+                .push_next(&mut supported_features);
             unsafe {
                 instance
                     .create_device(physical_device, &create_info, None)
                     .expect("Failed to create Vulkan device")
             }
         };
-
-        // Load dynamic_rendering
-        assert!(b_support_dynamic_rendering);
-        let dynamic_rendering_entry = khr::DynamicRendering::new(&instance, &device);
 
         // Get memory properties
         let physical_device_mem_prop =
@@ -206,20 +201,6 @@ impl RenderDevice {
             swapchain_entry.create(&device, &surface, &surface_size)
         };
 
-        // Descriptor pool
-        let descriptor_pool = {
-            let pool_sizes = [vk::DescriptorPoolSize {
-                ty: vk::DescriptorType::STORAGE_IMAGE,
-                descriptor_count: 1024, // TODO big enough?
-            }];
-            let create_info = vk::DescriptorPoolCreateInfo::builder()
-                .flags(vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET)
-                .max_sets(256) // TODO big enough?
-                .pool_sizes(&pool_sizes);
-            unsafe { device.create_descriptor_pool(&create_info, None) }
-                .expect("Vulkan: failed to create descriptor pool?!")
-        };
-
         RenderDevice {
             entry,
             instance,
@@ -228,11 +209,10 @@ impl RenderDevice {
             device,
             surface_entry,
             swapchain_entry,
-            dynamic_rendering_entry,
 
             b_support_dynamic_rendering,
+            b_support_bindless,
 
-            descriptor_pool,
             gfx_queue,
 
             surface,
@@ -241,9 +221,12 @@ impl RenderDevice {
     }
 
     pub fn create_fence(&self, signaled: bool) -> vk::Fence {
-        unsafe { 
-            let create_info = vk::FenceCreateInfo::builder()
-            .flags(if signaled { vk::FenceCreateFlags::SIGNALED } else { vk::FenceCreateFlags::empty() });
+        unsafe {
+            let create_info = vk::FenceCreateInfo::builder().flags(if signaled {
+                vk::FenceCreateFlags::SIGNALED
+            } else {
+                vk::FenceCreateFlags::empty()
+            });
             self.device.create_fence(&create_info, None)
         }
         .expect("Vulakn: failed to create fence")
@@ -280,6 +263,22 @@ impl RenderDevice {
         }
     }
 
+    pub fn create_descriptor_pool(
+        &self,
+        ty: vk::DescriptorType,
+        flags: vk::DescriptorPoolCreateFlags,
+    ) -> vk::DescriptorPool {
+        let pool_sizes = [vk::DescriptorPoolSize {
+            ty: ty,
+            descriptor_count: 1024, // TODO customize
+        }];
+        let create_info = vk::DescriptorPoolCreateInfo::builder()
+            .flags(flags)
+            .max_sets(256) // TODO big enough?
+            .pool_sizes(&pool_sizes);
+        unsafe { self.device.create_descriptor_pool(&create_info, None) }
+            .expect("Vulkan: failed to create descriptor pool?!")
+    }
 }
 
 // Debug
@@ -312,6 +311,14 @@ unsafe extern "system" fn vulkan_debug_report_callback(
         &message_id_number.to_string(),
         message,
     );
+
+    // Allow break on error
+    // TODO insert command line option
+    if message_severity >= vk::DebugUtilsMessageSeverityFlagsEXT::ERROR {
+        unsafe {
+            std::intrinsics::breakpoint();
+        }
+    }
 
     vk::FALSE
 }
@@ -460,17 +467,16 @@ impl RenderDevice {
             }
         }
 
-        let mut support_properties= Vec::new();
+        let mut support_properties = Vec::new();
         for i in 0..self.physical_device_mem_prop.memory_type_count {
-            if memory_type_bits & (1 << i) != 0
-            {
+            if memory_type_bits & (1 << i) != 0 {
                 support_properties.push(memory_types[i as usize].property_flags);
             }
         }
 
         println!(
             "Vulkan: No compatible device memory type with required properties {:?}. Support types are: {:?}",
-            property_flags, support_properties 
+            property_flags, support_properties
         );
         return None;
     }
@@ -549,15 +555,46 @@ pub struct TextureDesc {
     pub array_len: u32,
     pub format: vk::Format,
     pub usage: vk::ImageUsageFlags,
+    pub flags: vk::ImageCreateFlags,
 }
 
 impl TextureDesc {
-    pub fn new_2d(width: u32, height: u32, format: vk::Format, usage: vk::ImageUsageFlags) -> TextureDesc {
-        TextureDesc { width, height, array_len: 1, format, usage }
+    pub fn new_2d(
+        width: u32,
+        height: u32,
+        format: vk::Format,
+        usage: vk::ImageUsageFlags,
+    ) -> TextureDesc {
+        TextureDesc {
+            width,
+            height,
+            array_len: 1,
+            format,
+            usage,
+            flags: vk::ImageCreateFlags::default(),
+        }
     }
 
-    pub fn new_2d_array(width: u32, height: u32, array_len: u32, format: vk::Format, usage: vk::ImageUsageFlags) -> TextureDesc {
-        TextureDesc { width, height, array_len, format, usage }
+    pub fn new_2d_array(
+        width: u32,
+        height: u32,
+        array_len: u32,
+        format: vk::Format,
+        usage: vk::ImageUsageFlags,
+    ) -> TextureDesc {
+        TextureDesc {
+            width,
+            height,
+            array_len,
+            format,
+            usage,
+            flags: vk::ImageCreateFlags::default(),
+        }
+    }
+
+    pub fn with_flags(mut self, flag: vk::ImageCreateFlags) -> Self {
+        self.flags = flag;
+        self
     }
 }
 
@@ -565,7 +602,6 @@ pub struct Texture {
     pub desc: TextureDesc,
     pub image: vk::Image,
     pub memory: vk::DeviceMemory,
-
 }
 
 pub struct TextureViewDesc {
@@ -577,15 +613,29 @@ pub struct TextureViewDesc {
 impl TextureViewDesc {
     pub fn default(texture: &Texture) -> TextureViewDesc {
         let tex_desc = &texture.desc;
-        let view_type = if texture.desc.array_len > 1 { vk::ImageViewType::TYPE_2D_ARRAY } else { vk::ImageViewType::TYPE_2D };
+        let view_type = if texture.desc.array_len > 1 {
+            vk::ImageViewType::TYPE_2D_ARRAY
+        } else {
+            vk::ImageViewType::TYPE_2D
+        };
         let format = tex_desc.format;
         let is_depth = format == vk::Format::D16_UNORM;
-        let aspect = if is_depth { vk::ImageAspectFlags::DEPTH } else { vk::ImageAspectFlags::COLOR };
+        let aspect = if is_depth {
+            vk::ImageAspectFlags::DEPTH
+        } else {
+            vk::ImageAspectFlags::COLOR
+        };
         TextureViewDesc {
             view_type,
             format: tex_desc.format,
-            aspect
+            aspect,
         }
+    }
+
+    pub fn with_format(texture: &Texture, format: vk::Format) -> TextureViewDesc {
+        let mut desc = Self::default(texture);
+        desc.format = format;
+        desc
     }
 }
 
@@ -598,12 +648,22 @@ impl RenderDevice {
     pub fn create_texture(&self, desc: TextureDesc) -> Option<Texture> {
         let device = &self.device;
 
-        let format_prop = unsafe { 
-            self.instance.get_physical_device_image_format_properties(self.physical_device, desc.format, vk::ImageType::TYPE_2D, vk::ImageTiling::default(), desc.usage, vk::ImageCreateFlags::default())
+        let format_prop = unsafe {
+            self.instance.get_physical_device_image_format_properties(
+                self.physical_device,
+                desc.format,
+                vk::ImageType::TYPE_2D,
+                vk::ImageTiling::default(),
+                desc.usage,
+                vk::ImageCreateFlags::default(),
+            )
         };
         if let Err(e) = format_prop {
-            println!("Error: texture creation for {:?} failed: {:?}. Try something else.", desc.format, e);
-            return None
+            println!(
+                "Error: texture creation for {:?} failed: {:?}. Try something else.",
+                desc.format, e
+            );
+            return None;
         }
 
         // Create image object
@@ -621,24 +681,22 @@ impl RenderDevice {
             .samples(vk::SampleCountFlags::TYPE_1)
             .initial_layout(initial_layout)
             .usage(desc.usage)
-            ;
+            .flags(desc.flags);
         let image = unsafe { device.create_image(&create_info, None) }.unwrap();
 
         // Bind memory
         let device_memory = {
             let mem_requirements = unsafe { device.get_image_memory_requirements(image) };
             let momory_type_index = self.pick_memory_type_index(
-                    mem_requirements.memory_type_bits,
-                    vk::MemoryPropertyFlags::DEVICE_LOCAL // That's basically what texture can have
-                )?;
+                mem_requirements.memory_type_bits,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL, // That's basically what texture can have
+            )?;
             let create_info = vk::MemoryAllocateInfo::builder()
                 .allocation_size(mem_requirements.size)
                 .memory_type_index(momory_type_index);
             unsafe { device.allocate_memory(&create_info, None) }.unwrap()
         };
         unsafe { device.bind_image_memory(image, device_memory, 0) }.unwrap();
-
-
 
         Some(Texture {
             desc,
@@ -647,24 +705,25 @@ impl RenderDevice {
         })
     }
 
-    pub fn create_texture_view(&self, texture: &Texture, desc: TextureViewDesc) -> Option<TextureView> {
+    pub fn create_texture_view(
+        &self,
+        texture: &Texture,
+        desc: TextureViewDesc,
+    ) -> Option<TextureView> {
         let device = &self.device;
         let create_info = vk::ImageViewCreateInfo::builder()
-                .image(texture.image)
-                .view_type(desc.view_type)
-                .format(desc.format)
-                .subresource_range(vk::ImageSubresourceRange {
-                    aspect_mask: desc.aspect,
-                    base_mip_level: 0,
-                    level_count: 1,
-                    base_array_layer: 0,
-                    layer_count: texture.desc.array_len,
-                });
+            .image(texture.image)
+            .view_type(desc.view_type)
+            .format(desc.format)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: desc.aspect,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: texture.desc.array_len,
+            });
         let image_view = unsafe { device.create_image_view(&create_info, None) }.ok()?;
 
-        Some(TextureView {
-            desc,
-            image_view,
-        })
+        Some(TextureView { desc, image_view })
     }
 }

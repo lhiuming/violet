@@ -68,17 +68,18 @@ float Fd_Burley(float NoV, float NoL, float LoH, float roughness) {
 
 // End BRDF
 
-
+// Scene/Persistent Bindings (Set #1)
+[[vk::binding(0, 1)]] Buffer<uint> vertex_buffer;
+[[vk::binding(1, 1)]] Texture2D bindless_textures[];
 struct ViewParams 
 {
 	float4x4 view_proj;
 };
-[[vk::binding(0, 1)]]
-ConstantBuffer<ViewParams> view_params;
+[[vk::binding(2, 1)]] ConstantBuffer<ViewParams> view_params;
+[[vk::binding(3, 1)]] SamplerState sampler_linear_clamp;
 
-Buffer<uint> vertex_buffer;
-Texture2DArray material_texture;
-SamplerState material_texture_sampler;
+// Free bindings (Set #0)
+// ...
 
 struct PushConstants
 {
@@ -88,10 +89,10 @@ struct PushConstants
 	uint texcoords_offset;
 	uint normals_offset;
 	uint tangnets_offset;
-	// Materials
-	uint2 base_color;
-	uint2 normal;
-	uint2 metal_rough;
+	// Bindless Materials
+	uint color_texture;
+	uint normal_texture;
+	uint metal_rough_texture;
 };
 [[vk::push_constant]]
 PushConstants pc;
@@ -144,13 +145,6 @@ float4 unpack_unorm(uint packed_value)
 	);
 }
 
-float4 sample_material_texture(float2 local_uv, uint2 packed_params)
-{
-	float4 scale_offset = unpack_unorm(packed_params.x);
-	float2 uv = local_uv * scale_offset.xy + scale_offset.zw;
-	return material_texture.Sample(material_texture_sampler, float3(uv, packed_params.y));
-}
-
 float3 cal_lighting(float3 v /*view*/, float3 l /*light*/, float3 n /*normal*/, float perceptualRoughness, float3 diffuseColor, float3 specularColor)
 {
 	float3 h = normalize(v + l);
@@ -187,9 +181,9 @@ void ps_main(
 	// Output
 	out float4 output : SV_Target0)
 {
-	float4 base_color = sample_material_texture(uv, pc.base_color);
-	float4 normal_map = sample_material_texture(uv, pc.normal);
-	float4 metal_rough = sample_material_texture(uv, pc.metal_rough);
+	float4 base_color = bindless_textures[pc.color_texture].Sample(sampler_linear_clamp, uv);
+	float4 normal_map = bindless_textures[pc.normal_texture].Sample(sampler_linear_clamp, uv);
+	float4 metal_rough = bindless_textures[pc.metal_rough_texture].Sample(sampler_linear_clamp, uv);
 
 	// normal mapping
 	// vNt is the tangent space normal
@@ -221,6 +215,9 @@ void ps_main(
 #if 1
 //	output = float4(normal.xyz * .5f + .5f, 1.0f);
 	output = float4(normal_ws * .5f + .5f, 1.0f);
+//	output = float4(base_color.rgb, 1.0f);
+//	output = float4(normal_map.rgb * 0.5f + 0.5f, 1.0f);
+//	output = float4(metal_rough.rgb, 1.0f);
 	return;
 #endif
 	output = float4(lighting, 1.0f);

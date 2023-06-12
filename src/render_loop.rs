@@ -1,14 +1,15 @@
 use std::mem::{self, size_of};
+use std::slice;
 
 use ash::vk::{self};
-use glam::{Mat4, UVec2, Vec2};
+use glam::{Mat4, UVec2};
 
 use crate::model::Model;
 use crate::render_device::{
     Buffer, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
 };
 use crate::shader::{
-    DescriptorSetUpdater, Pipeline, PushConstantsBuilder, ShaderDefinition, ShaderStage, Shaders,
+    HackStuff, Pipeline, PushConstantsBuilder, ShaderDefinition, ShaderStage, Shaders,
 };
 
 // Allocatable buffer. Alway aligned to 4 bytes.
@@ -266,11 +267,7 @@ impl UploadContext {
 }
 
 pub struct TextureParams {
-    pub size: UVec2,
-    pub offset: UVec2,
-    pub layer: u32,
-    pub uv_scale: Vec2,
-    pub uv_offset: Vec2,
+    //pub index: u32,
 }
 
 pub struct MaterialParams {
@@ -291,19 +288,39 @@ pub struct MeshParams {
     pub material_index: u32,
 }
 
+const SCENE_DESCRIPTOR_SET_INDEX: u32 = 1;
+const VERTEX_BUFFER_BINDING_INDEX: u32 = 0;
+const BINDLESS_TEXTURE_BINDING_INDEX: u32 = 1;
+const VIEWPARAMS_BINDING_INDEX: u32 = 2;
+const SAMPLER_BINDING_INDEX: u32 = 3;
+
 // Contain everything to be rendered
 pub struct RenderScene {
     pub upload_context: UploadContext,
+
+    pub view_params_cb: Buffer,
+
+    // Shared samplers
+    pub shared_sampler: vk::Sampler,
+
+    // Scene Descriptor Set
+    pub descriptor_pool: vk::DescriptorPool,
+    pub descriptor_set_layout: vk::DescriptorSetLayout,
+    pub descriptor_set: vk::DescriptorSet,
 
     // Global buffer to store all loaded meshes
     pub vertex_buffer: AllocBuffer,
     pub index_buffer: AllocBuffer,
 
     // Global texture to store all loaded textures
-    pub material_texture: AllocTexture2D,
+    //pub material_texture: AllocTexture2D,
+
+    // Global texture arrays, mapping the bindless textures
+    pub material_textures: Vec<Texture>,
+    pub material_texture_views: Vec<TextureView>,
 
     // Stuff to be rendered
-    pub texture_params: Vec<TextureParams>,
+    //pub texture_params: Vec<TextureParams>,
     pub material_parmas: Vec<MaterialParams>,
     pub mesh_params: Vec<MeshParams>,
 }
@@ -330,6 +347,16 @@ impl RenderScene {
             .unwrap(),
         );
 
+        // View parameter constant buffer
+        let view_params_cb = rd
+            .create_buffer(
+                mem::size_of::<ViewParams>() as u64,
+                vk::BufferUsageFlags::UNIFORM_BUFFER,
+                vk::Format::UNDEFINED,
+            )
+            .unwrap();
+
+        /*
         // Texture for whole scene
         let tex_width = 2048;
         let tex_height = 2048;
@@ -349,13 +376,128 @@ impl RenderScene {
                 .unwrap();
             AllocTexture2D::new(texture, texture_view)
         };
+        */
+
+        // Shared samplers
+        let shared_sampler = unsafe {
+            let create_info = vk::SamplerCreateInfo::builder()
+                .min_filter(vk::Filter::LINEAR)
+                .mag_filter(vk::Filter::LINEAR);
+            rd.device.create_sampler(&create_info, None).unwrap()
+        };
+
+        // Descriptor pool for whole scene bindless texture
+        // TODO specific size and stuff
+        let descriptor_pool = rd.create_descriptor_pool(
+            vk::DescriptorType::SAMPLED_IMAGE,
+            vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND,
+        );
+
+        // Create the scene/persistent binding set
+        let descriptor_set_layout = {
+            let vbuffer = vk::DescriptorSetLayoutBinding::builder()
+                .binding(VERTEX_BUFFER_BINDING_INDEX)
+                .descriptor_type(vk::DescriptorType::UNIFORM_TEXEL_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::ALL);
+            let bindless_textures = vk::DescriptorSetLayoutBinding::builder()
+                .binding(BINDLESS_TEXTURE_BINDING_INDEX)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1024) // TODO size?
+                .stage_flags(vk::ShaderStageFlags::ALL);
+            let bindless_textures_flags = vk::DescriptorBindingFlags::PARTIALLY_BOUND
+                //| vk::DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT
+                | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND;
+            let cbuffer = vk::DescriptorSetLayoutBinding::builder()
+                .binding(VIEWPARAMS_BINDING_INDEX)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::ALL);
+            let samplers = [shared_sampler];
+            let sampler_ll = vk::DescriptorSetLayoutBinding::builder()
+                .binding(SAMPLER_BINDING_INDEX)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .stage_flags(vk::ShaderStageFlags::ALL)
+                .immutable_samplers(&samplers);
+            let bindings = [*vbuffer, *bindless_textures, *cbuffer, *sampler_ll];
+            let binding_flags = [
+                vk::DescriptorBindingFlags::default(),
+                bindless_textures_flags,
+                vk::DescriptorBindingFlags::default(),
+                vk::DescriptorBindingFlags::default(),
+            ];
+            let mut flags_create_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::builder()
+                .binding_flags(&binding_flags);
+            let create_info = vk::DescriptorSetLayoutCreateInfo::builder()
+                .bindings(&bindings)
+                .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL) // for bindless
+                .push_next(&mut flags_create_info);
+            unsafe {
+                rd.device
+                    .create_descriptor_set_layout(&create_info, None)
+                    .expect("Failed to create scene descriptor set layout")
+            }
+        };
+        let descriptor_set = {
+            let layouts = [descriptor_set_layout];
+            let create_info = vk::DescriptorSetAllocateInfo::builder()
+                .descriptor_pool(descriptor_pool)
+                .set_layouts(&layouts);
+            unsafe {
+                rd.device
+                    .allocate_descriptor_sets(&create_info)
+                    .expect("Failed to create descriptor set for scene")[0]
+            }
+        };
+
+        // Initialize descriptor set
+        {
+            let write_buffer_view = vk::WriteDescriptorSet::builder()
+                .dst_set(descriptor_set)
+                .dst_binding(VERTEX_BUFFER_BINDING_INDEX)
+                .descriptor_type(vk::DescriptorType::UNIFORM_TEXEL_BUFFER)
+                .texel_buffer_view(slice::from_ref(&vertex_buffer.buffer.srv.unwrap()))
+                .build();
+            let cbuffer_info = vk::DescriptorBufferInfo::builder()
+                .buffer(view_params_cb.buffer)
+                .offset(0)
+                .range(vk::WHOLE_SIZE)
+                .build();
+            let write_cbuffer = vk::WriteDescriptorSet::builder()
+                .dst_set(descriptor_set)
+                .dst_binding(VIEWPARAMS_BINDING_INDEX)
+                .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
+                .buffer_info(slice::from_ref(&cbuffer_info))
+                .build();
+            let sampler_info = vk::DescriptorImageInfo::builder()
+                .sampler(shared_sampler)
+                .build();
+            /* Using immutable samplers; no write.
+            let write_sampler = vk::WriteDescriptorSet::builder()
+                .dst_set(descriptor_set)
+                .dst_binding(SAMPLER_BINDING_INDEX)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .image_info(slice::from_ref(&sampler_info))
+                .build();
+             */
+            unsafe {
+                rd.device
+                    .update_descriptor_sets(&[write_buffer_view, write_cbuffer], &[])
+            }
+        }
 
         RenderScene {
             upload_context: UploadContext::new(rd),
+            view_params_cb,
+            shared_sampler,
+            descriptor_pool,
+            descriptor_set_layout,
+            descriptor_set,
             vertex_buffer: vertex_buffer,
             index_buffer: index_buffer,
-            material_texture: material_texture,
-            texture_params: Vec::new(),
+            //material_texture: material_texture,
+            material_textures: Vec::new(),
+            material_texture_views: Vec::new(),
             material_parmas: Vec::new(),
             mesh_params: Vec::new(),
         }
@@ -363,13 +505,26 @@ impl RenderScene {
 
     pub fn add(&mut self, rd: &RenderDevice, model: &Model) {
         let upload_context = &mut self.upload_context;
-        let material_texture = &mut self.material_texture;
+        //let material_texture = &mut self.material_texture;
         let index_buffer = &mut self.index_buffer;
         let vertex_buffer = &mut self.vertex_buffer;
 
-        let texture_index_offset = self.texture_params.len() as u32;
+        let texture_index_offset = self.material_textures.len() as u32;
         for image in &model.images {
             let texel_count = image.width * image.height;
+
+            // Create texture object
+            let texture = rd
+                .create_texture(
+                    TextureDesc::new_2d(
+                        image.width,
+                        image.height,
+                        vk::Format::R8G8B8A8_UINT,
+                        vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+                    )
+                    .with_flags(vk::ImageCreateFlags::MUTABLE_FORMAT), // performance cost?
+                )
+                .unwrap();
 
             // Create staging buffer
             let staging_buffer = rd
@@ -389,18 +544,12 @@ impl RenderScene {
             };
             staging_slice.copy_from_slice(&image.data);
 
-            // Transfer to material texture
-            let (dst_x, dst_y, dst_layer) =
-                material_texture.alloc(image.width, image.height).unwrap();
-            println!(
-                "/t Writing to material texture: x {}, y {}, layer {}",
-                dst_x, dst_y, dst_layer
-            );
+            // Transfer to texture
             upload_context.immediate_submit(rd, |command_buffer| {
                 // Transfer to proper image layout
                 unsafe {
                     let barrier = vk::ImageMemoryBarrier::builder()
-                        .image(material_texture.texture.image)
+                        .image(texture.image)
                         .old_layout(vk::ImageLayout::UNDEFINED)
                         .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                         .src_access_mask(vk::AccessFlags::empty())
@@ -409,7 +558,7 @@ impl RenderScene {
                             aspect_mask: vk::ImageAspectFlags::COLOR,
                             base_mip_level: 0,
                             level_count: 1,
-                            base_array_layer: dst_layer,
+                            base_array_layer: 0,
                             layer_count: 1,
                         });
                     rd.device.cmd_pipeline_barrier(
@@ -431,14 +580,10 @@ impl RenderScene {
                     .image_subresource(vk::ImageSubresourceLayers {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
                         mip_level: 0,
-                        base_array_layer: dst_layer,
+                        base_array_layer: 0,
                         layer_count: 1,
                     })
-                    .image_offset(vk::Offset3D {
-                        x: dst_x as i32,
-                        y: dst_y as i32,
-                        z: 0,
-                    })
+                    .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
                     .image_extent(vk::Extent3D {
                         width: image.width,
                         height: image.height,
@@ -449,7 +594,7 @@ impl RenderScene {
                     rd.device.cmd_copy_buffer_to_image(
                         command_buffer,
                         staging_buffer.buffer,
-                        material_texture.texture.image,
+                        texture.image,
                         dst_image_layout,
                         &regions,
                     )
@@ -458,7 +603,7 @@ impl RenderScene {
                 // Transfer to shader ready layout
                 unsafe {
                     let barrier = vk::ImageMemoryBarrier::builder()
-                        .image(material_texture.texture.image)
+                        .image(texture.image)
                         .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
                         .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
                         .src_access_mask(vk::AccessFlags::empty())
@@ -467,7 +612,7 @@ impl RenderScene {
                             aspect_mask: vk::ImageAspectFlags::COLOR,
                             base_mip_level: 0,
                             level_count: 1,
-                            base_array_layer: dst_layer,
+                            base_array_layer: 0,
                             layer_count: 1,
                         });
                     rd.device.cmd_pipeline_barrier(
@@ -482,30 +627,68 @@ impl RenderScene {
                 }
             });
 
-            let size = UVec2::new(image.width, image.height);
-            let offset = UVec2 { x: dst_x, y: dst_y };
-            self.texture_params.push(TextureParams {
-                size,
-                offset,
-                layer: dst_layer,
-                uv_scale: size.as_vec2() / material_texture.size().as_vec2(),
-                uv_offset: offset.as_vec2() / material_texture.size().as_vec2(),
-            });
+            // Queue to upload to scene data
+
+            self.material_textures.push(texture);
         }
 
+        let texture_view_index_offset = self.material_texture_views.len() as u32;
         let material_index_offset = self.material_parmas.len() as u32;
         for material in &model.materials {
+            // Create texture view for each material and add to scene
+            // TODO collect and reduce duplicate in view?
             // TODO default textures
-            let resolve = |map: &Option<crate::model::MaterialMap>| match map {
-                Some(map) => texture_index_offset + map.image_index,
+            let mut resolve = |map: &Option<crate::model::MaterialMap>, is_srgb: bool| match map {
+                Some(map) => {
+                    let texture = {
+                        let texture_index = texture_index_offset + map.image_index;
+                        &self.material_textures[texture_index as usize]
+                    };
+                    let format = if is_srgb {
+                        vk::Format::R8G8B8A8_SRGB
+                    } else {
+                        //vk::Format::R8G8B8A8_SNORM
+                        vk::Format::R8G8B8A8_SRGB // TODO SNORM is broken
+                    };
+                    let texture_view = rd
+                        .create_texture_view(texture, TextureViewDesc::with_format(texture, format))
+                        .unwrap();
+                    let texture_view_index = self.material_texture_views.len() as u32;
+                    self.material_texture_views.push(texture_view);
+                    texture_view_index
+                }
                 None => 0,
             };
 
             self.material_parmas.push(MaterialParams {
-                base_color_index: resolve(&material.base_color_map),
-                metallic_roughness_index: resolve(&material.metallic_roughness_map),
-                normal_index: resolve(&material.normal_map),
+                base_color_index: resolve(&material.base_color_map, true),
+                metallic_roughness_index: resolve(&material.metallic_roughness_map, true),
+                normal_index: resolve(&material.normal_map, false),
             });
+        }
+
+        // Add new texture view to bindless texture array
+        {
+            let image_infos: Vec<vk::DescriptorImageInfo> = self.material_texture_views
+                [texture_index_offset as usize..]
+                .iter()
+                .map(|view| {
+                    vk::DescriptorImageInfo::builder()
+                        .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                        .image_view(view.image_view)
+                        .sampler(vk::Sampler::null())
+                        .build()
+                })
+                .collect();
+            let write = vk::WriteDescriptorSet::builder()
+                .dst_set(self.descriptor_set)
+                .dst_binding(BINDLESS_TEXTURE_BINDING_INDEX)
+                .dst_array_element(texture_view_index_offset)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(&image_infos);
+            unsafe {
+                rd.device.update_descriptor_sets(&[*write], &[]);
+            }
         }
 
         for (material_index, mesh) in model.meshes.iter().enumerate() {
@@ -580,9 +763,6 @@ pub struct RednerLoop {
     pub present_ready_semaphore: vk::Semaphore,
     pub command_buffer_finished_fence: vk::Fence,
 
-    pub shared_sampler: vk::Sampler,
-
-    pub view_params_cb: Buffer,
     pub depth_buffer: Texture,
     pub depth_buffer_view: TextureView,
 }
@@ -598,15 +778,6 @@ impl RednerLoop {
         let swapchain_size = rd.swapchain.extent;
         assert_eq!(surface_size, swapchain_size);
 
-        // View parameter constant buffer
-        let view_params_cb = rd
-            .create_buffer(
-                mem::size_of::<ViewParams>() as u64,
-                vk::BufferUsageFlags::UNIFORM_BUFFER,
-                vk::Format::UNDEFINED,
-            )
-            .unwrap();
-
         // Create depth buffer
         let depth_buffer = rd
             .create_texture(TextureDesc::new_2d(
@@ -620,12 +791,6 @@ impl RednerLoop {
             .create_texture_view(&depth_buffer, TextureViewDesc::default(&depth_buffer))
             .unwrap();
 
-        // Shared samplers
-        let shared_sampler = unsafe {
-            let create_info = vk::SamplerCreateInfo::builder();
-            rd.device.create_sampler(&create_info, None).unwrap()
-        };
-
         RednerLoop {
             command_pool,
             command_buffer,
@@ -633,8 +798,6 @@ impl RednerLoop {
             present_finished_semephore: rd.create_semaphore(),
             present_ready_semaphore: rd.create_semaphore(),
             command_buffer_finished_fence: rd.create_fence(true),
-            shared_sampler,
-            view_params_cb,
             depth_buffer,
             depth_buffer_view,
         }
@@ -651,7 +814,6 @@ impl RednerLoop {
         let physical_device = &rd.physical_device;
         let surface_entry = &rd.surface_entry;
         let swapchain_entry = &rd.swapchain_entry;
-        let dynamic_rendering_entry = &rd.dynamic_rendering_entry;
         let gfx_queue = &rd.gfx_queue;
         let command_buffer = self.command_buffer;
         let surface = &rd.surface;
@@ -730,7 +892,7 @@ impl RednerLoop {
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     std::ptr::addr_of!(view_params),
-                    self.view_params_cb.data as *mut ViewParams,
+                    scene.view_params_cb.data as *mut ViewParams,
                     mem::size_of::<ViewParams>(),
                 );
             }
@@ -816,14 +978,21 @@ impl RednerLoop {
                 .color_attachments(&color_attachments)
                 .depth_attachment(&depth_attachment);
             unsafe {
-                dynamic_rendering_entry.cmd_begin_rendering(command_buffer, &rendering_info);
+                device.cmd_begin_rendering(command_buffer, &rendering_info);
             }
         }
 
         // Draw mesh
+        let mut hack = HackStuff {
+            bindless_size: 1024,
+            set_layout_override: std::collections::HashMap::new(),
+        };
+        hack.set_layout_override
+            .insert(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set_layout);
         let mesh_gfx_pipeline = shaders.get_gfx_pipeline(
             &ShaderDefinition::new("MeshVSPS.hlsl", "vs_main", ShaderStage::Vert),
             &ShaderDefinition::new("MeshVSPS.hlsl", "ps_main", ShaderStage::Frag),
+            &hack,
         );
         if let Some(pipeline) = mesh_gfx_pipeline {
             // Set viewport and scissor
@@ -851,7 +1020,20 @@ impl RednerLoop {
                 }
             }
 
+            // Bind scene resources
+            unsafe {
+                device.cmd_bind_descriptor_sets(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    pipeline.layout,
+                    SCENE_DESCRIPTOR_SET_INDEX,
+                    &[scene.descriptor_set],
+                    &[],
+                );
+            }
+
             // Bind shader resources
+            /*
             DescriptorSetUpdater::new(pipeline)
                 .buffer("vertex_buffer", &scene.vertex_buffer.buffer.srv.unwrap())
                 .constant_buffer("view_params", &self.view_params_cb.buffer)
@@ -868,6 +1050,7 @@ impl RednerLoop {
                     &[],
                 );
             }
+            */
 
             // Bind index buffer
             unsafe {
@@ -891,9 +1074,7 @@ impl RednerLoop {
         }
 
         // End render pass
-        unsafe {
-            dynamic_rendering_entry.cmd_end_rendering(command_buffer);
-        }
+        unsafe { device.cmd_end_rendering(command_buffer) }
 
         // Draw something with compute
         let mesh_cs_pipeline = shaders.get_compute_pipeline(&ShaderDefinition::new(
@@ -902,6 +1083,7 @@ impl RednerLoop {
             ShaderStage::Compute,
         ));
         if let Some(pipeline) = mesh_cs_pipeline {
+            /*
             // Transition for compute
             {
                 let sub_res_range = vk::ImageSubresourceRange::builder()
@@ -970,6 +1152,7 @@ impl RednerLoop {
                     device.cmd_dispatch(command_buffer, dispatch_x, dispatch_y, 1);
                 }
             }
+            */
         }
 
         // Transition for present
@@ -1062,22 +1245,9 @@ impl RednerLoop {
                 constants.push(&mesh_params.normals_offset);
                 constants.push(&mesh_params.tangents_offset);
                 // material params
-                let encode_tex = |tex_index| {
-                    let tex_params = &render_scene.texture_params[tex_index as usize];
-                    let scale_offset = pack_unorm(
-                        tex_params.uv_scale.x,
-                        tex_params.uv_scale.y,
-                        tex_params.uv_offset.x,
-                        tex_params.uv_offset.y,
-                    );
-                    UVec2 {
-                        x: scale_offset,
-                        y: tex_params.layer,
-                    }
-                };
-                constants.push(&encode_tex(material_params.base_color_index));
-                constants.push(&encode_tex(material_params.normal_index));
-                constants.push(&encode_tex(material_params.metallic_roughness_index));
+                constants.push(&material_params.base_color_index);
+                constants.push(&material_params.normal_index);
+                constants.push(&material_params.metallic_roughness_index);
             }
             unsafe {
                 device.cmd_push_constants(

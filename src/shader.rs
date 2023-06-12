@@ -9,7 +9,6 @@ use crate::render_device::RenderDevice;
 
 pub struct PipelineDevice {
     device: ash::Device,
-    descriptor_pool: vk::DescriptorPool,
     pipeline_cache: vk::PipelineCache,
 }
 
@@ -18,7 +17,6 @@ impl PipelineDevice {
         PipelineDevice {
             device: rd.device.clone(),
             pipeline_cache: vk::PipelineCache::null(),
-            descriptor_pool: rd.descriptor_pool,
         }
     }
 }
@@ -50,6 +48,7 @@ impl Shaders {
         &mut self,
         vs_def: &ShaderDefinition,
         ps_def: &ShaderDefinition,
+        hack: &HackStuff,
     ) -> Option<&Pipeline> {
         // look from cache
         // If not in cache, create and push into cache
@@ -60,7 +59,7 @@ impl Shaders {
         let create = || {
             let vs = load_shader(&self.pipeline_device, &vs_def)?;
             let ps = load_shader(&self.pipeline_device, &ps_def)?;
-            create_graphics_pipeline(&self.pipeline_device, &vs, &ps)
+            create_graphics_pipeline(&self.pipeline_device, &vs, &ps, &hack)
         };
 
         if !cache.contains_key(&key) {
@@ -187,6 +186,11 @@ pub struct ShaderDefinition {
     pub stage: ShaderStage,
 }
 
+pub struct HackStuff {
+    pub bindless_size: u32, // Used to create descriptor layout
+    pub set_layout_override: HashMap<u32, vk::DescriptorSetLayout>,
+}
+
 impl ShaderDefinition {
     pub fn new(
         virtual_path: &'static str,
@@ -296,7 +300,6 @@ pub struct Pipeline {
     pub handle: vk::Pipeline,
     //pub set_layouts: Vec<vk::DescriptorSetLayout>,
     pub layout: vk::PipelineLayout,
-    pub descriptor_sets: Vec<vk::DescriptorSet>,
 
     // reflection info
     pub descriptor_infos: HashMap<String, PipelineDescriptorInfo>,
@@ -309,7 +312,6 @@ pub fn create_compute_pipeline(
     compiled: &CompiledShader,
 ) -> Option<Pipeline> {
     let pipeline_cache = device.pipeline_cache;
-    let descriptor_pool = device.descriptor_pool;
     let device = &device.device;
 
     let program = &compiled.program;
@@ -376,14 +378,6 @@ pub fn create_compute_pipeline(
         unsafe { device.create_pipeline_layout(&create_info, None) }.ok()?
     };
 
-    // Create all used descriptor sets
-    let descriptor_sets = {
-        let create_info = vk::DescriptorSetAllocateInfo::builder()
-            .descriptor_pool(descriptor_pool)
-            .set_layouts(&set_layouts);
-        unsafe { device.allocate_descriptor_sets(&create_info) }.ok()?
-    };
-
     // Create pipeline object
     let pipeline = {
         let entry_point_c = CString::new(shader_def.entry_point.clone())
@@ -408,7 +402,6 @@ pub fn create_compute_pipeline(
         handle: pipeline,
         //set_layouts,
         layout,
-        descriptor_sets,
         descriptor_infos,
         push_constant_ranges,
     })
@@ -418,9 +411,9 @@ pub fn create_graphics_pipeline(
     device: &PipelineDevice,
     vs: &CompiledShader,
     ps: &CompiledShader,
+    hack: &HackStuff,
 ) -> Option<Pipeline> {
     let pipeline_cache = device.pipeline_cache;
-    let descriptor_pool = device.descriptor_pool;
     let device = &device.device;
 
     let shaders = [
@@ -450,13 +443,14 @@ pub fn create_graphics_pipeline(
                 let count = match descriptor_info.binding_count {
                     rspirv_reflect::BindingCount::One => 1,
                     rspirv_reflect::BindingCount::StaticSized(size) => size as u32,
-                    rspirv_reflect::BindingCount::Unbounded => todo!(),
+                    rspirv_reflect::BindingCount::Unbounded => hack.bindless_size,
                 };
                 if let Some(binding_info) = merged_set.get_mut(binding) {
                     assert!(descriptor_type == binding_info.descriptor_type);
                     assert!(count == binding_info.descriptor_count); // really?
                     binding_info.stage_flags |= stage;
                 } else {
+                    // TODO add extension flags for bindless textures
                     let binding_info = vk::DescriptorSetLayoutBinding::builder()
                         .binding(*binding)
                         .descriptor_type(descriptor_type)
@@ -487,6 +481,12 @@ pub fn create_graphics_pipeline(
     if merged_layout.len() > 0 {
         set_layouts.resize((last_set + 1) as usize, vk::DescriptorSetLayout::null());
         merged_layout.drain().for_each(|(set, bindings)| {
+            if hack.set_layout_override.contains_key(&set) {
+                set_layouts[set as usize] = hack.set_layout_override[&set];
+                println!("Overriding set layout for set {}", set);
+                return;
+            }
+
             let bindings = bindings
                 .into_values()
                 .collect::<Vec<vk::DescriptorSetLayoutBinding>>();
@@ -499,6 +499,15 @@ pub fn create_graphics_pipeline(
                 Err(_) => todo!(),
             }
         });
+    }
+
+    // Fill empty set layouts
+    for set_layout in &mut set_layouts {
+        if *set_layout == vk::DescriptorSetLayout::null() {
+            let create_info = vk::DescriptorSetLayoutCreateInfo::builder();
+            *set_layout =
+                unsafe { device.create_descriptor_set_layout(&create_info, None) }.unwrap();
+        }
     }
 
     // Create all push constant ranges use in all stages
@@ -531,18 +540,6 @@ pub fn create_graphics_pipeline(
             .set_layouts(&set_layouts)
             .push_constant_ranges(&push_constant_ranges);
         unsafe { device.create_pipeline_layout(&create_info, None) }.ok()?
-    };
-
-    // Create all used descriptor sets
-    let descriptor_sets = {
-        if set_layouts.len() == 0 {
-            Vec::new()
-        } else {
-            let create_info = vk::DescriptorSetAllocateInfo::builder()
-                .descriptor_pool(descriptor_pool)
-                .set_layouts(&set_layouts);
-            unsafe { device.allocate_descriptor_sets(&create_info) }.ok()?
-        }
     };
 
     // Stages
@@ -606,143 +603,125 @@ pub fn create_graphics_pipeline(
         handle: pipeline,
         //set_layouts,
         layout,
-        descriptor_sets,
         descriptor_infos,
         push_constant_ranges,
     })
 }
 
-pub struct DescriptorSetUpdater<'a> {
-    pipeline: &'a Pipeline,
-    buffer_views: Vec<(&'a str, &'a vk::BufferView)>,
-    buffers: Vec<(&'a str, &'a vk::Buffer)>,
-    image_views: Vec<(&'a str, &'a vk::ImageView)>,
-    samplers: Vec<(&'a str, &'a vk::Sampler)>,
-}
+/*
 
-impl<'a> DescriptorSetUpdater<'a> {
-    pub fn new(pipeline: &'a Pipeline) -> Self {
-        Self {
-            pipeline,
-            buffer_views: Vec::new(),
-            buffers: Vec::new(),
-            image_views: Vec::new(),
-            samplers: Vec::new(),
+pub fn update(&mut self, device: &ash::Device) {
+    let num_entry = self.buffer_views.len();
+    let mut writes = Vec::with_capacity(num_entry);
+
+    for (name, buffer_view) in &self.buffer_views {
+        if let Some(info) = self.pipeline.descriptor_infos.get(*name) {
+            let set = self.pipeline.descriptor_sets[info.set_index as usize];
+            let write = vk::WriteDescriptorSet::builder()
+                .dst_set(set)
+                .dst_binding(info.binding_index)
+                .dst_array_element(0)
+                .descriptor_type(info.descriptor_type)
+                .texel_buffer_view(std::slice::from_ref(buffer_view));
+            writes.push(*write);
         }
     }
 
-    pub fn update(&mut self, device: &ash::Device) {
-        let num_entry = self.buffer_views.len();
-        let mut writes = Vec::with_capacity(num_entry);
-
-        for (name, buffer_view) in &self.buffer_views {
-            if let Some(info) = self.pipeline.descriptor_infos.get(*name) {
-                let set = self.pipeline.descriptor_sets[info.set_index as usize];
-                let write = vk::WriteDescriptorSet::builder()
-                    .dst_set(set)
-                    .dst_binding(info.binding_index)
-                    .dst_array_element(0)
-                    .descriptor_type(info.descriptor_type)
-                    .texel_buffer_view(std::slice::from_ref(buffer_view));
-                writes.push(*write);
-            }
-        }
-
-        let buffer_infos: Vec<vk::DescriptorBufferInfo> = self
-            .buffers
-            .iter()
-            .map(|e| vk::DescriptorBufferInfo {
-                buffer: *e.1,
-                offset: 0,
-                range: vk::WHOLE_SIZE,
-            })
-            .collect();
-        for (name, buffer) in &self.buffers {
-            if let Some(info) = self.pipeline.descriptor_infos.get(*name) {
-                let set = self.pipeline.descriptor_sets[info.set_index as usize];
-                let write = vk::WriteDescriptorSet::builder()
-                    .dst_set(set)
-                    .dst_binding(info.binding_index)
-                    .dst_array_element(0)
-                    .descriptor_type(info.descriptor_type)
-                    .buffer_info(&buffer_infos[0..1]);
-                writes.push(*write);
-            }
-        }
-
-        let image_infos: Vec<_> = self
-            .image_views
-            .iter()
-            .map(|e| vk::DescriptorImageInfo {
-                sampler: vk::Sampler::null(),
-                image_view: *e.1,
-                image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            })
-            .collect();
-        for (name, image_view) in &self.image_views {
-            if let Some(info) = self.pipeline.descriptor_infos.get(*name) {
-                let set = self.pipeline.descriptor_sets[info.set_index as usize];
-                let write = vk::WriteDescriptorSet::builder()
-                    .dst_set(set)
-                    .dst_binding(info.binding_index)
-                    .dst_array_element(0)
-                    .descriptor_type(info.descriptor_type)
-                    .image_info(&image_infos[0..1]);
-                writes.push(*write);
-            }
-        }
-
-        let sampler_info: Vec<_> = self
-            .samplers
-            .iter()
-            .map(|e| vk::DescriptorImageInfo {
-                sampler: *e.1,
-                image_view: vk::ImageView::null(),
-                image_layout: vk::ImageLayout::UNDEFINED,
-            })
-            .collect();
-        for (name, sampler) in &self.samplers {
-            if let Some(info) = self.pipeline.descriptor_infos.get(*name) {
-                let set = self.pipeline.descriptor_sets[info.set_index as usize];
-                let write = vk::WriteDescriptorSet::builder()
-                    .dst_set(set)
-                    .dst_binding(info.binding_index)
-                    .dst_array_element(0)
-                    .descriptor_type(info.descriptor_type)
-                    .image_info(&sampler_info[0..1]);
-                writes.push(*write);
-            }
-        }
-
-        unsafe {
-            device.update_descriptor_sets(&writes, &[]);
+    let buffer_infos: Vec<vk::DescriptorBufferInfo> = self
+        .buffers
+        .iter()
+        .map(|e| vk::DescriptorBufferInfo {
+            buffer: *e.1,
+            offset: 0,
+            range: vk::WHOLE_SIZE,
+        })
+        .collect();
+    for (name, buffer) in &self.buffers {
+        if let Some(info) = self.pipeline.descriptor_infos.get(*name) {
+            let set = self.pipeline.descriptor_sets[info.set_index as usize];
+            let write = vk::WriteDescriptorSet::builder()
+                .dst_set(set)
+                .dst_binding(info.binding_index)
+                .dst_array_element(0)
+                .descriptor_type(info.descriptor_type)
+                .buffer_info(&buffer_infos[0..1]);
+            writes.push(*write);
         }
     }
 
-    #[inline]
-    pub fn buffer(&'a mut self, name: &'a str, buffer_view: &'a vk::BufferView) -> &mut Self {
-        self.buffer_views.push((name, buffer_view));
-        self
+    let image_infos: Vec<_> = self
+        .image_views
+        .iter()
+        .map(|e| vk::DescriptorImageInfo {
+            sampler: vk::Sampler::null(),
+            image_view: *e.1,
+            image_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        })
+        .collect();
+    for (name, image_view) in &self.image_views {
+        if let Some(info) = self.pipeline.descriptor_infos.get(*name) {
+            let set = self.pipeline.descriptor_sets[info.set_index as usize];
+            let write = vk::WriteDescriptorSet::builder()
+                .dst_set(set)
+                .dst_binding(info.binding_index)
+                .dst_array_element(0)
+                .descriptor_type(info.descriptor_type)
+                .image_info(&image_infos[0..1]);
+            writes.push(*write);
+        }
     }
 
-    #[inline]
-    pub fn constant_buffer(&mut self, name: &'a str, buffer: &'a vk::Buffer) -> &mut Self {
-        self.buffers.push((name, buffer));
-        self
+    let sampler_info: Vec<_> = self
+        .samplers
+        .iter()
+        .map(|e| vk::DescriptorImageInfo {
+            sampler: *e.1,
+            image_view: vk::ImageView::null(),
+            image_layout: vk::ImageLayout::UNDEFINED,
+        })
+        .collect();
+    for (name, sampler) in &self.samplers {
+        if let Some(info) = self.pipeline.descriptor_infos.get(*name) {
+            let set = self.pipeline.descriptor_sets[info.set_index as usize];
+            let write = vk::WriteDescriptorSet::builder()
+                .dst_set(set)
+                .dst_binding(info.binding_index)
+                .dst_array_element(0)
+                .descriptor_type(info.descriptor_type)
+                .image_info(&sampler_info[0..1]);
+            writes.push(*write);
+        }
     }
 
-    #[inline]
-    pub fn image(&mut self, name: &'a str, image_view: &'a vk::ImageView) -> &mut Self {
-        self.image_views.push((name, image_view));
-        self
-    }
-
-    #[inline]
-    pub fn sampler(&mut self, name: &'a str, sampler: &'a vk::Sampler) -> &mut Self {
-        self.samplers.push((name, sampler));
-        self
+    unsafe {
+        device.update_descriptor_sets(&writes, &[]);
     }
 }
+
+#[inline]
+pub fn buffer(&'a mut self, name: &'a str, buffer_view: &'a vk::BufferView) -> &mut Self {
+    self.buffer_views.push((name, buffer_view));
+    self
+}
+
+#[inline]
+pub fn constant_buffer(&mut self, name: &'a str, buffer: &'a vk::Buffer) -> &mut Self {
+    self.buffers.push((name, buffer));
+    self
+}
+
+#[inline]
+pub fn image(&mut self, name: &'a str, image_view: &'a vk::ImageView) -> &mut Self {
+    self.image_views.push((name, image_view));
+    self
+}
+
+#[inline]
+pub fn sampler(&mut self, name: &'a str, sampler: &'a vk::Sampler) -> &mut Self {
+    self.samplers.push((name, sampler));
+    self
+}
+*/
 
 pub struct PushConstantsBuilder<'a> {
     pipeline: &'a Pipeline,
