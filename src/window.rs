@@ -295,8 +295,16 @@ impl Window {
 
         // Create window
         let mut style: u32 = WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
-        style |= WS_SYSMENU | WS_MINIMIZEBOX; // ?
-        style |= WS_CAPTION | WS_MAXIMIZEBOX | WS_THICKFRAME; // Title and resizable frame
+        style |= WS_CAPTION // Title
+            | WS_SYSMENU // Required by WS_MINIMIZEBOX
+            | WS_MINIMIZEBOX // Minimize button
+            ;
+        let _resizable = false;
+        if _resizable {
+            style |= WS_THICKFRAME // resizable frame
+            | WS_MAXIMIZEBOX // maximize button
+            ;
+        }
         let ex_style = WS_EX_APPWINDOW;
         let hwnd = unsafe {
             // Found proper windows size to produce desired surface size
