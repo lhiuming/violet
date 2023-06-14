@@ -188,7 +188,8 @@ void ps_main(
 	// normal mapping
 	// vNt is the tangent space normal
 	bitangent = normalize(tangent.w * cross(normal, tangent.xyz));
-	float3 normal_ws = normalize( normal_map.x * tangent.xyz + normal_map.y * bitangent + normal_map.z * normal );
+	float3 normal_ts = normal_map.xyz * 2.0f - 1.0f;
+	float3 normal_ws = normalize( normal_ts.x * tangent.xyz + normal_ts.y * bitangent + normal_ts.z * normal );
 
 	float3 view = float3(0.0f, -1.0f, 0.0f);// todo
 	float3 light = float3(0.0f, 0.0f, 1.0f);

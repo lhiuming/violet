@@ -647,8 +647,7 @@ impl RenderScene {
                     let format = if is_srgb {
                         vk::Format::R8G8B8A8_SRGB
                     } else {
-                        //vk::Format::R8G8B8A8_SNORM
-                        vk::Format::R8G8B8A8_SRGB // TODO SNORM is broken
+                        vk::Format::R8G8B8A8_UNORM
                     };
                     let texture_view = rd
                         .create_texture_view(texture, TextureViewDesc::with_format(texture, format))
