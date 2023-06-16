@@ -18,6 +18,8 @@ mod model;
 mod render_loop;
 use render_loop::{RednerLoop, RenderScene};
 
+use crate::render_loop::ViewInfo;
+
 // Assumming positive Z; mapping near-plane to 1, far-plane to 0 (reversed Z).
 // Never flip y (or x).
 fn perspective_projection(
@@ -110,7 +112,7 @@ fn main() {
         }
 
         // Update camera
-        let view_proj: Mat4;
+        let view_info: ViewInfo;
         {
             let fov = (90.0f32).to_radians(); // horizontal
 
@@ -172,9 +174,13 @@ fn main() {
                 (swapchain.extent.width as f32) / (swapchain.extent.height as f32);
             let proj = perspective_projection(0.05, 102400.0, fov, width_by_height);
 
-            view_proj = proj * view;
+            view_info = ViewInfo {
+                view_position: camera_pos,
+                view_transform: view,
+                projection: proj,
+            };
         }
 
-        render_loop.render(&rd, &mut shaders, &render_scene, view_proj);
+        render_loop.render(&rd, &mut shaders, &render_scene, &view_info);
     }
 }

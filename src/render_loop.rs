@@ -2,7 +2,7 @@ use std::mem::{self, size_of};
 use std::slice;
 
 use ash::vk::{self};
-use glam::{Mat4, UVec2};
+use glam::{Mat4, UVec2, Vec3};
 
 use crate::model::Model;
 use crate::render_device::{
@@ -751,6 +751,15 @@ impl RenderScene {
 #[repr(C)]
 pub struct ViewParams {
     pub view_proj: Mat4,
+    pub inv_view_proj: Mat4,
+    pub view_pos: Vec3,
+    pub padding: f32,
+}
+
+pub struct ViewInfo {
+    pub view_position: Vec3,
+    pub view_transform: Mat4,
+    pub projection: Mat4,
 }
 
 pub struct RednerLoop {
@@ -762,8 +771,8 @@ pub struct RednerLoop {
     pub present_ready_semaphore: vk::Semaphore,
     pub command_buffer_finished_fence: vk::Fence,
 
-    pub depth_buffer: Texture,
-    pub depth_buffer_view: TextureView,
+    pub depth_stencil_buffer: Texture,
+    pub depth_stencil_buffer_view: TextureView,
 }
 
 impl RednerLoop {
@@ -778,16 +787,19 @@ impl RednerLoop {
         assert_eq!(surface_size, swapchain_size);
 
         // Create depth buffer
-        let depth_buffer = rd
+        let depth_stencil_buffer = rd
             .create_texture(TextureDesc::new_2d(
                 surface_size.width,
                 surface_size.height,
-                vk::Format::D16_UNORM,
+                vk::Format::D24_UNORM_S8_UINT,
                 vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
             ))
             .unwrap();
-        let depth_buffer_view = rd
-            .create_texture_view(&depth_buffer, TextureViewDesc::default(&depth_buffer))
+        let depth_stencil_buffer_view = rd
+            .create_texture_view(
+                &depth_stencil_buffer,
+                TextureViewDesc::default(&depth_stencil_buffer),
+            )
             .unwrap();
 
         RednerLoop {
@@ -797,8 +809,8 @@ impl RednerLoop {
             present_finished_semephore: rd.create_semaphore(),
             present_ready_semaphore: rd.create_semaphore(),
             command_buffer_finished_fence: rd.create_fence(true),
-            depth_buffer,
-            depth_buffer_view,
+            depth_stencil_buffer,
+            depth_stencil_buffer_view,
         }
     }
 
@@ -807,7 +819,7 @@ impl RednerLoop {
         rd: &RenderDevice,
         shaders: &mut Shaders,
         scene: &RenderScene,
-        view_proj: Mat4,
+        view_info: &ViewInfo,
     ) {
         let device = &rd.device;
         let physical_device = &rd.physical_device;
@@ -886,13 +898,19 @@ impl RednerLoop {
         // Update GPU ViewParams const buffer
         {
             // From row major float4x4 to column major Mat4
-            let view_params = ViewParams { view_proj };
+            let view_proj = view_info.projection * view_info.view_transform;
+            let view_params = ViewParams {
+                view_proj: view_proj,
+                inv_view_proj: view_proj.inverse(),
+                view_pos: view_info.view_position,
+                padding: 0f32,
+            };
 
             unsafe {
                 std::ptr::copy_nonoverlapping(
                     std::ptr::addr_of!(view_params),
                     scene.view_params_cb.data as *mut ViewParams,
-                    mem::size_of::<ViewParams>(),
+                    1,
                 );
             }
         }
@@ -957,7 +975,7 @@ impl RednerLoop {
                 .clear_value(vk::ClearValue { color: clear_color });
             let color_attachments = [*color_attachment];
             let depth_attachment = vk::RenderingAttachmentInfoKHR::builder()
-                .image_view(self.depth_buffer_view.image_view)
+                .image_view(self.depth_stencil_buffer_view.image_view)
                 .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                 .load_op(vk::AttachmentLoadOp::CLEAR)
                 .store_op(vk::AttachmentStoreOp::STORE)
@@ -978,6 +996,28 @@ impl RednerLoop {
                 .depth_attachment(&depth_attachment);
             unsafe {
                 device.cmd_begin_rendering(command_buffer, &rendering_info);
+
+                device.cmd_set_depth_test_enable(command_buffer, true);
+                device.cmd_set_depth_write_enable(command_buffer, true);
+                device.cmd_set_stencil_test_enable(command_buffer, true);
+                device.cmd_set_stencil_op(
+                    command_buffer,
+                    vk::StencilFaceFlags::FRONT_AND_BACK,
+                    vk::StencilOp::KEEP,
+                    vk::StencilOp::REPLACE,
+                    vk::StencilOp::KEEP,
+                    vk::CompareOp::ALWAYS,
+                );
+                device.cmd_set_stencil_write_mask(
+                    command_buffer,
+                    vk::StencilFaceFlags::FRONT_AND_BACK,
+                    0x01,
+                );
+                device.cmd_set_stencil_reference(
+                    command_buffer,
+                    vk::StencilFaceFlags::FRONT_AND_BACK,
+                    0x01,
+                );
             }
         }
 
@@ -1153,6 +1193,87 @@ impl RednerLoop {
             }
             */
         }
+
+        // Draw (procedure) Sky
+        let sky_pipeline = shaders.get_gfx_pipeline(
+            &ShaderDefinition::new("sky_vsps.hlsl", "vs_main", ShaderStage::Vert),
+            &ShaderDefinition::new("sky_vsps.hlsl", "ps_main", ShaderStage::Frag),
+            &hack,
+        );
+        if let Some(pipeline) = sky_pipeline {
+            // Begin pass
+            let color_attachment = vk::RenderingAttachmentInfoKHR::builder()
+                .image_view(swapchain.image_view[image_index as usize])
+                .image_layout(swapchain_image_layout)
+                .load_op(vk::AttachmentLoadOp::LOAD)
+                .store_op(vk::AttachmentStoreOp::STORE);
+            let color_attachments = [*color_attachment];
+            let stencil_attachment = vk::RenderingAttachmentInfoKHR::builder()
+                .image_view(self.depth_stencil_buffer_view.image_view)
+                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .load_op(vk::AttachmentLoadOp::LOAD)
+                .store_op(vk::AttachmentStoreOp::NONE);
+            let rendering_info = vk::RenderingInfoKHR::builder()
+                .render_area(vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent: surface_size,
+                })
+                .layer_count(1)
+                .view_mask(0)
+                .color_attachments(&color_attachments)
+                .stencil_attachment(&stencil_attachment);
+            unsafe {
+                device.cmd_begin_rendering(command_buffer, &rendering_info);
+
+                device.cmd_set_depth_test_enable(command_buffer, false);
+                device.cmd_set_depth_write_enable(command_buffer, false);
+                device.cmd_set_stencil_test_enable(command_buffer, true);
+                device.cmd_set_stencil_op(
+                    command_buffer,
+                    vk::StencilFaceFlags::FRONT_AND_BACK,
+                    vk::StencilOp::KEEP,
+                    vk::StencilOp::KEEP,
+                    vk::StencilOp::KEEP,
+                    vk::CompareOp::EQUAL,
+                );
+                device.cmd_set_stencil_compare_mask(
+                    command_buffer,
+                    vk::StencilFaceFlags::FRONT_AND_BACK,
+                    0x01,
+                );
+                device.cmd_set_stencil_reference(
+                    command_buffer,
+                    vk::StencilFaceFlags::FRONT_AND_BACK,
+                    0x00,
+                );
+            }
+
+            // Bind scene resources
+            // TODO Need to bind everying render pass ?
+            unsafe {
+                device.cmd_bind_descriptor_sets(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    pipeline.layout,
+                    SCENE_DESCRIPTOR_SET_INDEX,
+                    &[scene.descriptor_set],
+                    &[],
+                );
+            }
+
+            // Draw
+            unsafe {
+                device.cmd_bind_pipeline(
+                    command_buffer,
+                    vk::PipelineBindPoint::GRAPHICS,
+                    pipeline.handle,
+                );
+                device.cmd_draw(command_buffer, 3, 1, 0, 0);
+            }
+
+            // End pass
+            unsafe { device.cmd_end_rendering(command_buffer) }
+        };
 
         // Transition for present
         if swapchain_image_layout != vk::ImageLayout::PRESENT_SRC_KHR {

@@ -68,18 +68,7 @@ float Fd_Burley(float NoV, float NoL, float LoH, float roughness) {
 
 // End BRDF
 
-// Scene/Persistent Bindings (Set #1)
-[[vk::binding(0, 1)]] Buffer<uint> vertex_buffer;
-[[vk::binding(1, 1)]] Texture2D bindless_textures[];
-struct ViewParams 
-{
-	float4x4 view_proj;
-};
-[[vk::binding(2, 1)]] ConstantBuffer<ViewParams> view_params;
-[[vk::binding(3, 1)]] SamplerState sampler_linear_clamp;
-
-// Free bindings (Set #0)
-// ...
+#include "scene_bindings.hlsl"
 
 struct PushConstants
 {
@@ -155,6 +144,8 @@ float3 cal_lighting(float3 v /*view*/, float3 l /*light*/, float3 n /*normal*/, 
     float LoH = clamp(dot(l, h), 0.0, 1.0);
 
     // perceptually linear roughness to roughness (see parameterization)
+	// Clamp for cheap specular aliasing under punctual light
+	perceptualRoughness = max(perceptualRoughness, 0.045f);
     float roughness = perceptualRoughness * perceptualRoughness;
 
     float D = D_GGX(NoH, roughness);
@@ -167,7 +158,7 @@ float3 cal_lighting(float3 v /*view*/, float3 l /*light*/, float3 n /*normal*/, 
     // diffuse BRDF
     float3 Fd = diffuseColor * Fd_Lambert();
 
-	return Fd + Fr;
+	return (Fd + Fr) * NoL;
 }
 
 void ps_main(
@@ -186,18 +177,24 @@ void ps_main(
 	float4 metal_rough = bindless_textures[pc.metal_rough_texture].Sample(sampler_linear_clamp, uv);
 
 	// normal mapping
-	// vNt is the tangent space normal
-	bitangent = normalize(tangent.w * cross(normal, tangent.xyz));
 	float3 normal_ts = normal_map.xyz * 2.0f - 1.0f;
 	float3 normal_ws = normalize( normal_ts.x * tangent.xyz + normal_ts.y * bitangent + normal_ts.z * normal );
 
-	float3 view = float3(0.0f, -1.0f, 0.0f);// todo
+	// world position reconstruction
+	float depth = hpos.z / hpos.w;
+	float3 position_ws = mul(view_params.inv_view_proj, float4(screen_pos * 2.0f - 1.0f, depth, 1.0f)).xyz;
+
+	float3 view = normalize(view_params.view_pos - position_ws);
 	float3 light = float3(0.0f, 0.0f, 1.0f);
 	float metallic = metal_rough.b;
 	float roughness = metal_rough.g;
 	float3 diffuseColor = base_color.rgb * (1.0f - metallic);
 	float3 specularColor = lerp(float3(0.04f, 0.04f, 0.04f), base_color.rgb, metallic);
-	float3 lighting = cal_lighting(view, light, normal_ws, roughness, diffuseColor, specularColor);
+	float3 light_inten = float3(1.0f, 1.0f, 1.0f) * PI;
+	float3 lighting = cal_lighting(view, light, normal_ws, roughness, diffuseColor, specularColor) * light_inten;
+
+	float3 ambient = 0.1f;
+	lighting += diffuseColor * ambient;
 
 	// Material inspect rect
 	if ( (screen_pos.x > 0.25f) && (screen_pos.x < 0.3f)
@@ -213,7 +210,7 @@ void ps_main(
 		return;
 	}
 
-#if 1
+#if 0
 //	output = float4(normal.xyz * .5f + .5f, 1.0f);
 	output = float4(normal_ws * .5f + .5f, 1.0f);
 //	output = float4(base_color.rgb, 1.0f);

@@ -619,7 +619,11 @@ impl TextureViewDesc {
             vk::ImageViewType::TYPE_2D
         };
         let format = tex_desc.format;
-        let is_depth = format == vk::Format::D16_UNORM;
+        let is_depth = (format == vk::Format::D16_UNORM)
+            || (format == vk::Format::D16_UNORM_S8_UINT)
+            || (format == vk::Format::D24_UNORM_S8_UINT)
+            || (format == vk::Format::D32_SFLOAT)
+            || (format == vk::Format::D32_SFLOAT_S8_UINT);
         let aspect = if is_depth {
             vk::ImageAspectFlags::DEPTH
         } else {

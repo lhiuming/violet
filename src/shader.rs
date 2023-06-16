@@ -29,10 +29,18 @@ pub struct PipelineProgram {
     pub entry_point_c: CString,
 }
 
+// Context for shader compilation
+struct ShaderLoader {
+    dxc: hassle_rs::Dxc,
+    compiler: hassle_rs::DxcCompiler,
+    library: hassle_rs::DxcLibrary,
+}
+
 pub struct Shaders {
     pipeline_device: PipelineDevice,
     gfx_pipelines: HashMap<(ShaderDefinition, ShaderDefinition), Pipeline>,
     compute_pipelines: HashMap<ShaderDefinition, Pipeline>,
+    shader_loader: ShaderLoader,
 }
 
 impl Shaders {
@@ -41,6 +49,7 @@ impl Shaders {
             pipeline_device: PipelineDevice::new(&rd),
             gfx_pipelines: HashMap::new(),
             compute_pipelines: HashMap::new(),
+            shader_loader: ShaderLoader::new(),
         }
     }
 
@@ -56,31 +65,28 @@ impl Shaders {
 
         let key = (*vs_def, *ps_def);
         let cache = &mut self.gfx_pipelines;
-        let create = || {
-            let vs = load_shader(&self.pipeline_device, &vs_def)?;
-            let ps = load_shader(&self.pipeline_device, &ps_def)?;
-            create_graphics_pipeline(&self.pipeline_device, &vs, &ps, &hack)
-        };
 
         if !cache.contains_key(&key) {
-            if let Some(pipeline) = create() {
+            let vs = self.shader_loader.load(&self.pipeline_device, &vs_def)?;
+            let ps = self.shader_loader.load(&self.pipeline_device, &ps_def)?;
+            let pipeline_created = create_graphics_pipeline(&self.pipeline_device, &vs, &ps, &hack);
+            if let Some(pipeline) = pipeline_created {
                 cache.insert(key, pipeline);
             }
         }
 
-        return cache.get(&key);
+        cache.get(&key)
     }
 
     pub fn get_compute_pipeline(&mut self, cs_def: &ShaderDefinition) -> Option<&Pipeline> {
         let key = cs_def;
         let cache = &mut self.compute_pipelines;
-        let create = || {
-            let cs = load_shader(&self.pipeline_device, &cs_def)?;
-            create_compute_pipeline(&self.pipeline_device, &cs_def, &cs)
-        };
+        let create = || {};
 
         if !cache.contains_key(key) {
-            if let Some(pipeline) = create() {
+            let cs = self.shader_loader.load(&self.pipeline_device, &cs_def)?;
+            let pipeline_created = create_compute_pipeline(&self.pipeline_device, &cs_def, &cs);
+            if let Some(pipeline) = pipeline_created {
                 cache.insert(*key, pipeline);
             }
         }
@@ -210,82 +216,140 @@ pub struct CompiledShader {
     pub program: PipelineProgram,
 }
 
-// Load shader with retry
-pub fn load_shader(
-    device: &PipelineDevice,
-    shader_def: &ShaderDefinition,
-) -> Option<CompiledShader> {
-    loop {
-        let shader = load_shader_once(device, shader_def);
+struct IncludeHandler {}
 
-        // Breakpoint to let user fix shader
-        if shader.is_none() {
-            unsafe {
-                std::intrinsics::breakpoint();
+impl hassle_rs::DxcIncludeHandler for IncludeHandler {
+    fn load_source(&self, filename: String) -> Option<String> {
+        let path = PathBuf::new().join("./shader").join(filename);
+        match std::fs::File::open(path) {
+            Ok(mut f) => {
+                let mut content = String::new();
+                f.read_to_string(&mut content).unwrap();
+                Some(content)
             }
-        } else {
-            return shader;
+            Err(_) => None,
         }
     }
 }
 
-pub fn load_shader_once(
-    device: &PipelineDevice,
-    shader_def: &ShaderDefinition,
-) -> Option<CompiledShader> {
-    // todo map v_path to actuall pathes
-    let mut path = PathBuf::new();
-    path.push("./shader/");
-    path.push(&shader_def.virtual_path);
-    let display = path.display();
-
-    // Read file content
-    let mut file = match File::open(&path) {
-        Err(why) => panic!("Coundn't open shader path {}: {}", display, why),
-        Ok(file) => file,
-    };
-    let mut text = String::new();
-    match file.read_to_string(&mut text) {
-        Err(why) => panic!("Couldn't read file {}: {}", display, why),
-        Ok(_) => (),
-    };
-
-    // Compile the shader
-    let file_name_os = path.file_name().unwrap();
-    let file_name = file_name_os.to_str().unwrap();
-    //options.set_auto_bind_uniforms(true);
-    let target_profile = match shader_def.stage {
-        ShaderStage::Compute => "cs_5_0",
-        ShaderStage::Vert => "vs_5_0",
-        ShaderStage::Frag => "ps_5_0",
-    };
-    // NOTE: -fspv-debug=vulkan-with-source requires extended instruction set support form the reflector
-    // NOTE: -fspv-reflect requires Google extention in vulkan
-    let compile_result = hassle_rs::compile_hlsl(
-        file_name,
-        &text,
-        &shader_def.entry_point,
-        target_profile,
-        //&["-spirv"],
-        //&["-spirv", "-Zi", "-fspv-reflect"],
-        &["-spirv", "-Zi"],
-        &[],
-    );
-
-    let compiled_binary = match compile_result {
-        Ok(bin) => bin,
-        Err(reason) => {
-            println!("Shaer compiled binay is not valid: {}", reason);
-            return None;
+impl ShaderLoader {
+    pub fn new() -> ShaderLoader {
+        let dxc = hassle_rs::Dxc::new(None).unwrap();
+        let compiler = dxc.create_compiler().unwrap();
+        let library = dxc.create_library().unwrap();
+        ShaderLoader {
+            dxc,
+            compiler,
+            library,
         }
-    };
+    }
 
-    let program = match create_pipeline_program(device, &compiled_binary, &shader_def) {
-        Some(program) => program,
-        None => return None,
-    };
+    // Load shader with retry
+    pub fn load(
+        &self,
+        device: &PipelineDevice,
+        shader_def: &ShaderDefinition,
+    ) -> Option<CompiledShader> {
+        loop {
+            let shader = self.load_shader_once(device, shader_def);
 
-    Some(CompiledShader { program: program })
+            // Breakpoint to let user fix shader
+            if shader.is_none() {
+                unsafe {
+                    std::intrinsics::breakpoint();
+                }
+            } else {
+                return shader;
+            }
+        }
+    }
+
+    pub fn load_shader_once(
+        &self,
+        device: &PipelineDevice,
+        shader_def: &ShaderDefinition,
+    ) -> Option<CompiledShader> {
+        // todo map v_path to actuall pathes
+        let mut path = PathBuf::new();
+        path.push("./shader/");
+        path.push(&shader_def.virtual_path);
+        let display = path.display();
+
+        // Read file content
+        let mut file = match File::open(&path) {
+            Err(why) => panic!("Coundn't open shader path {}: {}", display, why),
+            Ok(file) => file,
+        };
+        let mut text = String::new();
+        match file.read_to_string(&mut text) {
+            Err(why) => panic!("Couldn't read file {}: {}", display, why),
+            Ok(_) => (),
+        };
+
+        // Compile the shader
+        let file_name_os = path.file_name().unwrap();
+        let file_name = file_name_os.to_str().unwrap();
+        let compiled_binary =
+            self.compile_hlsl(file_name, &text, &shader_def.entry_point, shader_def.stage)?;
+
+        let program = match create_pipeline_program(device, &compiled_binary, &shader_def) {
+            Some(program) => program,
+            None => return None,
+        };
+
+        Some(CompiledShader { program: program })
+    }
+
+    fn compile_hlsl(
+        &self,
+        source_name: &str,
+        shader_text: &str,
+        entry_point: &str,
+        stage: ShaderStage,
+    ) -> Option<Vec<u8>> {
+        let blob = self
+            .library
+            .create_blob_with_encoding_from_str(shader_text)
+            .ok()?;
+
+        let target_profile = match stage {
+            ShaderStage::Compute => "cs_5_0",
+            ShaderStage::Vert => "vs_5_0",
+            ShaderStage::Frag => "ps_5_0",
+        };
+
+        // NOTE: -fspv-debug=vulkan-with-source requires extended instruction set support form the reflector
+        let args = [
+            // output spirv
+            "-spirv",
+            // no optimization
+            "-Zi",
+            // NOTE: requires Google extention in vulkan
+            //"-fspv-reflect",
+        ];
+        let result = self.compiler.compile(
+            &blob,
+            source_name,
+            entry_point,
+            target_profile,
+            &args,
+            Some(Box::new(IncludeHandler {})),
+            &[],
+        );
+
+        match result {
+            Err(result) => {
+                let error_blob = result.0.get_error_buffer().ok()?;
+                let error_string = self.library.get_blob_as_string(&error_blob);
+                println!("Error: Failed to compile shader: {}", error_string);
+                None
+            }
+            Ok(result) => {
+                let result_blob = result.get_result().ok()?;
+                Some(result_blob.to_vec())
+            }
+        }
+    }
 }
 
 #[derive(Eq, PartialEq, Debug)]
@@ -564,21 +628,33 @@ pub fn create_graphics_pipeline(
     let raster = vk::PipelineRasterizationStateCreateInfo::builder();
     let multisample = vk::PipelineMultisampleStateCreateInfo::builder()
         .rasterization_samples(vk::SampleCountFlags::TYPE_1);
-    let depth_stencil = vk::PipelineDepthStencilStateCreateInfo::builder()
-        .depth_write_enable(true)
-        .depth_test_enable(true)
-        .depth_compare_op(vk::CompareOp::GREATER);
+    let depth_stencil =
+        vk::PipelineDepthStencilStateCreateInfo::builder().depth_compare_op(vk::CompareOp::GREATER);
     let attachment = vk::PipelineColorBlendAttachmentState::builder()
         .color_write_mask(vk::ColorComponentFlags::from_raw(0xFFFFFFFF));
     let attachments = [attachment.build()];
     let color_blend = vk::PipelineColorBlendStateCreateInfo::builder().attachments(&attachments);
-    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic_states = [
+        vk::DynamicState::VIEWPORT,
+        vk::DynamicState::SCISSOR,
+        //vk::DynamicState::STENCIL_WRITE_MASK,
+        //vk::DynamicState::STENCIL_COMPARE_MASK,
+        //vk::DynamicState::STENCIL_REFERENCE,
+        vk::DynamicState::DEPTH_TEST_ENABLE,
+        vk::DynamicState::DEPTH_WRITE_ENABLE,
+        vk::DynamicState::STENCIL_TEST_ENABLE,
+        vk::DynamicState::STENCIL_WRITE_MASK,
+        vk::DynamicState::STENCIL_COMPARE_MASK,
+        vk::DynamicState::STENCIL_OP,
+        vk::DynamicState::STENCIL_REFERENCE,
+    ];
     let dynamic_state =
         vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states);
 
     // Extention: PipelineRendering
     let mut pipeline_rendering = vk::PipelineRenderingCreateInfo::builder()
-    .depth_attachment_format(vk::Format::D16_UNORM)
+    .depth_attachment_format(vk::Format::D24_UNORM_S8_UINT)
+    .stencil_attachment_format(vk::Format::D24_UNORM_S8_UINT)
     //.color_attachment_formats(&[vk::Format::R8G8B8A8_UNORM])
     ;
 
