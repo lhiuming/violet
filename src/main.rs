@@ -18,6 +18,9 @@ mod model;
 mod render_loop;
 use render_loop::{RednerLoop, RenderScene};
 
+mod command_buffer;
+mod render_graph;
+
 use crate::render_loop::ViewInfo;
 
 // Assumming positive Z; mapping near-plane to 1, far-plane to 0 (reversed Z).

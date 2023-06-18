@@ -5,7 +5,7 @@ use ash::vk::{self, PushConstantRange};
 use rspirv_reflect::{self};
 use spirq::{self};
 
-use crate::render_device::RenderDevice;
+use crate::render_device::{Handle, RenderDevice};
 
 pub struct PipelineDevice {
     device: ash::Device,
@@ -31,66 +31,90 @@ pub struct PipelineProgram {
 
 pub struct Shaders {
     pipeline_device: PipelineDevice,
-    gfx_pipelines: HashMap<(ShaderDefinition, ShaderDefinition), Pipeline>,
-    compute_pipelines: HashMap<ShaderDefinition, Pipeline>,
+    gfx_pipelines_map: HashMap<(ShaderDefinition, ShaderDefinition), Handle<Pipeline>>,
+    compute_pipelines_map: HashMap<ShaderDefinition, Handle<Pipeline>>,
     shader_loader: ShaderLoader,
+
+    pipelines: Vec<Pipeline>,
 }
 
 impl Shaders {
     pub fn new(rd: &RenderDevice) -> Shaders {
         Shaders {
             pipeline_device: PipelineDevice::new(&rd),
-            gfx_pipelines: HashMap::new(),
-            compute_pipelines: HashMap::new(),
+            gfx_pipelines_map: HashMap::new(),
+            compute_pipelines_map: HashMap::new(),
             shader_loader: ShaderLoader::new(),
+            pipelines: Vec::new(),
         }
     }
 
-    pub fn get_gfx_pipeline(
+    #[inline]
+    fn add_pipeline(&mut self, pipeline: Pipeline) -> Handle<Pipeline> {
+        let id = self.pipelines.len();
+        self.pipelines.push(pipeline);
+        Handle::new(id)
+    }
+
+    pub fn create_gfx_pipeline(
         &mut self,
         vs_def: &ShaderDefinition,
         ps_def: &ShaderDefinition,
         hack: &HackStuff,
-    ) -> Option<&Pipeline> {
+    ) -> Option<Handle<Pipeline>> {
         // look from cache
         // If not in cache, create and push into cache
         // TODO currenty need to query twice even if cache can hit (constians_key, get)
-
         let key = (*vs_def, *ps_def);
-        let cache = &mut self.gfx_pipelines;
 
-        if !cache.contains_key(&key) {
+        if !self.gfx_pipelines_map.contains_key(&key) {
             let vs = self.shader_loader.load(&self.pipeline_device, &vs_def)?;
             let ps = self.shader_loader.load(&self.pipeline_device, &ps_def)?;
             let pipeline_created = create_graphics_pipeline(&self.pipeline_device, &vs, &ps, &hack);
             if let Some(pipeline) = pipeline_created {
-                cache.insert(key, pipeline);
+                let handle = self.add_pipeline(pipeline);
+                self.gfx_pipelines_map.insert(key, handle.clone());
+                return Some(handle);
             }
+            return None;
         }
 
-        cache.get(&key)
+        Some(*self.gfx_pipelines_map.get(&key).unwrap())
     }
 
-    pub fn get_compute_pipeline(&mut self, cs_def: &ShaderDefinition) -> Option<&Pipeline> {
-        let key = cs_def;
-        let cache = &mut self.compute_pipelines;
-        let create = || {};
+    pub fn create_compute_pipeline(
+        &mut self,
+        cs_def: &ShaderDefinition,
+    ) -> Option<Handle<Pipeline>> {
+        unsafe {
+            let key = cs_def;
+            let create = || {};
 
-        if !cache.contains_key(key) {
-            let cs = self.shader_loader.load(&self.pipeline_device, &cs_def)?;
-            let pipeline_created = create_compute_pipeline(&self.pipeline_device, &cs_def, &cs);
-            if let Some(pipeline) = pipeline_created {
-                cache.insert(*key, pipeline);
+            if !self.compute_pipelines_map.contains_key(key) {
+                let cs = self.shader_loader.load(&self.pipeline_device, &cs_def)?;
+                let pipeline_created = create_compute_pipeline(&self.pipeline_device, &cs_def, &cs);
+                if let Some(pipeline) = pipeline_created {
+                    let handle = self.add_pipeline(pipeline);
+                    self.compute_pipelines_map.insert(*key, handle);
+                    return Some(handle);
+                }
+                return None;
             }
-        }
 
-        cache.get(key)
+            Some(*self.compute_pipelines_map.get(key).unwrap())
+        }
+    }
+
+    pub fn get_pipeline(&self, handle: Handle<Pipeline>) -> Option<&Pipeline> {
+        let id = handle.id();
+        Some(&self.pipelines[id])
     }
 
     pub fn reload_all(&mut self) {
         // TODO reload all shaders by checking file timestamps (and checksum?)
-        self.gfx_pipelines.clear();
-        self.compute_pipelines.clear();
+        self.gfx_pipelines_map.clear();
+        self.compute_pipelines_map.clear();
+        self.pipelines.clear();
     }
 }
 
@@ -352,7 +376,7 @@ impl ShaderLoader {
     }
 }
 
-#[derive(Eq, PartialEq, Debug)]
+#[derive(Eq, PartialEq, Debug, Clone, Copy)] // TODO
 pub struct PipelineDescriptorInfo {
     pub set_index: u32,
     pub binding_index: u32,
@@ -360,6 +384,7 @@ pub struct PipelineDescriptorInfo {
     // TODO type? array len?
 }
 
+// TODO should be allow copy, but required to allow Handle copy
 pub struct Pipeline {
     pub handle: vk::Pipeline,
     //pub set_layouts: Vec<vk::DescriptorSetLayout>,

@@ -1,6 +1,7 @@
 use std::borrow::Cow;
 use std::ffi::{CStr, CString};
 use std::io::Write;
+use std::marker::PhantomData;
 use std::os::raw::c_void;
 
 use ash::extensions::{ext, khr};
@@ -22,6 +23,8 @@ pub struct RenderDevice {
 
     pub surface: Surface,
     pub swapchain: Swapchain,
+
+    pub res: RenderResources,
 }
 
 impl RenderDevice {
@@ -194,11 +197,13 @@ impl RenderDevice {
             }
         };
 
+        let mut res = RenderResources::new();
+
         // Create swapchain
         let swapchain_entry = SwapchainEntry::new(&instance, &device);
         let swapchain = {
             let surface_size = surface.query_size(&surface_entry, &physical_device);
-            swapchain_entry.create(&device, &surface, &surface_size)
+            swapchain_entry.create(&device, &mut res, &surface, &surface_size)
         };
 
         RenderDevice {
@@ -217,6 +222,8 @@ impl RenderDevice {
 
             surface,
             swapchain,
+
+            res,
         }
     }
 
@@ -348,8 +355,10 @@ pub struct Swapchain {
     pub extent: vk::Extent2D,
     pub handle: vk::SwapchainKHR,
     pub num_image: u32,
-    pub image: [vk::Image; 8],
-    pub image_view: [vk::ImageView; 8],
+    //pub image: [vk::Image; 8],
+    //pub image_view: [vk::ImageView; 8],
+    pub image: [Handle<Texture>; 8],
+    pub image_view: [Handle<TextureView>; 8],
 }
 
 impl Swapchain {
@@ -361,8 +370,10 @@ impl Swapchain {
             },
             handle: vk::SwapchainKHR::default(),
             num_image: 0,
-            image: [vk::Image::default(); 8],
-            image_view: [vk::ImageView::default(); 8],
+            //image: [vk::Image::default(); 8],
+            //image_view: [vk::ImageView::default(); 8],
+            image: Default::default(),
+            image_view: Default::default(),
         }
     }
 }
@@ -378,13 +389,21 @@ impl SwapchainEntry {
         }
     }
 
-    fn create(&self, device: &ash::Device, surface: &Surface, extent: &vk::Extent2D) -> Swapchain {
+    fn create(
+        &self,
+        device: &ash::Device,
+        res: &mut RenderResources,
+        surface: &Surface,
+        extent: &vk::Extent2D,
+    ) -> Swapchain {
         let mut ret = Swapchain::default();
         ret.extent = *extent;
 
+        let image_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::STORAGE // compute post processing
+        ;
+
         // Create swapchain object
         let create_info = {
-            use vk::ImageUsageFlags as Usage;
             vk::SwapchainCreateInfoKHR::builder()
                 .flags(vk::SwapchainCreateFlagsKHR::empty())
                 .surface(surface.handle)
@@ -393,7 +412,7 @@ impl SwapchainEntry {
                 .image_color_space(surface.format.color_space)
                 .image_extent(*extent)
                 .image_array_layers(1)
-                .image_usage(Usage::COLOR_ATTACHMENT | Usage::TRANSFER_DST | Usage::STORAGE)
+                .image_usage(image_usage)
                 .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
                 .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
                 .present_mode(vk::PresentModeKHR::FIFO)
@@ -405,7 +424,24 @@ impl SwapchainEntry {
         {
             let images = unsafe { self.entry.get_swapchain_images(ret.handle) }.unwrap_or(vec![]);
             ret.num_image = images.len() as u32;
-            ret.image[0..images.len()].copy_from_slice(&images);
+
+            // Add to device resources as Texture
+            for i in 0..ret.num_image as usize {
+                let desc = TextureDesc::new_2d(
+                    extent.width,
+                    extent.height,
+                    surface.format.format,
+                    image_usage,
+                );
+                let image = images[i];
+                let handle = res.add_texture(Texture {
+                    desc,
+                    image: images[i],
+                    memory: vk::DeviceMemory::null(),
+                });
+
+                ret.image[i] = handle;
+            }
         }
 
         // Create image views
@@ -414,21 +450,27 @@ impl SwapchainEntry {
             .layer_count(1)
             .level_count(1);
         for img_index in 0..ret.num_image as usize {
+            let texture = res.get_texture(ret.image[img_index]);
             ret.image_view[img_index] = unsafe {
                 let create_info = vk::ImageViewCreateInfo::builder()
-                    .image(ret.image[img_index])
+                    .image(texture.image)
                     .view_type(vk::ImageViewType::TYPE_2D)
                     .format(surface.format.format)
                     .subresource_range(*sub_res_range);
-                device
+                let image_view = device
                     .create_image_view(&create_info, None)
-                    .expect("Vulkan: failed to create image view for swapchain")
+                    .expect("Vulkan: failed to create image view for swapchain");
+
+                let desc = TextureViewDesc::default(texture);
+                let texture_view = TextureView { desc, image_view };
+                res.add_texture_view(texture_view)
             }
         }
 
         ret
     }
 
+    /*
     fn detroy(&self, device: &ash::Device, swapchain: &mut Swapchain) {
         for image_index in 0..swapchain.num_image as usize {
             let image_view = swapchain.image_view[image_index];
@@ -442,6 +484,7 @@ impl SwapchainEntry {
         swapchain.handle = vk::SwapchainKHR::default();
         swapchain.num_image = 0;
     }
+    */
 }
 
 pub struct Buffer {
@@ -549,6 +592,7 @@ impl RenderDevice {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct TextureDesc {
     pub width: u32,
     pub height: u32,
@@ -598,12 +642,14 @@ impl TextureDesc {
     }
 }
 
+// TODO should not clone or copy; but required bu Handle
 pub struct Texture {
     pub desc: TextureDesc,
     pub image: vk::Image,
     pub memory: vk::DeviceMemory,
 }
 
+#[derive(Clone, Copy)]
 pub struct TextureViewDesc {
     pub view_type: vk::ImageViewType,
     pub format: vk::Format,
@@ -729,5 +775,93 @@ impl RenderDevice {
         let image_view = unsafe { device.create_image_view(&create_info, None) }.ok()?;
 
         Some(TextureView { desc, image_view })
+    }
+}
+
+// Render Resources
+
+// TODO bit field
+pub struct Handle<T> {
+    id: usize,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<T> Handle<T> {
+    pub fn new(id: usize) -> Self {
+        Handle {
+            id,
+            _phantom: std::marker::PhantomData::default(),
+        }
+    }
+
+    pub fn id(&self) -> usize {
+        self.id
+    }
+}
+
+impl<T> Default for Handle<T> {
+    fn default() -> Self {
+        Self {
+            id: usize::MAX,
+            _phantom: Default::default(),
+        }
+    }
+}
+
+impl<T> Clone for Handle<T> {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            _phantom: PhantomData::default(),
+        }
+    }
+}
+
+impl<T> Copy for Handle<T> {}
+
+// TODO use pool instead of vectores
+// TODO make private and access from RenderDevice?
+pub struct RenderResources {
+    pub textures: Vec<Texture>,
+    pub texture_views: Vec<TextureView>,
+    pub buffers: Vec<Buffer>,
+}
+
+impl RenderResources {
+    pub fn new() -> Self {
+        RenderResources {
+            textures: Vec::new(),
+            texture_views: Vec::new(),
+            buffers: Vec::new(),
+        }
+    }
+
+    pub fn add_texture(&mut self, texture: Texture) -> Handle<Texture> {
+        let id = self.textures.len();
+        self.textures.push(texture);
+        Handle::new(id)
+    }
+
+    pub fn get_texture(&self, handle: Handle<Texture>) -> &Texture {
+        if handle.id() == usize::MAX {
+            panic!()
+        }
+        &self.textures[handle.id]
+    }
+
+    pub fn add_texture_view(&mut self, texture_view: TextureView) -> Handle<TextureView> {
+        let id = self.texture_views.len();
+        self.texture_views.push(texture_view);
+        Handle::new(id)
+    }
+
+    pub fn get_texture_view(&self, handle: Handle<TextureView>) -> &TextureView {
+        &self.texture_views[handle.id]
+    }
+
+    pub fn add_buffer(&mut self, buffer: Buffer) -> Handle<Buffer> {
+        let id = self.buffers.len();
+        self.buffers.push(buffer);
+        Handle::new(id)
     }
 }
