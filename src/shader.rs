@@ -29,13 +29,6 @@ pub struct PipelineProgram {
     pub entry_point_c: CString,
 }
 
-// Context for shader compilation
-struct ShaderLoader {
-    dxc: hassle_rs::Dxc,
-    compiler: hassle_rs::DxcCompiler,
-    library: hassle_rs::DxcLibrary,
-}
-
 pub struct Shaders {
     pipeline_device: PipelineDevice,
     gfx_pipelines: HashMap<(ShaderDefinition, ShaderDefinition), Pipeline>,
@@ -232,15 +225,22 @@ impl hassle_rs::DxcIncludeHandler for IncludeHandler {
     }
 }
 
+// Context for shader compilation
+struct ShaderLoader {
+    compiler: hassle_rs::DxcCompiler,
+    library: hassle_rs::DxcLibrary,
+    dxc: hassle_rs::Dxc, // delacare this last to drop it after {compiler, library}
+}
+
 impl ShaderLoader {
     pub fn new() -> ShaderLoader {
         let dxc = hassle_rs::Dxc::new(None).unwrap();
         let compiler = dxc.create_compiler().unwrap();
         let library = dxc.create_library().unwrap();
         ShaderLoader {
-            dxc,
             compiler,
             library,
+            dxc,
         }
     }
 
