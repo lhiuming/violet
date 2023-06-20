@@ -1,10 +1,8 @@
 use ash::vk::{self};
 
-use crate::shader::Pipeline;
-
 pub struct CommandBuffer {
-    device: ash::Device,
-    command_buffer: vk::CommandBuffer,
+    pub device: ash::Device,
+    pub command_buffer: vk::CommandBuffer,
 }
 
 pub struct StencilOps {
@@ -35,6 +33,65 @@ impl StencilOps {
 }
 
 impl CommandBuffer {
+    pub fn layout_transition(
+        &self,
+        image: vk::Image,
+        src_stage_mask: vk::PipelineStageFlags,
+        dst_stage_mask: vk::PipelineStageFlags,
+        old_layout: vk::ImageLayout,
+        new_layout: vk::ImageLayout,
+        subresource_range: vk::ImageSubresourceRange,
+    ) {
+        let image_barrier = vk::ImageMemoryBarrier::builder()
+            .old_layout(old_layout)
+            .new_layout(new_layout)
+            .subresource_range(subresource_range)
+            .image(image);
+        self.pipeline_barrier(
+            src_stage_mask,
+            dst_stage_mask,
+            vk::DependencyFlags::empty(),
+            &[],
+            &[],
+            &[*image_barrier],
+        );
+    }
+
+    pub fn pipeline_barrier(
+        &self,
+        src_stage_mask: vk::PipelineStageFlags,
+        dst_stage_mask: vk::PipelineStageFlags,
+        dependency_flags: vk::DependencyFlags,
+        memory_barriers: &[vk::MemoryBarrier],
+        buffer_memory_barriers: &[vk::BufferMemoryBarrier],
+        image_memory_barriers: &[vk::ImageMemoryBarrier],
+    ) {
+        unsafe {
+            self.device.cmd_pipeline_barrier(
+                self.command_buffer,
+                src_stage_mask,
+                dst_stage_mask,
+                dependency_flags,
+                memory_barriers,
+                buffer_memory_barriers,
+                image_memory_barriers,
+            );
+        }
+    }
+
+    pub fn begin_rendering(&self, rendering_info: &vk::RenderingInfo) {
+        unsafe {
+            self.device
+                .cmd_begin_rendering(self.command_buffer, rendering_info);
+        }
+    }
+
+    pub fn end_rendering(&self) {
+        unsafe {
+            self.device.cmd_end_rendering(self.command_buffer);
+        }
+    }
+
     pub fn set_viewport_0(&self, viewport: vk::Viewport) {
         unsafe {
             self.device

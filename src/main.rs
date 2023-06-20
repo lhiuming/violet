@@ -61,8 +61,7 @@ fn main() {
     // TODO implement Drop for Window
     let window = Window::new(1280, 720, "Rusty Violet");
 
-    let rd = RenderDevice::create(Window::system_handle_for_module(), window.system_handle());
-    let swapchain = &rd.swapchain;
+    let mut rd = RenderDevice::create(Window::system_handle_for_module(), window.system_handle());
 
     // Initialize shaders
     let mut shaders = Shaders::new(&rd);
@@ -131,8 +130,8 @@ fn main() {
 
                 // Rotate (by mouse darg with right button pressed)
                 if let Some((beg_x, beg_y, end_x, end_y)) = window.effective_darg() {
-                    let w = swapchain.extent.width as f32;
-                    let h = swapchain.extent.height as f32;
+                    let w = rd.swapchain.extent.width as f32;
+                    let h = rd.swapchain.extent.height as f32;
                     let right_x = (fov * 0.5).tan() * 1.0;
                     let down_y = right_x * h / w;
                     let screen_pos_to_world_dir = |x: i16, y: i16| -> Vec3 {
@@ -174,7 +173,7 @@ fn main() {
 
             // Perspective proj
             let width_by_height =
-                (swapchain.extent.width as f32) / (swapchain.extent.height as f32);
+                (rd.swapchain.extent.width as f32) / (rd.swapchain.extent.height as f32);
             let proj = perspective_projection(0.05, 102400.0, fov, width_by_height);
 
             view_info = ViewInfo {
@@ -184,6 +183,6 @@ fn main() {
             };
         }
 
-        render_loop.render(&rd, &mut shaders, &render_scene, &view_info);
+        render_loop.render(&mut rd, &mut shaders, &render_scene, &view_info);
     }
 }

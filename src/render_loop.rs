@@ -2,17 +2,15 @@ use std::mem::{self, size_of};
 use std::slice;
 
 use ash::vk::{self};
-use glam::{Mat4, UVec2, Vec3};
+use glam::{Mat4, Vec3};
 
-use crate::command_buffer::StencilOps;
+use crate::command_buffer::{CommandBuffer, StencilOps};
 use crate::model::Model;
 use crate::render_device::{
     Buffer, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
 };
-use crate::render_graph::{RGHandle, RenderGraph, RenderPass};
-use crate::shader::{
-    HackStuff, Pipeline, PushConstantsBuilder, ShaderDefinition, ShaderStage, Shaders,
-};
+use crate::render_graph::{self};
+use crate::shader::{HackStuff, PushConstantsBuilder, ShaderDefinition, ShaderStage, Shaders};
 
 // Allocatable buffer. Alway aligned to 4 bytes.
 pub struct AllocBuffer {
@@ -39,167 +37,6 @@ impl AllocBuffer {
         };
         (slice, pos)
     }
-}
-
-// Use a u64 to represent a 8x8 sub-tree,
-// each node is represented as a bit, each parent is the "and" of its children.
-// TODO actually implement a tree
-struct BooleanQuadtree {
-    max_depth: u32,
-    data: u64,
-}
-
-// Interleave the binary representation by zeros
-// ref: https://fgiesen.wordpress.com/2009/12/13/decoding-morton-codes/
-fn part1by1(mut x: u32) -> u32 {
-    x = x & 0x0000ffff;
-    x = (x | x << 8) & 0x00ff00ff;
-    x = (x | x << 4) & 0x0f0f0f0f;
-    x = (x | x << 2) & 0x33333333; // 0x3=0b0011
-    x = (x | x << 1) & 0x55555555; // 0x5=0b0101
-    x
-}
-
-fn compact1by1(mut x: u32) -> u32 {
-    x = x & 0x55555555; // 0x5=0x0101
-    x = (x | (x >> 1)) & 0x33333333; // 0x3=0b0011
-    x = (x | (x >> 2)) & 0x0f0f0f0f;
-    x = (x | (x >> 4)) & 0x00ff00ff;
-    x = (x | (x >> 8)) & 0x0000ffff;
-    x
-}
-
-impl BooleanQuadtree {
-    fn new(max_depth: u32) -> BooleanQuadtree {
-        assert!(max_depth <= 4);
-        BooleanQuadtree { max_depth, data: 0 }
-    }
-
-    fn find_empty_and_set(&mut self, depth: u32) -> Option<(u32, u32)> {
-        assert!(depth < 4);
-        let data = self.data;
-        let height = 3 - depth;
-        let stride = 1 << (height * 2); // 0->1, 1->4, 2->16, 3->64
-        let mask: u64 = 0xFFFFFFFFFFFFFFFF >> (64 - stride); // 1->1, 4->3, 16->15, 64->63
-
-        // Linear saerch on the nodes, find an empty one
-        let count = 1u32 << depth;
-        for i in 0..count {
-            let pos = i * stride;
-            let data = (data >> pos) & mask;
-            if data == 0 {
-                // Found an empty node, set it to 1
-                self.data = data | (mask << pos);
-
-                // Calculate 2D position from morton code position i
-                let x = compact1by1(i);
-                let y = compact1by1(i >> 1);
-                return Some((x, y));
-            }
-        }
-
-        None
-    }
-}
-
-// Allocatable texture. Always aligned to fix-size rectangle tile.
-// Allocate a morton code order. (but why?)
-pub struct AllocTexture2D {
-    pub texture: Texture,
-    pub view: TextureView,
-    tree_depth: u32,
-    occupation_per_layer: Vec<BooleanQuadtree>,
-}
-
-impl AllocTexture2D {
-    pub fn new(texture: Texture, view: TextureView) -> AllocTexture2D {
-        let desc = &texture.desc;
-
-        let tile_size = 256;
-        assert!(desc.width >= tile_size);
-        assert!(desc.height >= tile_size);
-        assert!(desc.width.is_power_of_two());
-        assert!(desc.height.is_power_of_two());
-
-        // Size of the tile map
-        let width: u32 = desc.width / tile_size;
-        let height: u32 = desc.height / tile_size;
-
-        // Fit it to a square such that morton code works
-        let width = std::cmp::min(width, height);
-        let height = std::cmp::min(width, height);
-        if (height * tile_size != desc.height) || (width * tile_size != desc.width) {
-            println!(
-                "Warning: texture size is not optimal. {}x{} -> {}x{}. Some memory is watsted",
-                desc.width,
-                desc.height,
-                width * tile_size,
-                height * tile_size
-            );
-        }
-
-        let tree_depth = width.trailing_zeros() + 1;
-        let occupation_per_layer = (0..desc.array_len)
-            .map(|_| BooleanQuadtree::new(tree_depth))
-            .collect();
-
-        AllocTexture2D {
-            texture,
-            view,
-            tree_depth,
-            occupation_per_layer,
-        }
-    }
-
-    pub fn size(&self) -> UVec2 {
-        UVec2 {
-            x: self.texture.desc.width,
-            y: self.texture.desc.height,
-        }
-    }
-
-    pub fn alloc<'a>(&mut self, width: u32, height: u32) -> Option<(u32, u32, u32)> {
-        let tile_size = 256;
-
-        let size = std::cmp::max(width, height);
-        let size_in_tile = (size + tile_size - 1) / tile_size;
-        let height_in_tree = size_in_tile.trailing_zeros();
-        assert!(height_in_tree < self.tree_depth);
-        let depth = self.tree_depth - 1 - height_in_tree;
-
-        for layer in 0..self.occupation_per_layer.len() {
-            let tree = &mut self.occupation_per_layer[layer];
-            if let Some((x, y)) = tree.find_empty_and_set(depth) {
-                let node_size = tile_size * size_in_tile;
-                return Some((x * node_size, y * node_size, layer as u32));
-            }
-        }
-        None
-    }
-}
-
-fn clamp<T>(v: T, min: T, max: T) -> T
-where
-    T: PartialOrd,
-{
-    if min > v {
-        return min;
-    }
-    if max < v {
-        return max;
-    }
-    v
-}
-
-fn float_to_unorm(v: f32) -> u32 {
-    unsafe { clamp((v * 255.0).round().to_int_unchecked(), 0, 255) }
-}
-
-fn pack_unorm(x: f32, y: f32, z: f32, w: f32) -> u32 {
-    float_to_unorm(x)
-        | (float_to_unorm(y) << 8)
-        | (float_to_unorm(z) << 16)
-        | (float_to_unorm(w) << 24)
 }
 
 // Struct for asset uploading to GPU
@@ -268,10 +105,6 @@ impl UploadContext {
     }
 }
 
-pub struct TextureParams {
-    //pub index: u32,
-}
-
 pub struct MaterialParams {
     pub base_color_index: u32,
     pub metallic_roughness_index: u32,
@@ -322,7 +155,6 @@ pub struct RenderScene {
     pub material_texture_views: Vec<TextureView>,
 
     // Stuff to be rendered
-    //pub texture_params: Vec<TextureParams>,
     pub material_parmas: Vec<MaterialParams>,
     pub mesh_params: Vec<MeshParams>,
 }
@@ -357,28 +189,6 @@ impl RenderScene {
                 vk::Format::UNDEFINED,
             )
             .unwrap();
-
-        /*
-        // Texture for whole scene
-        let tex_width = 2048;
-        let tex_height = 2048;
-        let tex_array_len = 5;
-        let material_texture = {
-            let texture = rd
-                .create_texture(TextureDesc::new_2d_array(
-                    tex_width,
-                    tex_height,
-                    tex_array_len,
-                    vk::Format::R8G8B8A8_SRGB,
-                    vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
-                ))
-                .unwrap();
-            let texture_view = rd
-                .create_texture_view(&texture, TextureViewDesc::default(&texture))
-                .unwrap();
-            AllocTexture2D::new(texture, texture_view)
-        };
-        */
 
         // Shared samplers
         let shared_sampler = unsafe {
@@ -471,17 +281,6 @@ impl RenderScene {
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .buffer_info(slice::from_ref(&cbuffer_info))
                 .build();
-            let sampler_info = vk::DescriptorImageInfo::builder()
-                .sampler(shared_sampler)
-                .build();
-            /* Using immutable samplers; no write.
-            let write_sampler = vk::WriteDescriptorSet::builder()
-                .dst_set(descriptor_set)
-                .dst_binding(SAMPLER_BINDING_INDEX)
-                .descriptor_type(vk::DescriptorType::SAMPLER)
-                .image_info(slice::from_ref(&sampler_info))
-                .build();
-             */
             unsafe {
                 rd.device
                     .update_descriptor_sets(&[write_buffer_view, write_cbuffer], &[])
@@ -644,7 +443,7 @@ impl RenderScene {
                 Some(map) => {
                     let texture = {
                         let texture_index = texture_index_offset + map.image_index;
-                        &self.material_textures[texture_index as usize]
+                        self.material_textures[texture_index as usize]
                     };
                     let format = if is_srgb {
                         vk::Format::R8G8B8A8_SRGB
@@ -772,37 +571,12 @@ pub struct RednerLoop {
     pub present_finished_semephore: vk::Semaphore,
     pub present_ready_semaphore: vk::Semaphore,
     pub command_buffer_finished_fence: vk::Fence,
-
-    pub depth_stencil_buffer: Texture,
-    pub depth_stencil_buffer_view: TextureView,
 }
 
 impl RednerLoop {
     pub fn new(rd: &RenderDevice) -> RednerLoop {
         let command_pool = rd.create_command_pool();
         let command_buffer = rd.create_command_buffer(command_pool);
-
-        let surface_size = rd
-            .surface
-            .query_size(&rd.surface_entry, &rd.physical_device);
-        let swapchain_size = rd.swapchain.extent;
-        assert_eq!(surface_size, swapchain_size);
-
-        // Create depth buffer
-        let depth_stencil_buffer = rd
-            .create_texture(TextureDesc::new_2d(
-                surface_size.width,
-                surface_size.height,
-                vk::Format::D24_UNORM_S8_UINT,
-                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-            ))
-            .unwrap();
-        let depth_stencil_buffer_view = rd
-            .create_texture_view(
-                &depth_stencil_buffer,
-                TextureViewDesc::default(&depth_stencil_buffer),
-            )
-            .unwrap();
 
         RednerLoop {
             command_pool,
@@ -811,36 +585,25 @@ impl RednerLoop {
             present_finished_semephore: rd.create_semaphore(),
             present_ready_semaphore: rd.create_semaphore(),
             command_buffer_finished_fence: rd.create_fence(true),
-            depth_stencil_buffer,
-            depth_stencil_buffer_view,
         }
     }
 
     pub fn render(
         &self,
-        rd: &RenderDevice,
+        rd: &mut RenderDevice,
         shaders: &mut Shaders,
         scene: &RenderScene,
         view_info: &ViewInfo,
     ) {
-        let device = &rd.device;
-        let physical_device = &rd.physical_device;
-        let surface_entry = &rd.surface_entry;
-        let swapchain_entry = &rd.swapchain_entry;
-        let gfx_queue = &rd.gfx_queue;
         let command_buffer = self.command_buffer;
-        let surface = &rd.surface;
-        let swapchain = &rd.swapchain;
 
-        let surface_size = surface.query_size(&surface_entry, physical_device);
-
+        use render_graph::*;
         let mut rg = RenderGraph::new();
-        let use_rg = false;
 
         // Acquire target image
         let (image_index, b_image_suboptimal) = unsafe {
-            swapchain_entry.entry.acquire_next_image(
-                swapchain.handle,
+            rd.swapchain_entry.entry.acquire_next_image(
+                rd.swapchain.handle,
                 u64::MAX,
                 vk::Semaphore::null(),
                 self.present_finished_fence,
@@ -868,7 +631,7 @@ impl RednerLoop {
                 let fences = [fence];
                 let timeout_in_ns = 500000; // 500ms
                 loop {
-                    match device.wait_for_fences(&fences, true, timeout_in_ns) {
+                    match rd.device.wait_for_fences(&fences, true, timeout_in_ns) {
                         Ok(_) => return,
                         Err(_) => {
                             println!("Vulkan: Faild to wait {}, keep trying...", msg)
@@ -884,7 +647,7 @@ impl RednerLoop {
             );
 
             // Reset the fence
-            device
+            rd.device
                 .reset_fences(&[
                     self.present_finished_fence,
                     self.command_buffer_finished_fence,
@@ -893,10 +656,9 @@ impl RednerLoop {
         }
 
         // Reuse the command buffer
-        // TODO check or wait for fence
         unsafe {
-            device
-                .reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())
+            rd.device
+                .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
                 .expect("Vulkan: Reset command buffer failed???");
         };
 
@@ -935,97 +697,9 @@ impl RednerLoop {
             let begin_info = vk::CommandBufferBeginInfo::builder()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             unsafe {
-                device
+                rd.device
                     .begin_command_buffer(command_buffer, &begin_info)
                     .unwrap();
-            }
-        }
-
-        let mut swapchain_image_layout = vk::ImageLayout::UNDEFINED;
-
-        // Transition for render
-        if !use_rg {
-            let sub_res_range = vk::ImageSubresourceRange::builder()
-                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                .layer_count(1)
-                .level_count(1);
-            let texture = rd.res.get_texture(swapchain.image[image_index as usize]);
-            let image_barrier = vk::ImageMemoryBarrier::builder()
-                .old_layout(swapchain_image_layout)
-                .new_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .subresource_range(*sub_res_range)
-                .image(texture.image);
-            unsafe {
-                device.cmd_pipeline_barrier(
-                    command_buffer,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    vk::DependencyFlags::empty(),
-                    &[],
-                    &[],
-                    &[*image_barrier],
-                );
-            }
-
-            swapchain_image_layout = image_barrier.new_layout;
-        }
-
-        // Begin render pass
-        if !use_rg {
-            let texture_view = rd
-                .res
-                .get_texture_view(swapchain.image_view[image_index as usize]);
-            let color_attachment = vk::RenderingAttachmentInfoKHR::builder()
-                .image_view(texture_view.image_view)
-                .image_layout(swapchain_image_layout)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .clear_value(vk::ClearValue { color: clear_color });
-            let color_attachments = [*color_attachment];
-            let depth_attachment = vk::RenderingAttachmentInfoKHR::builder()
-                .image_view(self.depth_stencil_buffer_view.image_view)
-                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .clear_value(vk::ClearValue {
-                    depth_stencil: vk::ClearDepthStencilValue {
-                        depth: 0.0,
-                        stencil: 0,
-                    },
-                });
-            let rendering_info = vk::RenderingInfoKHR::builder()
-                .render_area(vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: surface_size,
-                })
-                .layer_count(1)
-                .view_mask(0)
-                .color_attachments(&color_attachments)
-                .depth_attachment(&depth_attachment);
-            unsafe {
-                device.cmd_begin_rendering(command_buffer, &rendering_info);
-
-                device.cmd_set_depth_test_enable(command_buffer, true);
-                device.cmd_set_depth_write_enable(command_buffer, true);
-                device.cmd_set_stencil_test_enable(command_buffer, true);
-                device.cmd_set_stencil_op(
-                    command_buffer,
-                    vk::StencilFaceFlags::FRONT_AND_BACK,
-                    vk::StencilOp::KEEP,
-                    vk::StencilOp::REPLACE,
-                    vk::StencilOp::KEEP,
-                    vk::CompareOp::ALWAYS,
-                );
-                device.cmd_set_stencil_write_mask(
-                    command_buffer,
-                    vk::StencilFaceFlags::FRONT_AND_BACK,
-                    0x01,
-                );
-                device.cmd_set_stencil_reference(
-                    command_buffer,
-                    vk::StencilFaceFlags::FRONT_AND_BACK,
-                    0x01,
-                );
             }
         }
 
@@ -1042,103 +716,18 @@ impl RednerLoop {
             &hack,
         );
 
-        if !use_rg {
-            if let Some(create_pipeline) = mesh_gfx_pipeline {
-                let pipeline = shaders.get_pipeline(create_pipeline).unwrap();
-                // Set viewport and scissor
-                {
-                    let viewport = vk::Viewport {
-                        x: 0.0,
-                        y: 0.0,
-                        width: swapchain.extent.width as f32,
-                        height: swapchain.extent.height as f32,
-                        min_depth: 0.0,
-                        max_depth: 1.0,
-                    };
-                    let viewports = [viewport];
-                    unsafe {
-                        device.cmd_set_viewport(command_buffer, 0, &viewports);
-                    }
-
-                    let scissor = vk::Rect2D {
-                        offset: vk::Offset2D { x: 0, y: 0 },
-                        extent: swapchain.extent,
-                    };
-                    let scissors = [scissor];
-                    unsafe {
-                        device.cmd_set_scissor(command_buffer, 0, &scissors);
-                    }
-                }
-
-                // Bind scene resources
-                unsafe {
-                    device.cmd_bind_descriptor_sets(
-                        command_buffer,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        pipeline.layout,
-                        SCENE_DESCRIPTOR_SET_INDEX,
-                        &[scene.descriptor_set],
-                        &[],
-                    );
-                }
-
-                // Bind shader resources
-                /*
-                DescriptorSetUpdater::new(pipeline)
-                    .buffer("vertex_buffer", &scene.vertex_buffer.buffer.srv.unwrap())
-                    .constant_buffer("view_params", &self.view_params_cb.buffer)
-                    .image("material_texture", &scene.material_texture.view.image_view)
-                    .sampler("material_texture_sampler", &self.shared_sampler)
-                    .update(&device);
-                unsafe {
-                    device.cmd_bind_descriptor_sets(
-                        command_buffer,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        pipeline.layout,
-                        0,
-                        &pipeline.descriptor_sets,
-                        &[],
-                    );
-                }
-                */
-
-                // Bind index buffer
-                unsafe {
-                    device.cmd_bind_index_buffer(
-                        command_buffer,
-                        scene.index_buffer.buffer.buffer,
-                        0,
-                        vk::IndexType::UINT16,
-                    );
-                }
-
-                // Set pipeline and Draw
-                unsafe {
-                    device.cmd_bind_pipeline(
-                        command_buffer,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        pipeline.handle,
-                    );
-                }
-                self.draw_geometry(device, command_buffer, &pipeline, scene);
-            }
-
-            // End render pass
-            unsafe { device.cmd_end_rendering(command_buffer) }
-        }
-
-        let mut main_depth_stencil = RGHandle::<Texture>::null();
-        if use_rg {
+        let main_depth_stencil;
+        {
             let pipeline = mesh_gfx_pipeline.unwrap();
 
-            let color = rg.register_texture_view(swapchain.image_view[image_index as usize]);
+            let color_view = rd.swapchain.image_view[image_index as usize];
             main_depth_stencil = rg.create_texutre(TextureDesc::new_2d(
-                swapchain.extent.width,
-                swapchain.extent.height,
+                rd.swapchain.extent.width,
+                rd.swapchain.extent.height,
                 vk::Format::D24_UNORM_S8_UINT,
                 vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
             ));
-            let ds = rg.create_texture_view(
+            let ds_view = rg.create_texture_view(
                 main_depth_stencil,
                 TextureViewDesc {
                     view_type: vk::ImageViewType::TYPE_2D,
@@ -1147,26 +736,53 @@ impl RednerLoop {
                 },
             );
 
-            let mut pass = RenderPass::new("Base");
-            &mut pass
-                //rg.new_pass("Base Pass")
-                .color_targets(&[color])
-                .depth_stencil(ds)
-                .logic(move |cb, shaders, pass| {
-                    let pipeline = shaders.get_pipeline(pipeline).unwrap();
-
+            let viewport_extent = rd.swapchain.extent;
+            rg.new_pass("Base Pass", RenderPassType::Graphics)
+                .color_targets(&[ColorTarget {
+                    view: color_view.into(),
+                    load_op: ColorLoadOp::Clear(clear_color),
+                }])
+                .depth_stencil(DepthStencilTarget {
+                    view: ds_view.into(),
+                    load_op: DepthLoadOp::Clear(vk::ClearDepthStencilValue {
+                        depth: 0.0,
+                        stencil: 0,
+                    }),
+                    store_op: vk::AttachmentStoreOp::STORE,
+                })
+                .mannual_transition(|cb, pass| {
+                    // transition external image (swapchain)
+                    // TODO extract to seperate pass?
+                    let swapchain_view: TextureView = pass.get_color_targets()[0].view.into();
+                    cb.layout_transition(
+                        swapchain_view.texture.image,
+                        //vk::PipelineStageFlags::TOP_OF_PIPE, // TODO auto this?
+                        vk::PipelineStageFlags::default(),
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        vk::ImageLayout::UNDEFINED, // TODO auto this?
+                        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                        vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        },
+                    );
+                })
+                .logic(move |cb, shaders, _pass| {
                     // set up raster state
                     cb.set_viewport_0(vk::Viewport {
                         x: 0.0,
                         y: 0.0,
-                        width: swapchain.extent.width as f32,
-                        height: swapchain.extent.height as f32,
+                        width: viewport_extent.width as f32,
+                        height: viewport_extent.height as f32,
                         min_depth: 0.0,
                         max_depth: 1.0,
                     });
                     cb.set_scissor_0(vk::Rect2D {
                         offset: vk::Offset2D { x: 0, y: 0 },
-                        extent: swapchain.extent,
+                        extent: viewport_extent,
                     });
                     cb.set_depth_test_enable(true);
                     cb.set_depth_write_enable(true);
@@ -1176,6 +792,8 @@ impl RednerLoop {
                     cb.set_stencil_op(face_mask, stencil_ops);
                     cb.set_stencil_write_mask(face_mask, 0x01);
                     cb.set_stencil_reference(face_mask, 0xFF);
+
+                    let pipeline = shaders.get_pipeline(pipeline).unwrap();
 
                     // Bind scene resources
                     cb.bind_descriptor_set(
@@ -1197,7 +815,7 @@ impl RednerLoop {
                         let material_params =
                             &scene.material_parmas[mesh_params.material_index as usize];
                         // PushConstant for everything per-draw
-                        let mut constants = PushConstantsBuilder::new(pipeline);
+                        let mut constants = PushConstantsBuilder::new();
                         {
                             // model_transform
                             let model_xform = glam::Mat4::IDENTITY; // Not used for now
@@ -1221,8 +839,9 @@ impl RednerLoop {
 
                         cb.draw_indexed(mesh_params.index_count, 1, mesh_params.index_offset, 0, 0);
                     }
-                });
-            rg.add_pass(pass);
+                })
+                .done();
+            //rg.add_pass(pass);
         }
 
         // Draw something with compute
@@ -1231,7 +850,7 @@ impl RednerLoop {
             "main",
             ShaderStage::Compute,
         ));
-        if let Some(created_pipeline) = mesh_cs_pipeline {
+        if let Some(_created_pipeline) = mesh_cs_pipeline {
             /*
             // Transition for compute
             {
@@ -1310,119 +929,11 @@ impl RednerLoop {
             &ShaderDefinition::new("sky_vsps.hlsl", "ps_main", ShaderStage::Frag),
             &hack,
         );
-        if !use_rg {
-            if let Some(created_pipeline) = sky_pipeline {
-                let pipeline = shaders.get_pipeline(created_pipeline).unwrap();
-                // Begin pass
-                let image_view = rd
-                    .res
-                    .get_texture_view(swapchain.image_view[image_index as usize]);
-                let color_attachment = vk::RenderingAttachmentInfoKHR::builder()
-                    .image_view(image_view.image_view)
-                    .image_layout(swapchain_image_layout)
-                    .load_op(vk::AttachmentLoadOp::LOAD)
-                    .store_op(vk::AttachmentStoreOp::STORE);
-                let color_attachments = [*color_attachment];
-                let stencil_attachment = vk::RenderingAttachmentInfoKHR::builder()
-                    .image_view(self.depth_stencil_buffer_view.image_view)
-                    .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                    .load_op(vk::AttachmentLoadOp::LOAD)
-                    .store_op(vk::AttachmentStoreOp::NONE);
-                let rendering_info = vk::RenderingInfoKHR::builder()
-                    .render_area(vk::Rect2D {
-                        offset: vk::Offset2D { x: 0, y: 0 },
-                        extent: surface_size,
-                    })
-                    .layer_count(1)
-                    .view_mask(0)
-                    .color_attachments(&color_attachments)
-                    .stencil_attachment(&stencil_attachment);
-                unsafe {
-                    device.cmd_begin_rendering(command_buffer, &rendering_info);
-
-                    device.cmd_set_depth_test_enable(command_buffer, false);
-                    device.cmd_set_depth_write_enable(command_buffer, false);
-                    device.cmd_set_stencil_test_enable(command_buffer, true);
-                    device.cmd_set_stencil_op(
-                        command_buffer,
-                        vk::StencilFaceFlags::FRONT_AND_BACK,
-                        vk::StencilOp::KEEP,
-                        vk::StencilOp::KEEP,
-                        vk::StencilOp::KEEP,
-                        vk::CompareOp::EQUAL,
-                    );
-                    device.cmd_set_stencil_compare_mask(
-                        command_buffer,
-                        vk::StencilFaceFlags::FRONT_AND_BACK,
-                        0x01,
-                    );
-                    device.cmd_set_stencil_reference(
-                        command_buffer,
-                        vk::StencilFaceFlags::FRONT_AND_BACK,
-                        0x00,
-                    );
-                }
-
-                // Bind scene resources
-                // TODO Need to bind everying render pass ?
-                unsafe {
-                    device.cmd_bind_descriptor_sets(
-                        command_buffer,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        pipeline.layout,
-                        SCENE_DESCRIPTOR_SET_INDEX,
-                        &[scene.descriptor_set],
-                        &[],
-                    );
-                }
-
-                // Draw
-                unsafe {
-                    device.cmd_bind_pipeline(
-                        command_buffer,
-                        vk::PipelineBindPoint::GRAPHICS,
-                        pipeline.handle,
-                    );
-                    device.cmd_draw(command_buffer, 3, 1, 0, 0);
-                }
-
-                // End pass
-                unsafe { device.cmd_end_rendering(command_buffer) }
-            };
-        }
-
-        // Transition for present
-        if !use_rg {
-            if swapchain_image_layout != vk::ImageLayout::PRESENT_SRC_KHR {
-                let sub_res_range = vk::ImageSubresourceRange::builder()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .layer_count(1)
-                    .level_count(1);
-                let texture = rd.res.get_texture(swapchain.image[image_index as usize]);
-                let image_barrier = vk::ImageMemoryBarrier::builder()
-                    .old_layout(swapchain_image_layout)
-                    .new_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-                    .subresource_range(*sub_res_range)
-                    .image(texture.image);
-                unsafe {
-                    device.cmd_pipeline_barrier(
-                        command_buffer,
-                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                        vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[*image_barrier],
-                    );
-                }
-                //swapchain_image_layout = image_barrier.new_layout;
-            }
-        }
-
-        if use_rg {
+        {
             let pipeline = sky_pipeline.unwrap();
 
-            let color_target = rg.register_texture_view(swapchain.image_view[image_index as usize]);
+            //let color_target = rg.register_texture_view(swapchain.image_view[image_index as usize]);
+            let color_target = rd.swapchain.image_view[image_index as usize];
             let stencil = rg.create_texture_view(
                 main_depth_stencil,
                 TextureViewDesc {
@@ -1432,12 +943,17 @@ impl RednerLoop {
                 },
             );
 
-            let mut pass = RenderPass::new("Sky");
-            &mut pass
-                //rg.new_pass("Sky")
-                .color_targets(&[color_target])
-                .depth_stencil(stencil)
-                .logic(move |cb, shaders, pass| {
+            rg.new_pass("Sky", RenderPassType::Graphics)
+                .color_targets(&[ColorTarget {
+                    view: color_target.into(),
+                    load_op: ColorLoadOp::Load,
+                }])
+                .depth_stencil(DepthStencilTarget {
+                    view: stencil.into(),
+                    load_op: DepthLoadOp::Load,
+                    store_op: vk::AttachmentStoreOp::NONE,
+                })
+                .logic(move |cb, shaders, _pass| {
                     let pipeline = shaders.get_pipeline(pipeline).unwrap();
 
                     // Set up raster states
@@ -1462,17 +978,39 @@ impl RednerLoop {
                     // Draw
                     cb.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, pipeline.handle);
                     cb.draw(3, 1, 0, 0);
-                });
-            rg.add_pass(pass);
+                })
+                .done();
         }
 
-        if use_rg {
-            rg.execute();
+        // Run render graph and fianlize
+        {
+            let cb = CommandBuffer {
+                device: rd.device.clone(),
+                command_buffer,
+            };
+            rg.execute(rd, &cb, &shaders);
+
+            // Transition swapchain for present
+            let swapchain = rd.swapchain.image[image_index as usize];
+            cb.layout_transition(
+                swapchain.image,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::PRESENT_SRC_KHR,
+                vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_array_layer: 0,
+                    base_mip_level: 0,
+                    layer_count: 1,
+                    level_count: 1,
+                },
+            );
         }
 
         // End command recoding
         unsafe {
-            device.end_command_buffer(command_buffer).unwrap();
+            rd.device.end_command_buffer(command_buffer).unwrap();
         }
 
         // Submit
@@ -1483,9 +1021,9 @@ impl RednerLoop {
                 .command_buffers(&command_buffers)
                 .signal_semaphores(&signal_semaphores);
             unsafe {
-                device
+                rd.device
                     .queue_submit(
-                        *gfx_queue,
+                        rd.gfx_queue,
                         &[*submit_info],
                         self.command_buffer_finished_fence,
                     )
@@ -1499,63 +1037,13 @@ impl RednerLoop {
             present_info.wait_semaphore_count = 1;
             present_info.p_wait_semaphores = &self.present_ready_semaphore;
             present_info.swapchain_count = 1;
-            present_info.p_swapchains = &swapchain.handle;
+            present_info.p_swapchains = &rd.swapchain.handle;
             present_info.p_image_indices = &image_index;
             unsafe {
-                swapchain_entry
+                rd.swapchain_entry
                     .entry
-                    .queue_present(*gfx_queue, &present_info)
+                    .queue_present(rd.gfx_queue, &present_info)
                     .unwrap();
-            }
-        }
-
-        // Wait brute-force (ATM)
-        //unsafe { device.device_wait_idle().unwrap(); }
-    }
-
-    fn draw_geometry(
-        &self,
-        device: &ash::Device,
-        command_buffer: vk::CommandBuffer,
-        pipeline: &Pipeline,
-        render_scene: &RenderScene,
-    ) {
-        for mesh_params in &render_scene.mesh_params {
-            let material_params =
-                &render_scene.material_parmas[mesh_params.material_index as usize];
-            // PushConstant for everything per-draw
-            let mut constants = PushConstantsBuilder::new(pipeline);
-            {
-                // model_transform
-                let model_xform = glam::Mat4::IDENTITY; // Not used for now
-                constants.push(&model_xform.to_cols_array());
-                // vertex attributes
-                constants.push(&mesh_params.positions_offset);
-                constants.push(&mesh_params.texcoords_offset);
-                constants.push(&mesh_params.normals_offset);
-                constants.push(&mesh_params.tangents_offset);
-                // material params
-                constants.push(&material_params.base_color_index);
-                constants.push(&material_params.normal_index);
-                constants.push(&material_params.metallic_roughness_index);
-            }
-            unsafe {
-                device.cmd_push_constants(
-                    command_buffer,
-                    pipeline.layout,
-                    pipeline.push_constant_ranges[0].stage_flags, // TODO finer flags
-                    0,
-                    &constants.build(),
-                );
-
-                device.cmd_draw_indexed(
-                    command_buffer,
-                    mesh_params.index_count,
-                    1,
-                    mesh_params.index_offset,
-                    0,
-                    0,
-                );
             }
         }
     }

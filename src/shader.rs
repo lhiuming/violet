@@ -5,7 +5,41 @@ use ash::vk::{self, PushConstantRange};
 use rspirv_reflect::{self};
 use spirq::{self};
 
-use crate::render_device::{Handle, RenderDevice};
+use crate::render_device::RenderDevice;
+
+// BEGIN Handle
+
+#[derive(PartialEq, Eq, Hash)]
+pub struct Handle<T> {
+    id: usize,
+    _phantom_data: std::marker::PhantomData<T>,
+}
+
+impl<T> Handle<T> {
+    pub fn new(id: usize) -> Self {
+        Self {
+            id,
+            _phantom_data: std::marker::PhantomData,
+        }
+    }
+
+    pub fn id(&self) -> usize {
+        self.id
+    }
+}
+
+impl<T> Clone for Handle<T> {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id,
+            _phantom_data: self._phantom_data.clone(),
+        }
+    }
+}
+
+impl<T> Copy for Handle<T> {}
+
+// END Handle
 
 pub struct PipelineDevice {
     device: ash::Device,
@@ -86,23 +120,20 @@ impl Shaders {
         &mut self,
         cs_def: &ShaderDefinition,
     ) -> Option<Handle<Pipeline>> {
-        unsafe {
-            let key = cs_def;
-            let create = || {};
+        let key = cs_def;
 
-            if !self.compute_pipelines_map.contains_key(key) {
-                let cs = self.shader_loader.load(&self.pipeline_device, &cs_def)?;
-                let pipeline_created = create_compute_pipeline(&self.pipeline_device, &cs_def, &cs);
-                if let Some(pipeline) = pipeline_created {
-                    let handle = self.add_pipeline(pipeline);
-                    self.compute_pipelines_map.insert(*key, handle);
-                    return Some(handle);
-                }
-                return None;
+        if !self.compute_pipelines_map.contains_key(key) {
+            let cs = self.shader_loader.load(&self.pipeline_device, &cs_def)?;
+            let pipeline_created = create_compute_pipeline(&self.pipeline_device, &cs_def, &cs);
+            if let Some(pipeline) = pipeline_created {
+                let handle = self.add_pipeline(pipeline);
+                self.compute_pipelines_map.insert(*key, handle);
+                return Some(handle);
             }
-
-            Some(*self.compute_pipelines_map.get(key).unwrap())
+            return None;
         }
+
+        Some(*self.compute_pipelines_map.get(key).unwrap())
     }
 
     pub fn get_pipeline(&self, handle: Handle<Pipeline>) -> Option<&Pipeline> {
@@ -253,7 +284,7 @@ impl hassle_rs::DxcIncludeHandler for IncludeHandler {
 struct ShaderLoader {
     compiler: hassle_rs::DxcCompiler,
     library: hassle_rs::DxcLibrary,
-    dxc: hassle_rs::Dxc, // delacare this last to drop it after {compiler, library}
+    _dxc: hassle_rs::Dxc, // delacare this last to drop it after {compiler, library}
 }
 
 impl ShaderLoader {
@@ -264,7 +295,7 @@ impl ShaderLoader {
         ShaderLoader {
             compiler,
             library,
-            dxc,
+            _dxc: dxc,
         }
     }
 
@@ -824,21 +855,13 @@ pub fn sampler(&mut self, name: &'a str, sampler: &'a vk::Sampler) -> &mut Self 
 }
 */
 
-pub struct PushConstantsBuilder<'a> {
-    pipeline: &'a Pipeline,
+pub struct PushConstantsBuilder {
     data: Vec<u8>,
 }
 
-impl<'a> PushConstantsBuilder<'a> {
-    pub fn new(pipeline: &'a Pipeline) -> Self {
-        Self {
-            data: Vec::new(),
-            pipeline,
-        }
-    }
-
-    pub fn add<T>(&mut self, name: &str, value: &T) -> &mut Self {
-        self
+impl PushConstantsBuilder {
+    pub fn new() -> Self {
+        Self { data: Vec::new() }
     }
 
     pub fn push<T>(&mut self, value: &T) -> &mut Self {
