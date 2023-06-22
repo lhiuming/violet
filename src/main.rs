@@ -81,7 +81,7 @@ fn main() {
         );
     }
 
-    let render_loop = RednerLoop::new(&rd);
+    let mut render_loop = RednerLoop::new(&rd);
 
     // Init camera
     // NOTE:

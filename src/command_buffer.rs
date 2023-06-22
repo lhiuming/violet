@@ -33,7 +33,7 @@ impl StencilOps {
 }
 
 impl CommandBuffer {
-    pub fn layout_transition(
+    pub fn transition_image_layout(
         &self,
         image: vk::Image,
         src_stage_mask: vk::PipelineStageFlags,
@@ -75,6 +75,17 @@ impl CommandBuffer {
                 memory_barriers,
                 buffer_memory_barriers,
                 image_memory_barriers,
+            );
+        }
+    }
+
+    pub fn dispatch(&self, group_count_x: u32, group_count_y: u32, group_count_z: u32) {
+        unsafe {
+            self.device.cmd_dispatch(
+                self.command_buffer,
+                group_count_x,
+                group_count_y,
+                group_count_z,
             );
         }
     }

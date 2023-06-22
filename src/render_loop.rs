@@ -10,7 +10,7 @@ use crate::render_device::{
     Buffer, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
 };
 use crate::render_graph::{self};
-use crate::shader::{HackStuff, PushConstantsBuilder, ShaderDefinition, ShaderStage, Shaders};
+use crate::shader::{HackStuff, Handle, PushConstantsBuilder, ShaderDefinition, Shaders};
 
 // Allocatable buffer. Alway aligned to 4 bytes.
 pub struct AllocBuffer {
@@ -571,6 +571,8 @@ pub struct RednerLoop {
     pub present_finished_semephore: vk::Semaphore,
     pub present_ready_semaphore: vk::Semaphore,
     pub command_buffer_finished_fence: vk::Fence,
+
+    pub render_graph_cache: render_graph::RenderGraphCache,
 }
 
 impl RednerLoop {
@@ -585,11 +587,12 @@ impl RednerLoop {
             present_finished_semephore: rd.create_semaphore(),
             present_ready_semaphore: rd.create_semaphore(),
             command_buffer_finished_fence: rd.create_fence(true),
+            render_graph_cache: render_graph::RenderGraphCache::new(rd),
         }
     }
 
     pub fn render(
-        &self,
+        &mut self,
         rd: &mut RenderDevice,
         shaders: &mut Shaders,
         scene: &RenderScene,
@@ -598,7 +601,7 @@ impl RednerLoop {
         let command_buffer = self.command_buffer;
 
         use render_graph::*;
-        let mut rg = RenderGraph::new();
+        let mut rg = RenderGraph::new(&mut self.render_graph_cache);
 
         // Acquire target image
         let (image_index, b_image_suboptimal) = unsafe {
@@ -703,6 +706,64 @@ impl RednerLoop {
             }
         }
 
+        // Update sky IBL cube
+        let skycube_size = 64u32;
+        let mut skycube_texture = RGHandle::null();
+        let skycube_gen =
+            shaders.create_compute_pipeline(ShaderDefinition::compute("sky_cube.hlsl", "main"));
+        if let Some(pipeline) = skycube_gen {
+            let pipeline = Handle::null();
+            skycube_texture = rg.create_texutre(TextureDesc {
+                width: skycube_size,
+                height: skycube_size,
+                array_len: 6,
+                format: vk::Format::B10G11R11_UFLOAT_PACK32,
+                usage: vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+                flags: vk::ImageCreateFlags::CUBE_COMPATIBLE, // required for viewed as cube
+            });
+            let array_uav = rg.create_texture_view(
+                skycube_texture,
+                TextureViewDesc {
+                    view_type: vk::ImageViewType::TYPE_2D_ARRAY,
+                    format: vk::Format::B10G11R11_UFLOAT_PACK32,
+                    aspect: vk::ImageAspectFlags::COLOR,
+                },
+            );
+
+            rg.new_pass("Sky IBL gen", RenderPassType::Compute)
+                .pipeline(pipeline)
+                .rw_texture("rw_cube_texture", array_uav.into())
+                .mannual_transition(move |ti, _pass| {
+                    // UAV Transition
+                    ti.cmd_buf.transition_image_layout(
+                        ti.get_image(array_uav.into()),
+                        vk::PipelineStageFlags::default(),
+                        vk::PipelineStageFlags::COMPUTE_SHADER,
+                        vk::ImageLayout::UNDEFINED,
+                        vk::ImageLayout::GENERAL,
+                        vk::ImageSubresourceRange::builder()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .layer_count(6)
+                            .level_count(1)
+                            .build(),
+                    );
+                })
+                .render(move |cb, shaders, _pass| {
+                    let pipeline = shaders.get_pipeline(pipeline).unwrap();
+
+                    let pc = PushConstantsBuilder::new().pushv(skycube_size as f32);
+                    cb.push_constants(
+                        pipeline.layout,
+                        vk::ShaderStageFlags::COMPUTE,
+                        0,
+                        &pc.build(),
+                    );
+
+                    cb.bind_pipeline(vk::PipelineBindPoint::COMPUTE, pipeline.handle);
+                    cb.dispatch(skycube_size / 8, skycube_size / 8, 6);
+                });
+        }
+
         // Draw mesh
         let mut hack = HackStuff {
             bindless_size: 1024,
@@ -711,8 +772,8 @@ impl RednerLoop {
         hack.set_layout_override
             .insert(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set_layout);
         let mesh_gfx_pipeline = shaders.create_gfx_pipeline(
-            &ShaderDefinition::new("MeshVSPS.hlsl", "vs_main", ShaderStage::Vert),
-            &ShaderDefinition::new("MeshVSPS.hlsl", "ps_main", ShaderStage::Frag),
+            ShaderDefinition::vert("MeshVSPS.hlsl", "vs_main"),
+            ShaderDefinition::frag("MeshVSPS.hlsl", "ps_main"),
             &hack,
         );
 
@@ -736,8 +797,19 @@ impl RednerLoop {
                 },
             );
 
+            let skycube = rg.create_texture_view(
+                skycube_texture,
+                TextureViewDesc {
+                    view_type: vk::ImageViewType::CUBE,
+                    format: vk::Format::B10G11R11_UFLOAT_PACK32,
+                    aspect: vk::ImageAspectFlags::COLOR,
+                },
+            );
+
             let viewport_extent = rd.swapchain.extent;
             rg.new_pass("Base Pass", RenderPassType::Graphics)
+                .pipeline(pipeline)
+                .descriptor_set_index(2)
                 .color_targets(&[ColorTarget {
                     view: color_view.into(),
                     load_op: ColorLoadOp::Clear(clear_color),
@@ -750,12 +822,24 @@ impl RednerLoop {
                     }),
                     store_op: vk::AttachmentStoreOp::STORE,
                 })
-                .mannual_transition(|cb, pass| {
+                .texture("skycube", skycube.into())
+                .mannual_transition(move |ti, pass| {
+                    // Prepare skycube
+                    ti.cmd_buf.transition_image_layout(
+                        ti.get_image(skycube.into()),
+                        vk::PipelineStageFlags::COMPUTE_SHADER,
+                        vk::PipelineStageFlags::FRAGMENT_SHADER,
+                        vk::ImageLayout::GENERAL,
+                        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        vk::ImageSubresourceRange::builder()
+                            .layer_count(6)
+                            .layer_count(1)
+                            .build(),
+                    );
+
                     // transition external image (swapchain)
-                    // TODO extract to seperate pass?
-                    let swapchain_view: TextureView = pass.get_color_targets()[0].view.into();
-                    cb.layout_transition(
-                        swapchain_view.texture.image,
+                    ti.cmd_buf.transition_image_layout(
+                        ti.get_image(pass.get_color_targets()[0].view),
                         //vk::PipelineStageFlags::TOP_OF_PIPE, // TODO auto this?
                         vk::PipelineStageFlags::default(),
                         vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
@@ -770,7 +854,7 @@ impl RednerLoop {
                         },
                     );
                 })
-                .logic(move |cb, shaders, _pass| {
+                .render(move |cb, shaders, _pass| {
                     // set up raster state
                     cb.set_viewport_0(vk::Viewport {
                         x: 0.0,
@@ -815,21 +899,19 @@ impl RednerLoop {
                         let material_params =
                             &scene.material_parmas[mesh_params.material_index as usize];
                         // PushConstant for everything per-draw
-                        let mut constants = PushConstantsBuilder::new();
-                        {
+                        let model_xform = glam::Mat4::IDENTITY; // Not used for now
+                        let constants = PushConstantsBuilder::new()
                             // model_transform
-                            let model_xform = glam::Mat4::IDENTITY; // Not used for now
-                            constants.push(&model_xform.to_cols_array());
+                            .push(&model_xform.to_cols_array())
                             // vertex attributes
-                            constants.push(&mesh_params.positions_offset);
-                            constants.push(&mesh_params.texcoords_offset);
-                            constants.push(&mesh_params.normals_offset);
-                            constants.push(&mesh_params.tangents_offset);
+                            .push(&mesh_params.positions_offset)
+                            .push(&mesh_params.texcoords_offset)
+                            .push(&mesh_params.normals_offset)
+                            .push(&mesh_params.tangents_offset)
                             // material params
-                            constants.push(&material_params.base_color_index);
-                            constants.push(&material_params.normal_index);
-                            constants.push(&material_params.metallic_roughness_index);
-                        }
+                            .push(&material_params.base_color_index)
+                            .push(&material_params.normal_index)
+                            .push(&material_params.metallic_roughness_index);
                         cb.push_constants(
                             pipeline.layout,
                             pipeline.push_constant_ranges[0].stage_flags, // TODO
@@ -842,13 +924,7 @@ impl RednerLoop {
                 });
         }
 
-        // Draw something with compute
-        let mesh_cs_pipeline = shaders.create_compute_pipeline(&ShaderDefinition::new(
-            "MeshCS.hlsl",
-            "main",
-            ShaderStage::Compute,
-        ));
-        if let Some(_created_pipeline) = mesh_cs_pipeline {
+        {
             /*
             // Transition for compute
             {
@@ -923,8 +999,8 @@ impl RednerLoop {
 
         // Draw (procedure) Sky
         let sky_pipeline = shaders.create_gfx_pipeline(
-            &ShaderDefinition::new("sky_vsps.hlsl", "vs_main", ShaderStage::Vert),
-            &ShaderDefinition::new("sky_vsps.hlsl", "ps_main", ShaderStage::Frag),
+            ShaderDefinition::vert("sky_vsps.hlsl", "vs_main"),
+            ShaderDefinition::frag("sky_vsps.hlsl", "ps_main"),
             &hack,
         );
         {
@@ -951,7 +1027,7 @@ impl RednerLoop {
                     load_op: DepthLoadOp::Load,
                     store_op: vk::AttachmentStoreOp::NONE,
                 })
-                .logic(move |cb, shaders, _pass| {
+                .render(move |cb, shaders, _pass| {
                     let pipeline = shaders.get_pipeline(pipeline).unwrap();
 
                     // Set up raster states
@@ -989,7 +1065,7 @@ impl RednerLoop {
 
             // Transition swapchain for present
             let swapchain = rd.swapchain.image[image_index as usize];
-            cb.layout_transition(
+            cb.transition_image_layout(
                 swapchain.image,
                 vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                 vk::PipelineStageFlags::BOTTOM_OF_PIPE,

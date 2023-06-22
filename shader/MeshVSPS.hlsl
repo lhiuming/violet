@@ -68,7 +68,13 @@ float Fd_Burley(float NoV, float NoL, float LoH, float roughness) {
 
 // End BRDF
 
+// Scene Bindings (Set #1)
 #include "scene_bindings.hlsl"
+
+// Per Pass Bindings (Set #2)
+[[vk::binding(2)]] TextureCube<float3> skycube;
+
+// Per Material bindings?
 
 struct PushConstants
 {
@@ -192,6 +198,12 @@ void ps_main(
 	float3 specularColor = lerp(float3(0.04f, 0.04f, 0.04f), base_color.rgb, metallic);
 	float3 light_inten = float3(1.0f, 1.0f, 1.0f) * PI;
 	float3 lighting = cal_lighting(view, light, normal_ws, roughness, diffuseColor, specularColor) * light_inten;
+
+	// IBL fake
+	{
+		float3 refl_dir = reflect(-view, normal_ws);
+		lighting += skycube.SampleLevel(sampler_linear_clamp, refl_dir, 0).rgb * 0.5f;
+	}
 
 	float3 ambient = 0.1f;
 	lighting += diffuseColor * ambient;
