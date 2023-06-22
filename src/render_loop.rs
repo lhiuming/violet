@@ -839,9 +839,7 @@ impl RednerLoop {
 
                         cb.draw_indexed(mesh_params.index_count, 1, mesh_params.index_offset, 0, 0);
                     }
-                })
-                .done();
-            //rg.add_pass(pass);
+                });
         }
 
         // Draw something with compute
@@ -978,8 +976,7 @@ impl RednerLoop {
                     // Draw
                     cb.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, pipeline.handle);
                     cb.draw(3, 1, 0, 0);
-                })
-                .done();
+                });
         }
 
         // Run render graph and fianlize

@@ -97,7 +97,6 @@ impl From<HandleEnum<TextureView>> for TextureView {
 pub enum RenderPassType {
     Graphics,
     Compute,
-    //Transfer,
 }
 
 #[derive(Clone, Copy)]
@@ -157,30 +156,38 @@ impl RenderPass<'_> {
 }
 
 pub struct RenderPassBuilder<'a, 'b> {
-    inner: RenderPass<'a>,
+    inner: Option<RenderPass<'a>>,
     render_graph: &'b mut RenderGraph<'a>,
 }
 
 impl<'a, 'b> RenderPassBuilder<'a, 'b> {
     pub fn new(render_graph: &'b mut RenderGraph<'a>, name: &str, ty: RenderPassType) -> Self {
         RenderPassBuilder {
-            inner: RenderPass::new(name, ty),
+            inner: Some(RenderPass::new(name, ty)),
             render_graph,
         }
     }
 
-    pub fn done(mut self) {
-        self.render_graph.add_pass(self.inner);
+    fn inner(&mut self) -> &mut RenderPass<'a> {
+        self.inner.as_mut().unwrap()
+    }
+
+    pub fn done(&mut self) {
+        if self.inner.is_none() {
+            panic!("RenderPassBuilder::done is called multiple times!");
+        }
+        let inner = self.inner.take();
+        self.render_graph.add_pass(inner.unwrap());
     }
 
     pub fn color_targets(mut self, rts: &[ColorTarget]) -> Self {
-        self.inner.color_targets.clear();
-        self.inner.color_targets.extend_from_slice(rts);
+        self.inner().color_targets.clear();
+        self.inner().color_targets.extend_from_slice(rts);
         self
     }
 
     pub fn depth_stencil(mut self, ds: DepthStencilTarget) -> Self {
-        self.inner.depth_stencil = Some(ds);
+        self.inner().depth_stencil = Some(ds);
         self
     }
 
@@ -188,7 +195,7 @@ impl<'a, 'b> RenderPassBuilder<'a, 'b> {
     where
         F: FnOnce(&CommandBuffer, &RenderPass) + 'a,
     {
-        self.inner.mannual_transition = Some(Box::new(f));
+        self.inner().mannual_transition = Some(Box::new(f));
         self
     }
 
@@ -196,11 +203,20 @@ impl<'a, 'b> RenderPassBuilder<'a, 'b> {
     where
         F: FnOnce(&CommandBuffer, &Shaders, RenderPass) + 'a,
     {
-        self.inner.logic = Some(Box::new(f));
+        self.inner().logic = Some(Box::new(f));
         self
     }
 }
 
+impl Drop for RenderPassBuilder<'_, '_> {
+    fn drop(&mut self) {
+        // Call Self::done automatically if not called mannually
+        if self.inner.is_some() {
+            //println!("RenderPassBuilder for \"{}\" is dropped without calling done!",self.inner().name);
+            self.done();
+        }
+    }
+}
 struct ResPool<K, V>
 where
     K: Eq + Hash,
@@ -302,6 +318,7 @@ impl<'a> RenderGraph<'a> {
 
     #[allow(dead_code)]
     pub fn new_pass<'b>(&'b mut self, name: &str, ty: RenderPassType) -> RenderPassBuilder<'a, 'b> {
+        //println!("Adding new pass: {}", name);
         RenderPassBuilder::new(self, name, ty)
     }
 
