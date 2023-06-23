@@ -146,8 +146,12 @@ impl Shaders {
     }
 
     pub fn get_pipeline(&self, handle: Handle<Pipeline>) -> Option<&Pipeline> {
-        let id = handle.id();
-        Some(&self.pipelines[id])
+        if handle.is_null() {
+            None
+        } else {
+            let id = handle.id();
+            Some(&self.pipelines[id])
+        }
     }
 
     pub fn reload_all(&mut self) {
@@ -456,7 +460,7 @@ pub struct Pipeline {
     pub layout: vk::PipelineLayout,
 
     // reflection info
-    pub descriptor_infos: HashMap<String, PipelineDescriptorInfo>,
+    pub property_map: HashMap<String, PipelineDescriptorInfo>,
     pub push_constant_ranges: Vec<vk::PushConstantRange>,
 }
 
@@ -470,6 +474,9 @@ pub fn create_compute_pipeline(
 
     let program = &compiled.program;
     let reflect_module = &program.reflect_module;
+
+    // Reflection info to be collected
+    let mut property_map = HashMap::new();
 
     // Create all set layouts used in compute
     let mut set_layouts: Vec<vk::DescriptorSetLayout> = Vec::new();
@@ -486,8 +493,8 @@ pub fn create_compute_pipeline(
         .for_each(|(set, bindings)| {
             let bindings_info = bindings
                 .iter()
-                .map(
-                    |(binding, descriptor_info)| vk::DescriptorSetLayoutBinding {
+                .map(|(binding, descriptor_info)| {
+                    let vk_binding = vk::DescriptorSetLayoutBinding {
                         binding: *binding,
                         descriptor_type: vk::DescriptorType::from_raw(descriptor_info.ty.0 as i32),
                         descriptor_count: match descriptor_info.binding_count {
@@ -497,8 +504,18 @@ pub fn create_compute_pipeline(
                         },
                         stage_flags: vk::ShaderStageFlags::COMPUTE,
                         p_immutable_samplers: std::ptr::null(),
-                    },
-                )
+                    };
+                    // collect property
+                    property_map.insert(
+                        descriptor_info.name.clone(),
+                        PipelineDescriptorInfo {
+                            set_index: *set,
+                            binding_index: *binding,
+                            descriptor_type: vk_binding.descriptor_type,
+                        },
+                    );
+                    vk_binding
+                })
                 .collect::<Vec<vk::DescriptorSetLayoutBinding>>();
             let create_info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings_info);
             match unsafe { device.create_descriptor_set_layout(&create_info, None) } {
@@ -549,14 +566,11 @@ pub fn create_compute_pipeline(
         result[0]
     };
 
-    // Reflection info
-    let descriptor_infos = HashMap::new();
-
     Some(Pipeline {
         handle: pipeline,
         set_layouts,
         layout,
-        descriptor_infos,
+        property_map,
         push_constant_ranges,
     })
 }
@@ -575,8 +589,8 @@ pub fn create_graphics_pipeline(
         (vk::ShaderStageFlags::FRAGMENT, ps),
     ];
 
-    // Reflection info for descriptors
-    let mut descriptor_infos = HashMap::new();
+    // Reflection info to be collected
+    let mut property_map = HashMap::new();
 
     // Collect and merge descriptor set from all stages
     type MergedSet = HashMap<u32, vk::DescriptorSetLayoutBinding>;
@@ -619,7 +633,7 @@ pub fn create_graphics_pipeline(
                     binding_index: *binding,
                     descriptor_type,
                 };
-                match descriptor_infos.entry(descriptor_info.name.clone()) {
+                match property_map.entry(descriptor_info.name.clone()) {
                     Entry::Occupied(entry) => {
                         assert_eq!(entry.get(), &prop_info);
                     }
@@ -769,30 +783,30 @@ pub fn create_graphics_pipeline(
         handle: pipeline,
         set_layouts,
         layout,
-        descriptor_infos,
+        property_map,
         push_constant_ranges,
     })
 }
 
 type NamedVec<'a, T> = Vec<(&'a str, T)>;
 
+#[allow(dead_code)]
 pub struct DescriptorSetWriteBuilder<'a> {
     buffer_views: NamedVec<'a, vk::BufferView>,
     buffer_infos: NamedVec<'a, vk::DescriptorBufferInfo>,
     image_infos: NamedVec<'a, vk::DescriptorImageInfo>,
-    images: NamedVec<'a, vk::Image>,
     samplers: NamedVec<'a, vk::Sampler>,
 
     writes: Vec<vk::WriteDescriptorSet>,
 }
 
+#[allow(dead_code)]
 impl<'a> DescriptorSetWriteBuilder<'a> {
     pub fn new() -> Self {
         Self {
             buffer_views: Vec::new(),
             buffer_infos: Vec::new(),
             image_infos: Vec::new(),
-            images: Vec::new(),
             samplers: Vec::new(),
             writes: Vec::new(),
         }
@@ -804,7 +818,7 @@ impl<'a> DescriptorSetWriteBuilder<'a> {
         set: vk::DescriptorSet,
     ) -> &[vk::WriteDescriptorSet] {
         for (name, buffer_view) in &self.buffer_views {
-            if let Some(info) = pipeline.descriptor_infos.get(*name) {
+            if let Some(info) = pipeline.property_map.get(*name) {
                 let write = vk::WriteDescriptorSet::builder()
                     .dst_set(set)
                     .dst_binding(info.binding_index)
@@ -816,7 +830,7 @@ impl<'a> DescriptorSetWriteBuilder<'a> {
         }
 
         for (name, buffer_info) in &self.buffer_infos {
-            if let Some(info) = pipeline.descriptor_infos.get(*name) {
+            if let Some(info) = pipeline.property_map.get(*name) {
                 let write = vk::WriteDescriptorSet::builder()
                     .dst_set(set)
                     .dst_binding(info.binding_index)
@@ -828,7 +842,7 @@ impl<'a> DescriptorSetWriteBuilder<'a> {
         }
 
         for (name, image_info) in &self.image_infos {
-            if let Some(info) = pipeline.descriptor_infos.get(*name) {
+            if let Some(info) = pipeline.property_map.get(*name) {
                 let write = vk::WriteDescriptorSet::builder()
                     .dst_set(set)
                     .dst_binding(info.binding_index)

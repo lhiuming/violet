@@ -100,6 +100,7 @@ pub enum RenderPassType {
     Compute,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy)]
 pub enum ColorLoadOp {
     Load,
@@ -159,6 +160,7 @@ impl RenderPass<'_> {
         }
     }
 
+    #[allow(dead_code)]
     pub fn get_texture(&self, name: &str) -> HandleEnum<TextureView> {
         for (n, t) in &self.textures {
             if n == &name {
@@ -287,9 +289,14 @@ where
     }
 }
 
+const RG_MAX_SET: u32 = 1024;
+
 pub struct RenderGraphCache {
     // Resused VK stuffs
-    descriptor_pool: vk::DescriptorPool,
+    vk_descriptor_pool: vk::DescriptorPool,
+
+    // buffered VK objects
+    free_vk_descriptor_sets: Vec<vk::DescriptorSet>,
 
     // Resource pool
     texture_pool: ResPool<TextureDesc, Texture>,
@@ -298,38 +305,55 @@ pub struct RenderGraphCache {
 
 impl RenderGraphCache {
     pub fn new(rd: &RenderDevice) -> Self {
-        let descriptor_pool = rd.create_descriptor_pool(
-            vk::DescriptorType::SAMPLED_IMAGE,
-            vk::DescriptorPoolCreateFlags::empty(),
+        let vk_descriptor_pool = rd.create_descriptor_pool(
+            vk::DescriptorPoolCreateFlags::FREE_DESCRIPTOR_SET,
+            RG_MAX_SET,
+            &[vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::SAMPLED_IMAGE,
+                descriptor_count: 1024,
+            }],
         );
         Self {
-            descriptor_pool,
+            vk_descriptor_pool,
+            free_vk_descriptor_sets: Vec::new(),
             texture_pool: ResPool::new(),
             texture_view_pool: ResPool::new(),
         }
     }
 
-    fn get_dessriptor_set(
+    fn allocate_dessriptor_set(
         &mut self,
         rd: &RenderDevice,
         set_layout: vk::DescriptorSetLayout,
     ) -> vk::DescriptorSet {
         let layouts = [set_layout];
         let create_info = vk::DescriptorSetAllocateInfo::builder()
-            .descriptor_pool(self.descriptor_pool)
+            .descriptor_pool(self.vk_descriptor_pool)
             .set_layouts(&layouts);
         unsafe {
-            rd.device
-                .allocate_descriptor_sets(&create_info)
-                .expect("Failed to create descriptor set for pass")[0]
+            match rd.device.allocate_descriptor_sets(&create_info) {
+                Ok(sets) => sets[0],
+                Err(e) => {
+                    panic!("Failed to allocate descriptor set: {:?}", e);
+                }
+            }
         }
     }
 
-    fn return_descriptor_set(&mut self, rd: &RenderDevice, descriptor_set: vk::DescriptorSet) {
-        unsafe {
-            rd.device
-                .free_descriptor_sets(self.descriptor_pool, &[descriptor_set])
-                .expect("Failed to free descriptor set");
+    fn release_descriptor_set(&mut self, rd: &RenderDevice, descriptor_set: vk::DescriptorSet) {
+        self.free_vk_descriptor_sets.push(descriptor_set);
+
+        // TODO free after command buffer is done (fence)
+        let buffer_limit = (RG_MAX_SET / 2) as usize;
+        let release_heuristic = buffer_limit / 2;
+        if self.free_vk_descriptor_sets.len() > buffer_limit {
+            let old_sets = &self.free_vk_descriptor_sets[0..release_heuristic];
+            unsafe {
+                rd.device
+                    .free_descriptor_sets(self.vk_descriptor_pool, &old_sets)
+                    .expect("Failed to free descriptor set");
+            }
+            self.free_vk_descriptor_sets.drain(0..release_heuristic);
         }
     }
 }
@@ -380,15 +404,6 @@ impl<'a> RenderGraph<'a> {
             texture_views: Vec::new(),
             descriptor_sets: Vec::new(),
         }
-    }
-
-    pub fn reset(&mut self) {
-        self.passes.clear();
-        self.texture_descs.clear();
-        self.texture_view_descs.clear();
-
-        assert!(self.textures.is_empty());
-        assert!(self.texture_views.is_empty());
     }
 
     pub fn create_texutre(&mut self, desc: TextureDesc) -> RGHandle<Texture> {
@@ -543,7 +558,15 @@ impl<'a> RenderGraph<'a> {
         pass: &RenderPass,
         set: vk::DescriptorSet,
     ) -> Option<()> {
-        let pipeline = shaders.get_pipeline(pass.pipeline)?;
+        let pipeline = shaders.get_pipeline(pass.pipeline);
+        if pipeline.is_none() {
+            println!(
+                "Warning[RenderGraph::{}]: bind_resources failed: pipeline is none.",
+                pass.name
+            );
+            return None;
+        }
+        let pipeline = pipeline.unwrap();
 
         // Update descriptor set
         // TODO this struct can be reused (a lot vec)
@@ -616,8 +639,16 @@ impl<'a> RenderGraph<'a> {
             let pipeline = shaders.get_pipeline(pass.pipeline);
             let set = match pipeline {
                 Some(pipeline) => {
-                    let set_layout = pipeline.set_layouts[pass.descriptor_set_index as usize];
-                    self.cache.get_dessriptor_set(rd, set_layout)
+                    if pass.descriptor_set_index as usize >= pipeline.set_layouts.len() {
+                        println!(
+                            "Warning: unused descriptor set {} for pass {}",
+                            pass.descriptor_set_index, pass.name
+                        );
+                        vk::DescriptorSet::null()
+                    } else {
+                        let set_layout = pipeline.set_layouts[pass.descriptor_set_index as usize];
+                        self.cache.allocate_dessriptor_set(rd, set_layout)
+                    }
                 }
                 None => vk::DescriptorSet::null(),
             };
@@ -668,7 +699,7 @@ impl<'a> RenderGraph<'a> {
         for set in self.descriptor_sets.drain(0..self.descriptor_sets.len()) {
             if set != vk::DescriptorSet::null() {
                 // TODO may be need some frame buffering, because it may be still using?
-                self.cache.return_descriptor_set(rd, set);
+                self.cache.release_descriptor_set(rd, set);
             }
         }
     }

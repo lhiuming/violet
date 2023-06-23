@@ -10,7 +10,7 @@ use crate::render_device::{
     Buffer, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
 };
 use crate::render_graph::{self};
-use crate::shader::{HackStuff, Handle, PushConstantsBuilder, ShaderDefinition, Shaders};
+use crate::shader::{HackStuff, PushConstantsBuilder, ShaderDefinition, Shaders};
 
 // Allocatable buffer. Alway aligned to 4 bytes.
 pub struct AllocBuffer {
@@ -201,8 +201,12 @@ impl RenderScene {
         // Descriptor pool for whole scene bindless texture
         // TODO specific size and stuff
         let descriptor_pool = rd.create_descriptor_pool(
-            vk::DescriptorType::SAMPLED_IMAGE,
             vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND,
+            64,
+            &[vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::SAMPLED_IMAGE,
+                descriptor_count: 1024 + 64,
+            }],
         );
 
         // Create the scene/persistent binding set
@@ -712,7 +716,6 @@ impl RednerLoop {
         let skycube_gen =
             shaders.create_compute_pipeline(ShaderDefinition::compute("sky_cube.hlsl", "main"));
         if let Some(pipeline) = skycube_gen {
-            let pipeline = Handle::null();
             skycube_texture = rg.create_texutre(TextureDesc {
                 width: skycube_size,
                 height: skycube_size,
@@ -741,11 +744,13 @@ impl RednerLoop {
                         vk::PipelineStageFlags::COMPUTE_SHADER,
                         vk::ImageLayout::UNDEFINED,
                         vk::ImageLayout::GENERAL,
-                        vk::ImageSubresourceRange::builder()
-                            .aspect_mask(vk::ImageAspectFlags::COLOR)
-                            .layer_count(6)
-                            .level_count(1)
-                            .build(),
+                        vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_array_layer: 0,
+                            base_mip_level: 0,
+                            layer_count: 6,
+                            level_count: 1,
+                        },
                     );
                 })
                 .render(move |cb, shaders, _pass| {
@@ -760,7 +765,7 @@ impl RednerLoop {
                     );
 
                     cb.bind_pipeline(vk::PipelineBindPoint::COMPUTE, pipeline.handle);
-                    cb.dispatch(skycube_size / 8, skycube_size / 8, 6);
+                    cb.dispatch(skycube_size / 8, skycube_size / 4, 6);
                 });
         }
 
@@ -831,10 +836,13 @@ impl RednerLoop {
                         vk::PipelineStageFlags::FRAGMENT_SHADER,
                         vk::ImageLayout::GENERAL,
                         vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                        vk::ImageSubresourceRange::builder()
-                            .layer_count(6)
-                            .layer_count(1)
-                            .build(),
+                        vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_array_layer: 0,
+                            base_mip_level: 0,
+                            layer_count: 6,
+                            level_count: 1,
+                        },
                     );
 
                     // transition external image (swapchain)
@@ -1116,7 +1124,7 @@ impl RednerLoop {
                 rd.swapchain_entry
                     .entry
                     .queue_present(rd.gfx_queue, &present_info)
-                    .unwrap();
+                    .unwrap_or_else(|e| panic!("Failed to present: {:?}", e));
             }
         }
     }

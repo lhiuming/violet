@@ -72,7 +72,7 @@ float Fd_Burley(float NoV, float NoL, float LoH, float roughness) {
 #include "scene_bindings.hlsl"
 
 // Per Pass Bindings (Set #2)
-[[vk::binding(2)]] TextureCube<float3> skycube;
+[[vk::binding(0, 2)]] TextureCube<float3> skycube;
 
 // Per Material bindings?
 

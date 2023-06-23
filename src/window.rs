@@ -103,6 +103,7 @@ fn ensure_register_window_class() {
     }
 }
 
+#[allow(non_snake_case)]
 struct MessageHandler {
     pub hwnd: HWND, // Copied this from Window, for validation porpose
     // TODO move these kind of logic to app side
@@ -467,6 +468,7 @@ impl Window {
         }
     }
 
+    #[allow(non_snake_case)]
     pub fn click_R(&self) -> bool {
         self.message_handler.borrow().click_R
     }

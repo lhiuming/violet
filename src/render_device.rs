@@ -265,17 +265,14 @@ impl RenderDevice {
 
     pub fn create_descriptor_pool(
         &self,
-        ty: vk::DescriptorType,
         flags: vk::DescriptorPoolCreateFlags,
+        max_sets: u32,
+        pool_sizes: &[vk::DescriptorPoolSize],
     ) -> vk::DescriptorPool {
-        let pool_sizes = [vk::DescriptorPoolSize {
-            ty: ty,
-            descriptor_count: 1024, // TODO customize
-        }];
         let create_info = vk::DescriptorPoolCreateInfo::builder()
             .flags(flags)
-            .max_sets(256) // TODO big enough?
-            .pool_sizes(&pool_sizes);
+            .max_sets(max_sets)
+            .pool_sizes(pool_sizes);
         unsafe { self.device.create_descriptor_pool(&create_info, None) }
             .expect("Vulkan: failed to create descriptor pool?!")
     }
