@@ -111,6 +111,14 @@ fn main() {
             shaders.reload_all();
         }
 
+        // Reset camera
+        if window.clicked('g') {
+            camera_dir = Vec3::new(0.0, 1.0, 0.0);
+            camera_right = Vec3::new(1.0, 0.0, 0.0); // derived
+            camera_down = Vec3::new(0.0, 0.0, -1.0); // derived
+            camera_pos = Vec3::new(0.0, -5.0, 2.0);
+        }
+
         // Time udpate
         let delta_seconds;
         {

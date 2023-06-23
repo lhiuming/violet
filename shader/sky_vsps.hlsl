@@ -1,4 +1,4 @@
-#include "Atmosphere.hlsl"
+#include "atmosphere_felix_westin.hlsl"
 #include "scene_bindings.hlsl"
 
 void vs_main(
