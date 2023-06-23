@@ -150,11 +150,11 @@ impl MessageHandler {
     }
 }
 
-fn virtual_key_to_char(vk_code: VIRTUAL_KEY) -> Option<char> {
+fn virtual_key_to_u8(vk_code: VIRTUAL_KEY) -> Option<u8> {
     if (VK_A <= vk_code) && (vk_code <= VK_Z) {
-        char::from_u32((vk_code - VK_A + b'a' as u16) as u32)
+        Some((vk_code - VK_A + b'a' as u16) as u8)
     } else if (VK_0 <= vk_code) && (vk_code <= VK_9) {
-        char::from_u32((vk_code - VK_0 + b'0' as u16) as u32)
+        Some((vk_code - VK_0 + b'0' as u16) as u8)
     } else {
         None
     }
@@ -234,8 +234,8 @@ unsafe extern "system" fn wnd_callback(
         }
         WM_KEYDOWN => {
             let vk_code = w_param as u16;
-            if let Some(vk_to_char) = virtual_key_to_char(vk_code) {
-                handler.borrow_mut().push_states[vk_to_char as usize] = true;
+            if let Some(vk_to_u8) = virtual_key_to_u8(vk_code) {
+                handler.borrow_mut().push_states[vk_to_u8 as usize] = true;
             } else {
                 //println!("Win32 message: unhandle key down {}", vk_code);
                 return DefWindowProcW(hwnd, msg, w_param, l_param);
@@ -252,9 +252,9 @@ unsafe extern "system" fn wnd_callback(
         }
         WM_KEYUP => {
             let vk_code = w_param as u16;
-            if let Some(vk_to_char) = virtual_key_to_char(vk_code) {
-                handler.borrow_mut().push_states[vk_to_char as usize] = false;
-                handler.borrow_mut().click_states[vk_to_char as usize] = true;
+            if let Some(vk_to_u8) = virtual_key_to_u8(vk_code) {
+                handler.borrow_mut().push_states[vk_to_u8 as usize] = false;
+                handler.borrow_mut().click_states[vk_to_u8 as usize] = true;
             } else {
                 //println!("Win32 message: unhandle key up {}", vk_code);
                 return DefWindowProcW(hwnd, msg, w_param, l_param);

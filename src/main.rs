@@ -20,6 +20,7 @@ use render_loop::{RednerLoop, RenderScene};
 
 mod command_buffer;
 mod render_graph;
+mod renderdoc;
 
 use crate::render_loop::ViewInfo;
 
@@ -55,7 +56,15 @@ fn perspective_projection(
 }
 
 fn main() {
+    let args: Vec<String> = env::args().collect();
+
     println!("Hello, rusty world!");
+
+    let rdoc = args
+        .iter()
+        .any(|arg| arg == "--renderdoc")
+        .then(|| renderdoc::RenderDoc::new())
+        .flatten();
 
     // Create a system window
     // TODO implement Drop for Window
@@ -69,7 +78,6 @@ fn main() {
     // Set up the scene
     let mut render_scene = RenderScene::new(&rd);
 
-    let args: Vec<String> = env::args().collect();
     let model = model::load(Path::new(&args[1]));
     if let Ok(model) = model {
         render_scene.add(&rd, &model);
@@ -181,6 +189,12 @@ fn main() {
                 view_transform: view,
                 projection: proj,
             };
+        }
+
+        if window.clicked('c') {
+            if let Some(rdoc) = &rdoc {
+                rdoc.trigger_capture();
+            }
         }
 
         render_loop.render(&mut rd, &mut shaders, &render_scene, &view_info);

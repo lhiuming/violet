@@ -11,7 +11,8 @@
 			"preLaunchTask": "rust: cargo build",
 			"program": "${workspaceFolder}/target/debug/violet.exe",
 			"args": [
-				"./assets/Box/Box.gltf"
+				"./assets/Box/Box.gltf",
+				"--renderdoc"
 			],
 			"stopAtEntry": false,
 			"cwd": "${workspaceFolder}",
@@ -25,7 +26,8 @@
 			"preLaunchTask": "rust: cargo build",
 			"program": "${workspaceFolder}/target/debug/violet.exe",
 			"args": [
-				"./assets/Duck/Duck.gltf"
+				"./assets/Duck/Duck.gltf",
+				"--renderdoc"
 			],
 			"stopAtEntry": false,
 			"cwd": "${workspaceFolder}",
@@ -39,7 +41,8 @@
 			"preLaunchTask": "rust: cargo build nightly",
 			"program": "${workspaceFolder}/target/debug/violet.exe",
 			"args": [
-				"./assets/DamagedHelmet/DamagedHelmet.gltf"
+				"./assets/DamagedHelmet/DamagedHelmet.gltf",
+				"--renderdoc"
 			],
 			"stopAtEntry": false,
 			"cwd": "${workspaceFolder}",
