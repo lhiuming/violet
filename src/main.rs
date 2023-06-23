@@ -99,7 +99,7 @@ fn main() {
         window.poll_events();
 
         // Reload shaders
-        if window.click_R() {
+        if window.clicked('r') {
             shaders.reload_all();
         }
 

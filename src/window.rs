@@ -112,13 +112,8 @@ struct MessageHandler {
     pub mouse_right_button: bool, // most up-to-dated right-button down
     pub curr_drag_beg_mouse_pos: Option<(i16, i16)>, // current frame init mouse pos with right-button down
     pub curr_drag_end_mouse_pos: Option<(i16, i16)>, // current frame last mouse pos with right-button down
-    pub push_W: bool,
-    pub push_A: bool,
-    pub push_S: bool,
-    pub push_D: bool,
-    pub push_Q: bool,
-    pub push_E: bool,
-    pub click_R: bool,
+    pub push_states: [bool; u8::MAX as usize],
+    pub click_states: [bool; u8::MAX as usize],
 }
 
 impl MessageHandler {
@@ -130,13 +125,8 @@ impl MessageHandler {
             mouse_right_button: false,
             curr_drag_beg_mouse_pos: None,
             curr_drag_end_mouse_pos: None,
-            push_W: false,
-            push_A: false,
-            push_S: false,
-            push_D: false,
-            push_E: false,
-            push_Q: false,
-            click_R: false,
+            push_states: [false; u8::MAX as usize],
+            click_states: [false; u8::MAX as usize],
         }
     }
 
@@ -148,7 +138,25 @@ impl MessageHandler {
             None
         };
         self.curr_drag_end_mouse_pos = None;
-        self.click_R = false;
+        self.click_states.fill(false);
+    }
+
+    pub fn pushed(&self, c: char) -> bool {
+        self.push_states[c as usize]
+    }
+
+    pub fn clicked(&self, c: char) -> bool {
+        self.click_states[c as usize]
+    }
+}
+
+fn virtual_key_to_char(vk_code: VIRTUAL_KEY) -> Option<char> {
+    if (VK_A <= vk_code) && (vk_code <= VK_Z) {
+        char::from_u32((vk_code - VK_A + b'a' as u16) as u32)
+    } else if (VK_0 <= vk_code) && (vk_code <= VK_9) {
+        char::from_u32((vk_code - VK_0 + b'0' as u16) as u32)
+    } else {
+        None
     }
 }
 
@@ -226,17 +234,11 @@ unsafe extern "system" fn wnd_callback(
         }
         WM_KEYDOWN => {
             let vk_code = w_param as u16;
-            match vk_code {
-                VK_W => handler.borrow_mut().push_W = true,
-                VK_A => handler.borrow_mut().push_A = true,
-                VK_S => handler.borrow_mut().push_S = true,
-                VK_D => handler.borrow_mut().push_D = true,
-                VK_E => handler.borrow_mut().push_E = true,
-                VK_Q => handler.borrow_mut().push_Q = true,
-                _ => {
-                    //println!("Win32 message: unhandle key down {}", vk_code);
-                    return DefWindowProcW(hwnd, msg, w_param, l_param);
-                }
+            if let Some(vk_to_char) = virtual_key_to_char(vk_code) {
+                handler.borrow_mut().push_states[vk_to_char as usize] = true;
+            } else {
+                //println!("Win32 message: unhandle key down {}", vk_code);
+                return DefWindowProcW(hwnd, msg, w_param, l_param);
             }
             /*
             let repeat_count = (l_param & 0xFFFF) as u16;
@@ -250,18 +252,12 @@ unsafe extern "system" fn wnd_callback(
         }
         WM_KEYUP => {
             let vk_code = w_param as u16;
-            match vk_code {
-                VK_W => handler.borrow_mut().push_W = false,
-                VK_A => handler.borrow_mut().push_A = false,
-                VK_S => handler.borrow_mut().push_S = false,
-                VK_D => handler.borrow_mut().push_D = false,
-                VK_E => handler.borrow_mut().push_E = false,
-                VK_Q => handler.borrow_mut().push_Q = false,
-                VK_R => handler.borrow_mut().click_R = true,
-                _ => {
-                    //println!("Win32 message: unhandle key up {}", vk_code);
-                    return DefWindowProcW(hwnd, msg, w_param, l_param);
-                }
+            if let Some(vk_to_char) = virtual_key_to_char(vk_code) {
+                handler.borrow_mut().push_states[vk_to_char as usize] = false;
+                handler.borrow_mut().click_states[vk_to_char as usize] = true;
+            } else {
+                //println!("Win32 message: unhandle key up {}", vk_code);
+                return DefWindowProcW(hwnd, msg, w_param, l_param);
             }
             /*
             let repeat_count = (l_param & 0xFFFF) as u16;
@@ -447,9 +443,9 @@ impl Window {
             ret
         };
         (
-            make_dir(handler.push_W, handler.push_S),
-            make_dir(handler.push_D, handler.push_A),
-            make_dir(handler.push_E, handler.push_Q),
+            make_dir(handler.pushed('w'), handler.pushed('s')),
+            make_dir(handler.pushed('d'), handler.pushed('a')),
+            make_dir(handler.pushed('e'), handler.pushed('q')),
         )
     }
 
@@ -468,8 +464,12 @@ impl Window {
         }
     }
 
-    #[allow(non_snake_case)]
-    pub fn click_R(&self) -> bool {
-        self.message_handler.borrow().click_R
+    #[allow(dead_code)]
+    pub fn pushed(&self, key: char) -> bool {
+        self.message_handler.borrow().pushed(key)
+    }
+
+    pub fn clicked(&self, key: char) -> bool {
+        self.message_handler.borrow().clicked(key)
     }
 }
