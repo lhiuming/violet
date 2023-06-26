@@ -1,7 +1,9 @@
+use ash::extensions::khr;
 use ash::vk::{self};
 
 pub struct CommandBuffer {
     pub device: ash::Device,
+    pub raytracing_pipeline: khr::RayTracingPipeline,
     pub command_buffer: vk::CommandBuffer,
 }
 

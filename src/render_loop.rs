@@ -739,7 +739,7 @@ impl RednerLoop {
                 flags: vk::ImageCreateFlags::CUBE_COMPATIBLE, // required for viewed as cube
             });
             let array_uav = rg.create_texture_view(
-                skycube_texture,
+                skycube_texture.into(),
                 TextureViewDesc {
                     view_type: vk::ImageViewType::TYPE_2D_ARRAY,
                     format: vk::Format::B10G11R11_UFLOAT_PACK32,
@@ -786,7 +786,7 @@ impl RednerLoop {
         }
 
         let skycube = rg.create_texture_view(
-            skycube_texture,
+            skycube_texture.into(),
             TextureViewDesc {
                 view_type: vk::ImageViewType::CUBE,
                 format: vk::Format::B10G11R11_UFLOAT_PACK32,
@@ -819,7 +819,7 @@ impl RednerLoop {
                 vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
             ));
             let ds_view = rg.create_texture_view(
-                main_depth_stencil,
+                main_depth_stencil.into(),
                 TextureViewDesc {
                     view_type: vk::ImageViewType::TYPE_2D,
                     format: vk::Format::D24_UNORM_S8_UINT,
@@ -1033,7 +1033,7 @@ impl RednerLoop {
             //let color_target = rg.register_texture_view(swapchain.image_view[image_index as usize]);
             let color_target = rd.swapchain.image_view[image_index as usize];
             let stencil = rg.create_texture_view(
-                main_depth_stencil,
+                main_depth_stencil.into(),
                 TextureViewDesc {
                     view_type: vk::ImageViewType::TYPE_2D,
                     format: vk::Format::D24_UNORM_S8_UINT,
@@ -1081,10 +1081,46 @@ impl RednerLoop {
                 });
         }
 
+        // Ray tracing test
+        let ray_test_pipeline = shaders.create_raytracing_pipeline(ShaderDefinition {
+            virtual_path: "ray_test.hlsl",
+            entry_point: "raygen",
+            stage: crate::shader::ShaderStage::RayGen,
+        });
+        if let Some(ray_test_pipeline) = ray_test_pipeline {
+            let extent = rd.swapchain.extent;
+            let color = rd.swapchain.image_view[image_index as usize];
+
+            rg.new_pass("Ray Test", RenderPassType::Compute)
+                .pipeline(ray_test_pipeline)
+                .rw_texture("rw_color", color.into())
+                .render(move |cb, shaders, pass| unsafe {
+                    let pipeline = shaders.get_pipeline(ray_test_pipeline).unwrap();
+
+                    cb.bind_pipeline(vk::PipelineBindPoint::RAY_TRACING_KHR, pipeline.handle);
+
+                    let raygen_shader_binding_tables: vk::StridedDeviceAddressRegionKHR = todo!();
+                    let miss_shader_binding_tables: vk::StridedDeviceAddressRegionKHR = todo!();
+                    let hit_shader_binding_tables: vk::StridedDeviceAddressRegionKHR = todo!();
+                    let callable_shader_binding_tables: vk::StridedDeviceAddressRegionKHR = todo!();
+                    cb.raytracing_pipeline.cmd_trace_rays(
+                        cb.command_buffer,
+                        &raygen_shader_binding_tables,
+                        &miss_shader_binding_tables,
+                        &hit_shader_binding_tables,
+                        &callable_shader_binding_tables,
+                        extent.width,
+                        extent.height,
+                        1,
+                    );
+                });
+        }
+
         // Run render graph and fianlize
         {
             let cb = CommandBuffer {
                 device: rd.device.clone(),
+                raytracing_pipeline: rd.raytracing_pipeline_entry.clone(),
                 command_buffer,
             };
             rg.execute(rd, &cb, &shaders);

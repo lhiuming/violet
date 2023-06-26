@@ -1,6 +1,7 @@
 use std::collections::{hash_map::Entry, HashMap};
 use std::ffi::CString;
 
+use ash::extensions::khr;
 use ash::vk::{self, PushConstantRange};
 use rspirv_reflect::{self};
 use spirq::{self};
@@ -52,6 +53,7 @@ impl<T> Copy for Handle<T> {}
 
 pub struct PipelineDevice {
     device: ash::Device,
+    raytracing_entry: khr::RayTracingPipeline,
     pipeline_cache: vk::PipelineCache,
 }
 
@@ -59,6 +61,7 @@ impl PipelineDevice {
     pub fn new(rd: &RenderDevice) -> PipelineDevice {
         PipelineDevice {
             device: rd.device.clone(),
+            raytracing_entry: rd.raytracing_pipeline_entry.clone(),
             pipeline_cache: vk::PipelineCache::null(),
         }
     }
@@ -76,6 +79,7 @@ pub struct Shaders {
     pipeline_device: PipelineDevice,
     gfx_pipelines_map: HashMap<(ShaderDefinition, ShaderDefinition), Handle<Pipeline>>,
     compute_pipelines_map: HashMap<ShaderDefinition, Handle<Pipeline>>,
+    raytracing_pipelines_map: HashMap<ShaderDefinition, Handle<Pipeline>>,
     shader_loader: ShaderLoader,
 
     pipelines: Vec<Pipeline>,
@@ -87,6 +91,7 @@ impl Shaders {
             pipeline_device: PipelineDevice::new(&rd),
             gfx_pipelines_map: HashMap::new(),
             compute_pipelines_map: HashMap::new(),
+            raytracing_pipelines_map: HashMap::new(),
             shader_loader: ShaderLoader::new(),
             pipelines: Vec::new(),
         }
@@ -134,6 +139,28 @@ impl Shaders {
         if !self.compute_pipelines_map.contains_key(&key) {
             let cs = self.shader_loader.load(&self.pipeline_device, &cs_def)?;
             let pipeline_created = create_compute_pipeline(&self.pipeline_device, &cs_def, &cs);
+            if let Some(pipeline) = pipeline_created {
+                let handle = self.add_pipeline(pipeline);
+                self.compute_pipelines_map.insert(key, handle);
+                return Some(handle);
+            }
+            return None;
+        }
+
+        Some(*self.compute_pipelines_map.get(&key).unwrap())
+    }
+
+    pub fn create_raytracing_pipeline(
+        &mut self,
+        ray_gen_def: ShaderDefinition,
+    ) -> Option<Handle<Pipeline>> {
+        let key = ray_gen_def;
+
+        if !self.raytracing_pipelines_map.contains_key(&key) {
+            let cs = self
+                .shader_loader
+                .load(&self.pipeline_device, &ray_gen_def)?;
+            let pipeline_created = create_raytracing_pipeline(&self.pipeline_device, &cs);
             if let Some(pipeline) = pipeline_created {
                 let handle = self.add_pipeline(pipeline);
                 self.compute_pipelines_map.insert(key, handle);
@@ -244,6 +271,7 @@ pub enum ShaderStage {
     Compute,
     Vert,
     Frag,
+    RayGen,
 }
 
 #[derive(Hash, Eq, PartialEq, Copy, Clone)]
@@ -409,6 +437,7 @@ impl ShaderLoader {
             ShaderStage::Compute => "cs_5_0",
             ShaderStage::Vert => "vs_5_0",
             ShaderStage::Frag => "ps_5_0",
+            ShaderStage::RayGen => "cs_5_0",
         };
 
         // NOTE: -fspv-debug=vulkan-with-source requires extended instruction set support form the reflector
@@ -572,6 +601,45 @@ pub fn create_compute_pipeline(
         layout,
         property_map,
         push_constant_ranges,
+    })
+}
+
+pub fn create_raytracing_pipeline(
+    device: &PipelineDevice,
+    ray_gen: &CompiledShader,
+) -> Option<Pipeline> {
+    let ray_gen = vk::PipelineShaderStageCreateInfo::builder()
+        .module(ray_gen.program.shader_module)
+        .name(&ray_gen.program.entry_point_c);
+    //let any_hit = vk::PipelineShaderStageCreateInfo::builder();
+    //let miss = vk::PipelineShaderStageCreateInfo::builder();
+
+    let stages = &[*ray_gen]; // TODO other stages
+    let create_info = vk::RayTracingPipelineCreateInfoKHR::builder()
+    .flags(vk::PipelineCreateFlags::RAY_TRACING_NO_NULL_MISS_SHADERS_KHR | vk::PipelineCreateFlags::RAY_TRACING_NO_NULL_ANY_HIT_SHADERS_KHR) // TODO need it?
+    .stages(stages)
+    .groups(&[]) // todo what is this?
+    ;
+
+    let deferred_operation = vk::DeferredOperationKHR::null();
+    let pipeline = unsafe {
+        device
+            .raytracing_entry
+            .create_ray_tracing_pipelines(
+                vk::DeferredOperationKHR::null(), // not using deferred creation
+                device.pipeline_cache,
+                &[*create_info],
+                None,
+            )
+            .unwrap()[0]
+    };
+
+    Some(Pipeline {
+        handle: pipeline,
+        set_layouts: todo!(),
+        layout: todo!(),
+        property_map: todo!(),
+        push_constant_ranges: todo!(),
     })
 }
 

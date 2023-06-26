@@ -14,6 +14,7 @@ pub struct RenderDevice {
     pub device: ash::Device,
     pub swapchain_entry: SwapchainEntry,
     pub surface_entry: khr::Surface,
+    pub raytracing_pipeline_entry: khr::RayTracingPipeline,
 
     pub b_support_dynamic_rendering: bool,
     pub b_support_bindless: bool,
@@ -201,6 +202,9 @@ impl RenderDevice {
             swapchain_entry.create(&device, &surface, &surface_size)
         };
 
+        // Load ray tracing entry
+        let raytracing_pipeline_entry = khr::RayTracingPipeline::new(&instance, &device);
+
         RenderDevice {
             entry,
             instance,
@@ -209,6 +213,7 @@ impl RenderDevice {
             device,
             surface_entry,
             swapchain_entry,
+            raytracing_pipeline_entry,
 
             b_support_dynamic_rendering,
             b_support_bindless,

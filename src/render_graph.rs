@@ -383,7 +383,7 @@ pub struct RenderGraph<'a> {
     // Array indexed by RGHandle
     texture_descs: Vec<TextureDesc>,
     texture_view_descs: Vec<TextureViewDesc>,
-    texture_view_textures: Vec<RGHandle<Texture>>,
+    texture_view_textures: Vec<HandleEnum<Texture>>,
 
     // Textures
     textures: Vec<Texture>,          // by handle::id
@@ -414,7 +414,7 @@ impl<'a> RenderGraph<'a> {
 
     pub fn create_texture_view(
         &mut self,
-        texture: RGHandle<Texture>,
+        texture: HandleEnum<Texture>,
         desc: TextureViewDesc,
     ) -> RGHandle<TextureView> {
         let id = self.texture_view_descs.len();
@@ -452,7 +452,10 @@ impl<'a> RenderGraph<'a> {
         match handle_enum {
             HandleEnum::Inetrnal(handle) => {
                 let texture_handle = self.texture_view_textures.get(handle.id).unwrap();
-                self.texture_descs[texture_handle.id]
+                match texture_handle {
+                    HandleEnum::Inetrnal(handle) => self.texture_descs[handle.id],
+                    HandleEnum::External(texture) => texture.desc,
+                }
             }
             HandleEnum::External(view) => view.texture.desc,
         }
@@ -632,7 +635,10 @@ impl<'a> RenderGraph<'a> {
         for i in 0..self.texture_view_descs.len() {
             let desc = self.texture_view_descs[i];
             let texture_handle = self.texture_view_textures[i];
-            let texture = self.textures[texture_handle.id];
+            let texture = match texture_handle {
+                HandleEnum::Inetrnal(handle) => self.textures[handle.id],
+                HandleEnum::External(texture) => texture,
+            };
             let view = self
                 .cache
                 .texture_view_pool
