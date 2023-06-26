@@ -103,6 +103,10 @@ fn main() {
     let mut camera_pos = Vec3::new(0.0, -5.0, 2.0);
     let mut prev_time = std::time::Instant::now();
 
+    // Init sun
+    let mut sun_dir_theta = -0.271f32;
+    let mut sun_dir_phi = 0.524f32;
+
     while !window.should_close() {
         window.poll_events();
 
@@ -197,6 +201,25 @@ fn main() {
                 view_transform: view,
                 projection: proj,
             };
+        }
+
+        // Update sun light
+        {
+            let key_pair_to_delta = |key1: char, key2: char| -> f32 {
+                let mut delta = if window.pushed(key1) { 1.0f32 } else { 0.0f32 };
+                delta += if window.pushed(key2) { -1.0f32 } else { 0.0f32 };
+                delta
+            };
+
+            let angle_vel = 1.0;
+            sun_dir_theta += key_pair_to_delta('j', 'l') * angle_vel * delta_seconds;
+            sun_dir_phi += key_pair_to_delta('k', 'i') * angle_vel * delta_seconds;
+
+            render_scene.sun_dir = Vec3::new(
+                sun_dir_theta.cos() * sun_dir_phi.sin(),
+                sun_dir_theta.sin() * sun_dir_phi.sin(),
+                sun_dir_phi.cos(),
+            );
         }
 
         if window.clicked('c') {

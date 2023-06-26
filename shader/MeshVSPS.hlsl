@@ -191,7 +191,7 @@ void ps_main(
 	float3 position_ws = mul(view_params.inv_view_proj, float4(screen_pos * 2.0f - 1.0f, depth, 1.0f)).xyz;
 
 	float3 view = normalize(view_params.view_pos - position_ws);
-	float3 light = float3(0.0f, 0.0f, 1.0f);
+	float3 light = view_params.sun_dir;
 	float metallic = metal_rough.b;
 	float roughness = metal_rough.g;
 	float3 diffuseColor = base_color.rgb * (1.0f - metallic);

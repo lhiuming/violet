@@ -3,6 +3,7 @@
 struct PushConstants
 {
     float cube_width; 
+    float3 sun_dir;
 };
 [[vk::push_constant]]
 PushConstants pc;
@@ -34,8 +35,8 @@ void main(uint2 dispatch_thread_id: SV_DISPATCHTHREADID, uint3 group_id: SV_GROU
 	float ray_len = 100000.0f;
 
     // TODO input sum light data
-	float3 light_dir = float3(0.0f, 0.0f, 1.0f);
-	float3 light_color = float3(0.7f, 0.7f, 0.6f) * 3.14f;
+	float3 light_dir = pc.sun_dir;
+	float3 light_color = float3(0.7f, 0.7f, 0.6f) * 2;
 
 	float3 _transmittance;
 	float3 color = IntegrateScattering(ray_start, ray_dir, ray_len, light_dir, light_color, _transmittance);

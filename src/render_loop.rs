@@ -157,6 +157,9 @@ pub struct RenderScene {
     // Stuff to be rendered
     pub material_parmas: Vec<MaterialParams>,
     pub mesh_params: Vec<MeshParams>,
+
+    // Lighting settings
+    pub sun_dir: Vec3,
 }
 
 impl RenderScene {
@@ -305,6 +308,7 @@ impl RenderScene {
             material_texture_views: Vec::new(),
             material_parmas: Vec::new(),
             mesh_params: Vec::new(),
+            sun_dir: Vec3::new(0.0, 0.0, 1.0),
         }
     }
 
@@ -559,6 +563,7 @@ pub struct ViewParams {
     pub inv_view_proj: Mat4,
     pub view_pos: Vec3,
     pub padding: f32,
+    pub sun_dir: Vec3,
 }
 
 pub struct ViewInfo {
@@ -678,6 +683,7 @@ impl RednerLoop {
                 inv_view_proj: view_proj.inverse(),
                 view_pos: view_info.view_position,
                 padding: 0f32,
+                sun_dir: scene.sun_dir,
             };
 
             unsafe {
@@ -756,7 +762,9 @@ impl RednerLoop {
                 .render(move |cb, shaders, _pass| {
                     let pipeline = shaders.get_pipeline(pipeline).unwrap();
 
-                    let pc = PushConstantsBuilder::new().pushv(skycube_size as f32);
+                    let pc = PushConstantsBuilder::new()
+                        .pushv(skycube_size as f32)
+                        .push(&scene.sun_dir);
                     cb.push_constants(
                         pipeline.layout,
                         vk::ShaderStageFlags::COMPUTE,
