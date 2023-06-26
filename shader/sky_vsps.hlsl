@@ -1,6 +1,8 @@
 #include "atmosphere_felix_westin.hlsl"
 #include "scene_bindings.hlsl"
 
+TextureCube<float3> skycube;
+
 void vs_main(
 	uint vert_id : SV_VertexID,
 	out float4 hpos : SV_Position,
@@ -15,6 +17,7 @@ void vs_main(
 float4 ps_main(float3 position_ws : TEXCOORD0) : SV_Target0 {
 	float3 ray_start = view_params.view_pos;
 	float3 ray_dir = normalize(position_ws - ray_start);
+#if 0
 	float ray_len = 100000.0f;
 
 	float3 light_dir = float3(0.0f, 0.0f, 1.0f);
@@ -22,5 +25,9 @@ float4 ps_main(float3 position_ws : TEXCOORD0) : SV_Target0 {
 
 	float3 _transmittance;
 	float3 color = IntegrateScattering(ray_start, ray_dir, ray_len, light_dir, light_color, _transmittance);
+#else
+	float3 color = skycube.SampleLevel(sampler_linear_clamp, ray_dir, 0).rgb;
+#endif
+
 	return float4(color, 1.0f);
 }

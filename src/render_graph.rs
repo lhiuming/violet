@@ -585,7 +585,12 @@ impl<'a> RenderGraph<'a> {
                 let view = self.get_texture_view(*handle);
                 builder.image(name, view.image_view, vk::ImageLayout::GENERAL);
             }
-            let writes = builder.build(pipeline, set);
+            let writes = builder.build(pipeline, set, |prop_name, ty_name| {
+                println!(
+                    "Warning[RenderGraph::{}]: property {}:{} is not found.",
+                    pass.name, prop_name, ty_name
+                );
+            });
             unsafe {
                 rd.device.update_descriptor_sets(&writes, &[]);
             }
@@ -635,6 +640,7 @@ impl<'a> RenderGraph<'a> {
                 .unwrap_or_else(|| rd.create_texture_view(texture, desc).unwrap());
             self.texture_views.push(view);
         }
+        // Create (temp) descriptor set for each pass
         for pass in &self.passes {
             let pipeline = shaders.get_pipeline(pass.pipeline);
             let set = match pipeline {
@@ -650,7 +656,13 @@ impl<'a> RenderGraph<'a> {
                         self.cache.allocate_dessriptor_set(rd, set_layout)
                     }
                 }
-                None => vk::DescriptorSet::null(),
+                None => {
+                    println!(
+                        "Warning[RenderGraph]: pipeline not provided by pass {}; temporal descriptor set is not created.",
+                        pass.name
+                    );
+                    vk::DescriptorSet::null()
+                }
             };
 
             self.descriptor_sets.push(set);

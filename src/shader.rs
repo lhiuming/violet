@@ -812,11 +812,15 @@ impl<'a> DescriptorSetWriteBuilder<'a> {
         }
     }
 
-    pub fn build(
+    pub fn build<F>(
         &mut self,
         pipeline: &Pipeline,
         set: vk::DescriptorSet,
-    ) -> &[vk::WriteDescriptorSet] {
+        fn_unused: F,
+    ) -> &[vk::WriteDescriptorSet]
+    where
+        F: Fn(&str, &str),
+    {
         for (name, buffer_view) in &self.buffer_views {
             if let Some(info) = pipeline.property_map.get(*name) {
                 let write = vk::WriteDescriptorSet::builder()
@@ -826,6 +830,8 @@ impl<'a> DescriptorSetWriteBuilder<'a> {
                     .descriptor_type(info.descriptor_type)
                     .texel_buffer_view(std::slice::from_ref(buffer_view));
                 self.writes.push(*write);
+            } else {
+                fn_unused(name, "buffer_view");
             }
         }
 
@@ -838,6 +844,8 @@ impl<'a> DescriptorSetWriteBuilder<'a> {
                     .descriptor_type(info.descriptor_type)
                     .buffer_info(std::slice::from_ref(buffer_info));
                 self.writes.push(*write);
+            } else {
+                fn_unused(name, "buffer_info");
             }
         }
 
@@ -850,6 +858,8 @@ impl<'a> DescriptorSetWriteBuilder<'a> {
                     .descriptor_type(info.descriptor_type)
                     .image_info(std::slice::from_ref(image_info));
                 self.writes.push(*write);
+            } else {
+                fn_unused(name, "image_info");
             }
         }
 

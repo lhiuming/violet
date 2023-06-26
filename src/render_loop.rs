@@ -769,6 +769,15 @@ impl RednerLoop {
                 });
         }
 
+        let skycube = rg.create_texture_view(
+            skycube_texture,
+            TextureViewDesc {
+                view_type: vk::ImageViewType::CUBE,
+                format: vk::Format::B10G11R11_UFLOAT_PACK32,
+                aspect: vk::ImageAspectFlags::COLOR,
+            },
+        );
+
         // Draw mesh
         let mut hack = HackStuff {
             bindless_size: 1024,
@@ -799,15 +808,6 @@ impl RednerLoop {
                     view_type: vk::ImageViewType::TYPE_2D,
                     format: vk::Format::D24_UNORM_S8_UINT,
                     aspect: vk::ImageAspectFlags::DEPTH,
-                },
-            );
-
-            let skycube = rg.create_texture_view(
-                skycube_texture,
-                TextureViewDesc {
-                    view_type: vk::ImageViewType::CUBE,
-                    format: vk::Format::B10G11R11_UFLOAT_PACK32,
-                    aspect: vk::ImageAspectFlags::COLOR,
                 },
             );
 
@@ -1026,6 +1026,8 @@ impl RednerLoop {
             );
 
             rg.new_pass("Sky", RenderPassType::Graphics)
+                .pipeline(pipeline)
+                .texture("skycube", skycube.into())
                 .color_targets(&[ColorTarget {
                     view: color_target.into(),
                     load_op: ColorLoadOp::Load,
