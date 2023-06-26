@@ -200,6 +200,7 @@ void ps_main(
 	float3 lighting = cal_lighting(view, light, normal_ws, roughness, diffuseColor, specularColor) * light_inten;
 
 	// IBL fake
+	if (roughness < 0.0f)
 	{
 		float3 refl_dir = reflect(-view, normal_ws);
 		lighting += skycube.SampleLevel(sampler_linear_clamp, refl_dir, 0).rgb * 0.5f;
@@ -208,11 +209,21 @@ void ps_main(
 	float3 ambient = 0.1f;
 	lighting += diffuseColor * ambient;
 
+#if 0
+	output = float4(normal.xyz * .5f + .5f, 1.0f);
+//	output = float4(normal_ws * .5f + .5f, 1.0f);
+//	output = float4(base_color.rgb, 1.0f);
+//	output = float4(normal_map.rgb * 0.5f + 0.5f, 1.0f);
+//	output = float4(metal_rough.rgb, 1.0f);
+	return;
+#endif
+
 	// Material inspect rect
-	if ( (screen_pos.x > 0.25f) && (screen_pos.x < 0.3f)
-		&& (screen_pos.y > 0.25f) && (screen_pos.y < 0.3f) )
+	float2 rect_pos = float2(0.25f, 0.25f);
+	float2 rect_size = float2(0.1f, 0.14) * 2;
+	if ( all(screen_pos > rect_pos) && all(screen_pos < rect_pos + rect_size) )
 	{
-		float u = frac(screen_pos.x / 0.05f);
+		float u = frac((screen_pos.x - rect_pos.x) / rect_size.x);
 		if (u < 0.33f)
 			output = base_color;
 		else if (u < 0.66f)
@@ -222,14 +233,6 @@ void ps_main(
 		return;
 	}
 
-#if 0
-//	output = float4(normal.xyz * .5f + .5f, 1.0f);
-	output = float4(normal_ws * .5f + .5f, 1.0f);
-//	output = float4(base_color.rgb, 1.0f);
-//	output = float4(normal_map.rgb * 0.5f + 0.5f, 1.0f);
-//	output = float4(metal_rough.rgb, 1.0f);
-	return;
-#endif
 	output = float4(lighting, 1.0f);
 } 
 

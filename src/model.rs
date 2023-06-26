@@ -62,6 +62,7 @@ pub type Result<T> = std::result::Result<T, Error>;
 #[derive(Debug)]
 pub enum Error {
     NotExist(String),
+    GLTF(gltf::Error),
     General(String),
 }
 
@@ -142,7 +143,7 @@ pub fn load(path: &Path) -> Result<Model> {
                     );
                     import_gltf(path)
                 }
-                Error::General(msg) => Err(Error::General(msg)),
+                _ => Err(err),
             }
         }
     }
@@ -238,11 +239,8 @@ pub fn import_gltf_uncached(path: &Path) -> Result<Model> {
     // Read the document (structure) and blob data (buffers, imanges)
     let (document, buffers, images) = match gltf::import(path) {
         Ok(ret) => ret,
-        Err(_) => {
-            return Err(Error::General(format!(
-                "Failed to load glTF file: {}",
-                path.display()
-            )));
+        Err(gltf_err) => {
+            return Err(Error::GLTF(gltf_err));
         }
     };
     println!("Loaded glTF file: {}", path.display());
@@ -273,6 +271,8 @@ pub fn import_gltf_uncached(path: &Path) -> Result<Model> {
             // Get flatten transform
             let local_xform = Mat4::from_cols_array_2d(&node.transform().matrix());
             let xform = xform * local_xform;
+            //let xform_normal = Mat4::from_quat(xform.to_scale_rotation_translation().1);
+            let xform_normal = xform.inverse().transpose();
 
             if node.mesh().is_none() {
                 return xform;
@@ -399,7 +399,12 @@ pub fn import_gltf_uncached(path: &Path) -> Result<Model> {
                 model_mesh.normals.as_mut().unwrap().append(
                     &mut model_normals
                         .into_iter()
-                        .map(|v| xform.transform_vector3(Vec3::from(v)).to_array())
+                        .map(|v| {
+                            xform_normal
+                                .transform_vector3(Vec3::from(v))
+                                .normalize()
+                                .to_array()
+                        })
                         .collect(),
                 );
                 model_mesh.tangents.as_mut().unwrap().append(

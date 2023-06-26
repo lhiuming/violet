@@ -166,7 +166,7 @@ impl RenderScene {
     pub fn new(rd: &RenderDevice) -> RenderScene {
         // Buffer for whole scene
         let ib_size = 4 * 1024 * 1024;
-        let vb_size = 4 * 1024 * 1024;
+        let vb_size = 16 * 1024 * 1024;
         let index_buffer = AllocBuffer::new(
             rd.create_buffer(
                 ib_size,
@@ -317,6 +317,14 @@ impl RenderScene {
         //let material_texture = &mut self.material_texture;
         let index_buffer = &mut self.index_buffer;
         let vertex_buffer = &mut self.vertex_buffer;
+
+        // log
+        let total_vert_count = model
+            .meshes
+            .iter()
+            .map(|m| m.positions.len())
+            .sum::<usize>();
+        println!("Total Vertex: {}", total_vert_count);
 
         let texture_index_offset = self.material_textures.len() as u32;
         for image in &model.images {
@@ -506,7 +514,7 @@ impl RenderScene {
             {
                 index_count = mesh.indicies.len() as u32;
                 let (dst, offset) = index_buffer.alloc(index_count);
-                index_offset = offset / 4;
+                index_offset = offset / 2;
                 dst.copy_from_slice(&mesh.indicies);
             }
             // Upload position

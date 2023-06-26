@@ -1,6 +1,6 @@
 #![feature(core_intrinsics)]
-use std::env;
 use std::path::Path;
+use std::{env, f32::consts::PI};
 
 use glam::{Mat4, Vec3, Vec4};
 
@@ -78,8 +78,10 @@ fn main() {
     // Set up the scene
     let mut render_scene = RenderScene::new(&rd);
 
+    println!("Loading model: {}", &args[1]);
     let model = model::load(Path::new(&args[1]));
     if let Ok(model) = model {
+        println!("Uploading to GPU ...");
         render_scene.add(&rd, &model);
     } else {
         println!(
@@ -214,6 +216,9 @@ fn main() {
             let angle_vel = 1.0;
             sun_dir_theta += key_pair_to_delta('j', 'l') * angle_vel * delta_seconds;
             sun_dir_phi += key_pair_to_delta('k', 'i') * angle_vel * delta_seconds;
+
+            sun_dir_theta = sun_dir_theta % (PI * 2.0);
+            sun_dir_phi = sun_dir_phi.clamp(-0.5 * PI, 0.5 * PI);
 
             render_scene.sun_dir = Vec3::new(
                 sun_dir_theta.cos() * sun_dir_phi.sin(),

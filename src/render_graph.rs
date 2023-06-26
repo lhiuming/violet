@@ -646,10 +646,12 @@ impl<'a> RenderGraph<'a> {
             let set = match pipeline {
                 Some(pipeline) => {
                     if pass.descriptor_set_index as usize >= pipeline.set_layouts.len() {
+                        /* Totally happen in shader debug
                         println!(
                             "Warning: unused descriptor set {} for pass {}",
                             pass.descriptor_set_index, pass.name
                         );
+                        */
                         vk::DescriptorSet::null()
                     } else {
                         let set_layout = pipeline.set_layouts[pass.descriptor_set_index as usize];

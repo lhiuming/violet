@@ -5,36 +5,6 @@
 	"version": "0.2.0",
 	"configurations": [
 		{
-			"name": "Debug",
-			"type": "cppvsdbg",
-			"request": "launch",
-			"preLaunchTask": "rust: cargo build",
-			"program": "${workspaceFolder}/target/debug/violet.exe",
-			"args": [
-				"./assets/Box/Box.gltf",
-				"--renderdoc"
-			],
-			"stopAtEntry": false,
-			"cwd": "${workspaceFolder}",
-			"environment": [],
-			"console": "integratedTerminal"
-		},
-		{
-			"name": "Debug-Duck",
-			"type": "cppvsdbg",
-			"request": "launch",
-			"preLaunchTask": "rust: cargo build",
-			"program": "${workspaceFolder}/target/debug/violet.exe",
-			"args": [
-				"./assets/Duck/Duck.gltf",
-				"--renderdoc"
-			],
-			"stopAtEntry": false,
-			"cwd": "${workspaceFolder}",
-			"environment": [],
-			"console": "integratedTerminal"
-		},
-		{
 			"name": "Debug-Helmet",
 			"type": "cppvsdbg",
 			"request": "launch",
@@ -42,6 +12,21 @@
 			"program": "${workspaceFolder}/target/debug/violet.exe",
 			"args": [
 				"./assets/DamagedHelmet/DamagedHelmet.gltf",
+				"--renderdoc"
+			],
+			"stopAtEntry": false,
+			"cwd": "${workspaceFolder}",
+			"environment": [],
+			"console": "integratedTerminal"
+		},
+		{
+			"name": "Debug-Sponza",
+			"type": "cppvsdbg",
+			"request": "launch",
+			"preLaunchTask": "rust: cargo build nightly",
+			"program": "${workspaceFolder}/target/debug/violet.exe",
+			"args": [
+				"./assets/Sponza/Sponza.gltf",
 				"--renderdoc"
 			],
 			"stopAtEntry": false,
