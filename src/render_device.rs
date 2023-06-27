@@ -1,4 +1,5 @@
 use std::borrow::Cow;
+use std::collections::HashSet;
 use std::ffi::{CStr, CString};
 use std::io::Write;
 use std::os::raw::c_void;
@@ -15,9 +16,6 @@ pub struct RenderDevice {
     pub swapchain_entry: SwapchainEntry,
     pub surface_entry: khr::Surface,
     pub raytracing_pipeline_entry: khr::RayTracingPipeline,
-
-    pub b_support_dynamic_rendering: bool,
-    pub b_support_bindless: bool,
 
     pub gfx_queue: vk::Queue,
 
@@ -98,9 +96,18 @@ impl RenderDevice {
             *picked.expect("Vulkan: None physical device?!")
         };
 
+        // Get supported device extensions (for debug info)
+        let supported_device_extensions: HashSet<_> = unsafe {
+            let extension_properties = instance
+                .enumerate_device_extension_properties(physical_device)
+                .unwrap();
+            extension_properties
+                .iter()
+                .map(|ext| CStr::from_ptr(ext.extension_name.as_ptr()).to_owned())
+                .collect()
+        };
+
         // Create device
-        let b_support_dynamic_rendering;
-        let b_support_bindless;
         let gfx_queue_family_index;
         let device = {
             // Enumerate and pick queue families to create with the device
@@ -134,30 +141,57 @@ impl RenderDevice {
                     .build(),
             ];
             // Specify device extensions
-            let enabled_extension_names = [khr::Swapchain::name().as_ptr()];
+            let enabled_extension_names = [
+                khr::Swapchain::name().as_ptr(),
+                // Raytracing Extensions (and dependencies under vulkan 1.2)
+                vk::KhrRayTracingPipelineFn::name().as_ptr(),
+                vk::KhrAccelerationStructureFn::name().as_ptr(),
+                vk::KhrDeferredHostOperationsFn::name().as_ptr(),
+            ];
             // Query supported features
             let mut vulkan12_features = vk::PhysicalDeviceVulkan12Features::default();
             let mut vulkan13_features = vk::PhysicalDeviceVulkan13Features::default();
+            let mut rayTracingPipeline_feature =
+                vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default();
             let mut supported_features = vk::PhysicalDeviceFeatures2::builder()
                 .push_next(&mut vulkan12_features)
                 .push_next(&mut vulkan13_features)
+                .push_next(&mut rayTracingPipeline_feature)
                 .build();
             unsafe {
                 instance.get_physical_device_features2(physical_device, &mut supported_features);
             };
             // Check features
-            b_support_dynamic_rendering = vulkan13_features.dynamic_rendering == vk::TRUE;
-            b_support_bindless = (vulkan12_features.descriptor_binding_partially_bound == vk::TRUE)
-                & (vulkan12_features.runtime_descriptor_array == vk::TRUE);
+            // Dynamic Rendering
+            assert!(vulkan13_features.dynamic_rendering == vk::TRUE);
+            // Bindless
+            assert!(vulkan12_features.descriptor_binding_partially_bound == vk::TRUE);
+            assert!(vulkan12_features.runtime_descriptor_array == vk::TRUE);
+            // Ray Tracing
+            assert!(rayTracingPipeline_feature.ray_tracing_pipeline == vk::TRUE);
             // Finally, create the device, with all supproted feature enabled (for simplicity)
             let create_info = vk::DeviceCreateInfo::builder()
                 .queue_create_infos(&queue_create_infos)
                 .enabled_extension_names(&enabled_extension_names)
                 .push_next(&mut supported_features);
             unsafe {
-                instance
-                    .create_device(physical_device, &create_info, None)
-                    .expect("Failed to create Vulkan device")
+                let ret = instance.create_device(physical_device, &create_info, None);
+
+                // Return extension not present
+                if let Err(err) = ret {
+                    match err {
+                        vk::Result::ERROR_EXTENSION_NOT_PRESENT => {
+                            for name in enabled_extension_names.iter() {
+                                let name = CStr::from_ptr(*name);
+                                println!("Error[Vulkan]: extension not present: {:?}", name);
+                            }
+                            println!("NOTE: extensions supported may be limited if device is create under debugging layers, e.g. VK_LAYER_RENDERDOC_Capture");
+                        }
+                        _ => {}
+                    }
+                }
+
+                ret.unwrap()
             }
         };
 
@@ -185,10 +219,12 @@ impl RenderDevice {
             .unwrap();
             assert!(formats.len() > 0);
             // Debug
+            /*
             println!("Vulkan surface supported formats:");
             for format in formats.iter() {
                 println!("\t{:?}: {:?}", format.format, format.color_space);
             }
+            */
             Surface {
                 handle: vk_surface,
                 format: formats[0],
@@ -214,9 +250,6 @@ impl RenderDevice {
             surface_entry,
             swapchain_entry,
             raytracing_pipeline_entry,
-
-            b_support_dynamic_rendering,
-            b_support_bindless,
 
             gfx_queue,
 

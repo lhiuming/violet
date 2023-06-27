@@ -12,7 +12,6 @@
 			"program": "${workspaceFolder}/target/debug/violet.exe",
 			"args": [
 				"./assets/DamagedHelmet/DamagedHelmet.gltf",
-				"--renderdoc"
 			],
 			"stopAtEntry": false,
 			"cwd": "${workspaceFolder}",
@@ -27,7 +26,6 @@
 			"program": "${workspaceFolder}/target/debug/violet.exe",
 			"args": [
 				"./assets/Sponza/Sponza.gltf",
-				"--renderdoc"
 			],
 			"stopAtEntry": false,
 			"cwd": "${workspaceFolder}",

@@ -620,6 +620,13 @@ impl RednerLoop {
         use render_graph::*;
         let mut rg = RenderGraph::new(&mut self.render_graph_cache);
 
+        // Stupid shader compiling hack
+        let mut hack = HackStuff {
+            bindless_size: 1024,
+            set_layout_override: std::collections::HashMap::new(),
+            ray_recursiion_depth: 1,
+        };
+
         // Acquire target image
         let (image_index, b_image_suboptimal) = unsafe {
             rd.swapchain_entry.entry.acquire_next_image(
@@ -727,8 +734,8 @@ impl RednerLoop {
         // Update sky IBL cube
         let skycube_size = 64u32;
         let mut skycube_texture = RGHandle::null();
-        let skycube_gen =
-            shaders.create_compute_pipeline(ShaderDefinition::compute("sky_cube.hlsl", "main"));
+        let skycube_gen = shaders
+            .create_compute_pipeline(ShaderDefinition::compute("sky_cube.hlsl", "main"), &hack);
         if let Some(pipeline) = skycube_gen {
             skycube_texture = rg.create_texutre(TextureDesc {
                 width: skycube_size,
@@ -795,10 +802,6 @@ impl RednerLoop {
         );
 
         // Draw mesh
-        let mut hack = HackStuff {
-            bindless_size: 1024,
-            set_layout_override: std::collections::HashMap::new(),
-        };
         hack.set_layout_override
             .insert(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set_layout);
         let mesh_gfx_pipeline = shaders.create_gfx_pipeline(
@@ -1082,11 +1085,14 @@ impl RednerLoop {
         }
 
         // Ray tracing test
-        let ray_test_pipeline = shaders.create_raytracing_pipeline(ShaderDefinition {
-            virtual_path: "ray_test.hlsl",
-            entry_point: "raygen",
-            stage: crate::shader::ShaderStage::RayGen,
-        });
+        let ray_test_pipeline = shaders.create_raytracing_pipeline(
+            ShaderDefinition {
+                virtual_path: "ray_test.hlsl",
+                entry_point: "raygen",
+                stage: crate::shader::ShaderStage::RayGen,
+            },
+            &hack,
+        );
         if let Some(ray_test_pipeline) = ray_test_pipeline {
             let extent = rd.swapchain.extent;
             let color = rd.swapchain.image_view[image_index as usize];

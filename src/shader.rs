@@ -1,8 +1,8 @@
-use std::collections::{hash_map::Entry, HashMap};
+use std::collections::{hash_map::Entry, BTreeMap, HashMap};
 use std::ffi::CString;
 
 use ash::extensions::khr;
-use ash::vk::{self, PushConstantRange};
+use ash::vk;
 use rspirv_reflect::{self};
 use spirq::{self};
 
@@ -133,12 +133,14 @@ impl Shaders {
     pub fn create_compute_pipeline(
         &mut self,
         cs_def: ShaderDefinition,
+        hack: &HackStuff,
     ) -> Option<Handle<Pipeline>> {
         let key = cs_def;
 
         if !self.compute_pipelines_map.contains_key(&key) {
             let cs = self.shader_loader.load(&self.pipeline_device, &cs_def)?;
-            let pipeline_created = create_compute_pipeline(&self.pipeline_device, &cs_def, &cs);
+            let pipeline_created =
+                create_compute_pipeline(&self.pipeline_device, &cs_def, &cs, hack);
             if let Some(pipeline) = pipeline_created {
                 let handle = self.add_pipeline(pipeline);
                 self.compute_pipelines_map.insert(key, handle);
@@ -153,6 +155,7 @@ impl Shaders {
     pub fn create_raytracing_pipeline(
         &mut self,
         ray_gen_def: ShaderDefinition,
+        hack: &HackStuff,
     ) -> Option<Handle<Pipeline>> {
         let key = ray_gen_def;
 
@@ -160,7 +163,7 @@ impl Shaders {
             let cs = self
                 .shader_loader
                 .load(&self.pipeline_device, &ray_gen_def)?;
-            let pipeline_created = create_raytracing_pipeline(&self.pipeline_device, &cs);
+            let pipeline_created = create_raytracing_pipeline(&self.pipeline_device, &cs, &hack);
             if let Some(pipeline) = pipeline_created {
                 let handle = self.add_pipeline(pipeline);
                 self.compute_pipelines_map.insert(key, handle);
@@ -323,6 +326,7 @@ impl ShaderDefinition {
 pub struct HackStuff {
     pub bindless_size: u32, // Used to create descriptor layout
     pub set_layout_override: HashMap<u32, vk::DescriptorSetLayout>,
+    pub ray_recursiion_depth: u32,
 }
 
 pub struct CompiledShader {
@@ -433,11 +437,12 @@ impl ShaderLoader {
             .create_blob_with_encoding_from_str(shader_text)
             .ok()?;
 
+        // ref(raytracing): https://learn.microsoft.com/en-us/windows/win32/direct3d12/direct3d-12-raytracing-hlsl-shaders
         let target_profile = match stage {
             ShaderStage::Compute => "cs_5_0",
             ShaderStage::Vert => "vs_5_0",
             ShaderStage::Frag => "ps_5_0",
-            ShaderStage::RayGen => "cs_5_0",
+            ShaderStage::RayGen => "lib_6_3",
         };
 
         // NOTE: -fspv-debug=vulkan-with-source requires extended instruction set support form the reflector
@@ -448,6 +453,8 @@ impl ShaderLoader {
             "-Zi",
             // NOTE: requires Google extention in vulkan
             //"-fspv-reflect",
+            // Enable Raytracing ("Vulkan 1.1 with SPIR-V 1.4 is required for Raytracing" is printed by DXC)
+            "-fspv-target-env=vulkan1.1spirv1.4",
         ];
         let result = self.compiler.compile(
             &blob,
@@ -482,6 +489,163 @@ pub struct PipelineDescriptorInfo {
     // TODO type? array len?
 }
 
+// TODO file empty layouts?
+fn create_merged_descriptor_set_layouts(
+    device: &ash::Device,
+    stages_info: &[(vk::ShaderStageFlags, &rspirv_reflect::Reflection)],
+    property_map: &mut HashMap<String, PipelineDescriptorInfo>,
+    hack: &HackStuff,
+) -> Vec<vk::DescriptorSetLayout> {
+    // NOTE: set layout is not allowed to be null (except for pipeline library?)
+    let fill_empty_set = true;
+
+    // Merge descriptor sets info
+    let mut merged_descritpr_sets: HashMap<u32, _> = HashMap::new();
+    for (stage, relfection) in stages_info {
+        for (set_index, set_bindings) in relfection.get_descriptor_sets().unwrap() {
+            // Get or create a merged set record
+            let merged_set: &mut BTreeMap<u32, vk::DescriptorSetLayoutBinding> =
+                merged_descritpr_sets
+                    .entry(set_index)
+                    .or_insert_with(|| BTreeMap::new());
+            // Merge bindings from this stage
+            for (binding_index, descriptor_info) in set_bindings {
+                // From relfection info to vk struct
+                // NOTE: is this safe?
+                let descriptor_type = vk::DescriptorType::from_raw(descriptor_info.ty.0 as i32);
+                let count = match descriptor_info.binding_count {
+                    rspirv_reflect::BindingCount::One => 1,
+                    rspirv_reflect::BindingCount::StaticSized(size) => size as u32,
+                    rspirv_reflect::BindingCount::Unbounded => hack.bindless_size,
+                };
+                // New or merge binding record (stage flags)
+                match merged_set.entry(binding_index) {
+                    std::collections::btree_map::Entry::Vacant(entry) => {
+                        // TODO add extension flags for bindless textures
+                        let binding = vk::DescriptorSetLayoutBinding::builder()
+                            .binding(binding_index)
+                            .descriptor_type(descriptor_type)
+                            .descriptor_count(count)
+                            .stage_flags(*stage);
+                        entry.insert(binding.build());
+                    }
+                    std::collections::btree_map::Entry::Occupied(entry) => {
+                        let binding = entry.into_mut();
+                        assert!(descriptor_type == binding.descriptor_type);
+                        assert!(count == binding.descriptor_count);
+                        binding.stage_flags |= *stage;
+                    }
+                }
+
+                // Collect property for later use
+                let prop_info = PipelineDescriptorInfo {
+                    set_index,
+                    binding_index,
+                    descriptor_type,
+                };
+                match property_map.entry(descriptor_info.name.clone()) {
+                    Entry::Occupied(entry) => {
+                        // sanity check
+                        assert_eq!(entry.get(), &prop_info);
+                    }
+                    Entry::Vacant(entry) => {
+                        entry.insert(prop_info);
+                    }
+                }
+            }
+        }
+    }
+
+    // Make vk struct array
+    let mut set_layouts = Vec::new();
+    if merged_descritpr_sets.len() > 0 {
+        let last_set_index = merged_descritpr_sets.keys().max().unwrap();
+        set_layouts.resize(
+            (last_set_index + 1) as usize,
+            vk::DescriptorSetLayout::null(),
+        );
+
+        merged_descritpr_sets
+            .drain()
+            .for_each(|(set_index, bindings)| {
+                // Check override
+                if hack.set_layout_override.contains_key(&set_index) {
+                    set_layouts[set_index as usize] = hack.set_layout_override[&set_index];
+                    println!("Overriding set layout for set {}", set_index);
+                    return;
+                }
+                // Create set layout
+                let set_index = set_index as usize;
+                let bindings = bindings
+                    .into_values()
+                    .collect::<Vec<vk::DescriptorSetLayoutBinding>>();
+                let create_info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
+                assert!(set_layouts.len() > set_index);
+                match unsafe { device.create_descriptor_set_layout(&create_info, None) } {
+                    Ok(set_layout) => {
+                        set_layouts[set_index] = set_layout;
+                    }
+                    Err(e) => {
+                        println!(
+                            "Failed to create descriptor set layout: {:?}, from bindings {:?}",
+                            e, bindings
+                        );
+                    }
+                }
+            });
+    }
+
+    // Fill empty set layouts
+    if fill_empty_set {
+        for set_layout in &mut set_layouts {
+            if *set_layout == vk::DescriptorSetLayout::null() {
+                let create_info = vk::DescriptorSetLayoutCreateInfo::builder();
+                *set_layout =
+                    unsafe { device.create_descriptor_set_layout(&create_info, None) }.unwrap();
+            }
+        }
+    }
+
+    set_layouts
+}
+
+// Create all push constant ranges use in all stages
+fn make_merged_push_constant_ranges(
+    stages_info: &[(vk::ShaderStageFlags, &rspirv_reflect::Reflection)],
+) -> Vec<vk::PushConstantRange> {
+    let mut push_constant_ranges = Vec::<vk::PushConstantRange>::new();
+    for (stage_flag, reflection) in stages_info {
+        let stage_flag = *stage_flag;
+        if let Ok(Some(info)) = reflection.get_push_constant_range() {
+            // merge to prev range entry
+            let mut merged = false;
+            for range in &mut push_constant_ranges {
+                if (range.offset == info.offset) && (range.size == info.size) {
+                    range.stage_flags |= stage_flag;
+                    merged = true;
+                    break;
+                } else {
+                    // sanity check: ranges are not overlaped
+                    assert!(
+                        (range.offset + range.size) <= info.offset
+                            || (info.offset + info.size) <= range.offset
+                    );
+                }
+            }
+            // else, this is a new range
+            if !merged {
+                push_constant_ranges.push(vk::PushConstantRange {
+                    stage_flags: stage_flag,
+                    offset: info.offset,
+                    size: info.size,
+                });
+            }
+        }
+    }
+
+    push_constant_ranges
+}
+
 // TODO should be allow copy, but required to allow Handle copy
 pub struct Pipeline {
     pub handle: vk::Pipeline,
@@ -497,78 +661,24 @@ pub fn create_compute_pipeline(
     device: &PipelineDevice,
     shader_def: &ShaderDefinition,
     compiled: &CompiledShader,
+    hack: &HackStuff,
 ) -> Option<Pipeline> {
     let pipeline_cache = device.pipeline_cache;
     let device = &device.device;
 
     let program = &compiled.program;
-    let reflect_module = &program.reflect_module;
+    //    let reflect_module = &program.reflect_module;
+    let stage_info = [(vk::ShaderStageFlags::COMPUTE, &program.reflect_module)];
 
     // Reflection info to be collected
     let mut property_map = HashMap::new();
 
-    // Create all set layouts used in compute
-    let mut set_layouts: Vec<vk::DescriptorSetLayout> = Vec::new();
-    let reflected_descriptor_sets = reflect_module.get_descriptor_sets().unwrap(); // todo
-    let last_set = reflected_descriptor_sets
-        .keys()
-        .reduce(|last_set, set| if set > last_set { set } else { last_set })
-        .map(|arg| *arg);
-    if let Some(last_set) = last_set {
-        set_layouts.resize((last_set + 1) as usize, vk::DescriptorSetLayout::null());
-    }
-    reflected_descriptor_sets
-        .iter()
-        .for_each(|(set, bindings)| {
-            let bindings_info = bindings
-                .iter()
-                .map(|(binding, descriptor_info)| {
-                    let vk_binding = vk::DescriptorSetLayoutBinding {
-                        binding: *binding,
-                        descriptor_type: vk::DescriptorType::from_raw(descriptor_info.ty.0 as i32),
-                        descriptor_count: match descriptor_info.binding_count {
-                            rspirv_reflect::BindingCount::One => 1,
-                            rspirv_reflect::BindingCount::StaticSized(size) => size as u32,
-                            rspirv_reflect::BindingCount::Unbounded => todo!(),
-                        },
-                        stage_flags: vk::ShaderStageFlags::COMPUTE,
-                        p_immutable_samplers: std::ptr::null(),
-                    };
-                    // collect property
-                    property_map.insert(
-                        descriptor_info.name.clone(),
-                        PipelineDescriptorInfo {
-                            set_index: *set,
-                            binding_index: *binding,
-                            descriptor_type: vk_binding.descriptor_type,
-                        },
-                    );
-                    vk_binding
-                })
-                .collect::<Vec<vk::DescriptorSetLayoutBinding>>();
-            let create_info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings_info);
-            match unsafe { device.create_descriptor_set_layout(&create_info, None) } {
-                Ok(set_layout) => {
-                    assert!(set_layouts.len() as u32 > *set);
-                    set_layouts[*set as usize] = set_layout;
-                }
-                Err(_) => todo!(),
-            }
-        });
+    // Create all set layouts used
+    let set_layouts =
+        create_merged_descriptor_set_layouts(device, &stage_info, &mut property_map, hack);
 
     // Create all push constant range use in shader
-    let push_constant_range = {
-        let pc_range = reflect_module.get_push_constant_range().unwrap();
-        pc_range.map(|info| vk::PushConstantRange {
-            stage_flags: vk::ShaderStageFlags::COMPUTE,
-            offset: info.offset,
-            size: info.size,
-        })
-    };
-    let mut push_constant_ranges = Vec::<PushConstantRange>::new();
-    if push_constant_range.is_some() {
-        push_constant_ranges.push(push_constant_range.unwrap());
-    }
+    let push_constant_ranges = make_merged_push_constant_ranges(&stage_info);
 
     // Create pipeline layout
     let layout = {
@@ -607,21 +717,60 @@ pub fn create_compute_pipeline(
 pub fn create_raytracing_pipeline(
     device: &PipelineDevice,
     ray_gen: &CompiledShader,
+    hack: &HackStuff,
 ) -> Option<Pipeline> {
+    let stages_info = [(
+        vk::ShaderStageFlags::RAYGEN_KHR,
+        &ray_gen.program.reflect_module,
+    )];
+
+    // Reflection info to be collect
+    let mut property_map = HashMap::new();
+
+    // Set layout for all stages
+    let set_layouts =
+        create_merged_descriptor_set_layouts(&device.device, &stages_info, &mut property_map, hack);
+
+    // Push constant for all stages
+    let push_constant_ranges = make_merged_push_constant_ranges(&stages_info);
+
+    // Create pipeline layout
+    let layout = {
+        let create_info = vk::PipelineLayoutCreateInfo::builder()
+            .set_layouts(&set_layouts)
+            .push_constant_ranges(&push_constant_ranges);
+        unsafe { device.device.create_pipeline_layout(&create_info, None) }.ok()?
+    };
+
     let ray_gen = vk::PipelineShaderStageCreateInfo::builder()
+        .stage(vk::ShaderStageFlags::RAYGEN_KHR)
         .module(ray_gen.program.shader_module)
         .name(&ray_gen.program.entry_point_c);
     //let any_hit = vk::PipelineShaderStageCreateInfo::builder();
     //let miss = vk::PipelineShaderStageCreateInfo::builder();
+    let stages = [*ray_gen];
 
-    let stages = &[*ray_gen]; // TODO other stages
+    let group = vk::RayTracingShaderGroupCreateInfoKHR::builder()
+        .ty(vk::RayTracingShaderGroupTypeKHR::TRIANGLES_HIT_GROUP)
+        .general_shader(vk::SHADER_UNUSED_KHR)
+        .closest_hit_shader(vk::SHADER_UNUSED_KHR) // TODO
+        .any_hit_shader(vk::SHADER_UNUSED_KHR) // TODO
+        .intersection_shader(vk::SHADER_UNUSED_KHR)
+        .build();
+    let groups = [group];
+
     let create_info = vk::RayTracingPipelineCreateInfoKHR::builder()
-    .flags(vk::PipelineCreateFlags::RAY_TRACING_NO_NULL_MISS_SHADERS_KHR | vk::PipelineCreateFlags::RAY_TRACING_NO_NULL_ANY_HIT_SHADERS_KHR) // TODO need it?
-    .stages(stages)
-    .groups(&[]) // todo what is this?
-    ;
+        .flags(
+            vk::PipelineCreateFlags::RAY_TRACING_NO_NULL_MISS_SHADERS_KHR
+                | vk::PipelineCreateFlags::RAY_TRACING_NO_NULL_ANY_HIT_SHADERS_KHR,
+        ) // TODO need it?
+        .stages(&stages)
+        .groups(&groups)
+        .max_pipeline_ray_recursion_depth(hack.ray_recursiion_depth) // TODO rt depth
+        //.library_info(todo!())
+        //.dynamic_state(dynamic_state)
+        .layout(layout);
 
-    let deferred_operation = vk::DeferredOperationKHR::null();
     let pipeline = unsafe {
         device
             .raytracing_entry
@@ -636,10 +785,10 @@ pub fn create_raytracing_pipeline(
 
     Some(Pipeline {
         handle: pipeline,
-        set_layouts: todo!(),
-        layout: todo!(),
-        property_map: todo!(),
-        push_constant_ranges: todo!(),
+        set_layouts,
+        layout,
+        property_map,
+        push_constant_ranges,
     })
 }
 
@@ -652,123 +801,20 @@ pub fn create_graphics_pipeline(
     let pipeline_cache = device.pipeline_cache;
     let device = &device.device;
 
-    let shaders = [
-        (vk::ShaderStageFlags::VERTEX, vs),
-        (vk::ShaderStageFlags::FRAGMENT, ps),
+    let stages_info = [
+        (vk::ShaderStageFlags::VERTEX, &vs.program.reflect_module),
+        (vk::ShaderStageFlags::FRAGMENT, &ps.program.reflect_module),
     ];
 
     // Reflection info to be collected
     let mut property_map = HashMap::new();
 
-    // Collect and merge descriptor set from all stages
-    type MergedSet = HashMap<u32, vk::DescriptorSetLayoutBinding>;
-    type MergedLayout = HashMap<u32, MergedSet>;
-    let mut merged_layout = MergedLayout::new();
-    let mut last_set = 0;
-    for shader in shaders {
-        let stage = shader.0;
-        let reflect = &shader.1.program.reflect_module;
-        for (set, set_bindings) in reflect.get_descriptor_sets().unwrap().iter() {
-            last_set = if *set > last_set { *set } else { last_set };
-            let merged_set = match merged_layout.entry(*set) {
-                Entry::Occupied(o) => o.into_mut(),
-                Entry::Vacant(v) => v.insert(MergedSet::new()),
-            };
-            for (binding, descriptor_info) in set_bindings {
-                let descriptor_type = vk::DescriptorType::from_raw(descriptor_info.ty.0 as i32);
-                let count = match descriptor_info.binding_count {
-                    rspirv_reflect::BindingCount::One => 1,
-                    rspirv_reflect::BindingCount::StaticSized(size) => size as u32,
-                    rspirv_reflect::BindingCount::Unbounded => hack.bindless_size,
-                };
-                if let Some(binding_info) = merged_set.get_mut(binding) {
-                    assert!(descriptor_type == binding_info.descriptor_type);
-                    assert!(count == binding_info.descriptor_count); // really?
-                    binding_info.stage_flags |= stage;
-                } else {
-                    // TODO add extension flags for bindless textures
-                    let binding_info = vk::DescriptorSetLayoutBinding::builder()
-                        .binding(*binding)
-                        .descriptor_type(descriptor_type)
-                        .descriptor_count(count)
-                        .stage_flags(stage);
-                    merged_set.insert(*binding, binding_info.build());
-                }
-
-                // Collect properties for later use
-                let prop_info = PipelineDescriptorInfo {
-                    set_index: *set,
-                    binding_index: *binding,
-                    descriptor_type,
-                };
-                match property_map.entry(descriptor_info.name.clone()) {
-                    Entry::Occupied(entry) => {
-                        assert_eq!(entry.get(), &prop_info);
-                    }
-                    Entry::Vacant(entry) => {
-                        entry.insert(prop_info);
-                    }
-                }
-            }
-        }
-    }
-
-    let mut set_layouts: Vec<vk::DescriptorSetLayout> = Vec::new();
-    if merged_layout.len() > 0 {
-        set_layouts.resize((last_set + 1) as usize, vk::DescriptorSetLayout::null());
-        merged_layout.drain().for_each(|(set, bindings)| {
-            if hack.set_layout_override.contains_key(&set) {
-                set_layouts[set as usize] = hack.set_layout_override[&set];
-                println!("Overriding set layout for set {}", set);
-                return;
-            }
-
-            let bindings = bindings
-                .into_values()
-                .collect::<Vec<vk::DescriptorSetLayoutBinding>>();
-            let create_info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
-            assert!(set_layouts.len() as u32 > set);
-            match unsafe { device.create_descriptor_set_layout(&create_info, None) } {
-                Ok(set_layout) => {
-                    set_layouts[set as usize] = set_layout;
-                }
-                Err(_) => todo!(),
-            }
-        });
-    }
-
-    // Fill empty set layouts
-    for set_layout in &mut set_layouts {
-        if *set_layout == vk::DescriptorSetLayout::null() {
-            let create_info = vk::DescriptorSetLayoutCreateInfo::builder();
-            *set_layout =
-                unsafe { device.create_descriptor_set_layout(&create_info, None) }.unwrap();
-        }
-    }
+    // Create all set layouts used in all stages
+    let set_layouts =
+        create_merged_descriptor_set_layouts(device, &stages_info, &mut property_map, hack);
 
     // Create all push constant ranges use in all stages
-    let mut push_constant_ranges = Vec::<PushConstantRange>::new();
-    for (stage_flag, shader) in shaders {
-        if let Ok(Some(info)) = shader.program.reflect_module.get_push_constant_range() {
-            // merge to prev range
-            let mut merged = false;
-            for range in &mut push_constant_ranges {
-                if (range.offset == info.offset) && (range.size == info.size) {
-                    range.stage_flags |= stage_flag;
-                    merged = true;
-                    break;
-                }
-            }
-            // else, this is a new range
-            if !merged {
-                push_constant_ranges.push(vk::PushConstantRange {
-                    stage_flags: stage_flag,
-                    offset: info.offset,
-                    size: info.size,
-                });
-            }
-        }
-    }
+    let push_constant_ranges = make_merged_push_constant_ranges(&stages_info);
 
     // Create pipeline layout
     let layout = {
