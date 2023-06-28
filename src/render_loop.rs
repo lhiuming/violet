@@ -1,7 +1,7 @@
 use std::mem::{self, size_of};
 use std::slice;
 
-use ash::vk::{self};
+use ash::vk::{self, Handle};
 use glam::{Mat4, Vec3};
 
 use crate::command_buffer::{CommandBuffer, StencilOps};
@@ -21,7 +21,7 @@ pub struct AllocBuffer {
 impl AllocBuffer {
     pub fn new(buffer: Buffer) -> AllocBuffer {
         AllocBuffer {
-            buffer: buffer,
+            buffer,
             next_pos: 0,
         }
     }
@@ -147,6 +147,9 @@ pub struct RenderScene {
     pub vertex_buffer: AllocBuffer,
     pub index_buffer: AllocBuffer,
 
+    // todo
+    pub shader_binding_table: Buffer,
+
     // Global texture to store all loaded textures
     //pub material_texture: AllocTexture2D,
 
@@ -168,28 +171,26 @@ impl RenderScene {
         let ib_size = 4 * 1024 * 1024;
         let vb_size = 16 * 1024 * 1024;
         let index_buffer = AllocBuffer::new(
-            rd.create_buffer(
-                ib_size,
-                vk::BufferUsageFlags::INDEX_BUFFER,
-                vk::Format::UNDEFINED,
-            )
-            .unwrap(),
+            rd.create_buffer(ib_size, vk::BufferUsageFlags::INDEX_BUFFER)
+                .unwrap(),
         );
         let vertex_buffer = AllocBuffer::new(
-            rd.create_buffer(
-                vb_size,
-                vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER,
-                vk::Format::R32_UINT,
-            )
-            .unwrap(),
+            rd.create_buffer(vb_size, vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER)
+                .unwrap(),
         );
+        let vertex_buffer_view = rd
+            .create_buffer_view(vertex_buffer.buffer.buffer, vk::Format::R32_UINT)
+            .unwrap();
+
+        let shader_binding_table = rd
+            .create_buffer(64, vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR)
+            .unwrap();
 
         // View parameter constant buffer
         let view_params_cb = rd
             .create_buffer(
                 mem::size_of::<ViewParams>() as u64,
                 vk::BufferUsageFlags::UNIFORM_BUFFER,
-                vk::Format::UNDEFINED,
             )
             .unwrap();
 
@@ -275,7 +276,7 @@ impl RenderScene {
                 .dst_set(descriptor_set)
                 .dst_binding(VERTEX_BUFFER_BINDING_INDEX)
                 .descriptor_type(vk::DescriptorType::UNIFORM_TEXEL_BUFFER)
-                .texel_buffer_view(slice::from_ref(&vertex_buffer.buffer.srv.unwrap()))
+                .texel_buffer_view(slice::from_ref(&vertex_buffer_view))
                 .build();
             let cbuffer_info = vk::DescriptorBufferInfo::builder()
                 .buffer(view_params_cb.buffer)
@@ -301,8 +302,9 @@ impl RenderScene {
             descriptor_pool,
             descriptor_set_layout,
             descriptor_set,
-            vertex_buffer: vertex_buffer,
-            index_buffer: index_buffer,
+            vertex_buffer,
+            index_buffer,
+            shader_binding_table,
             //material_texture: material_texture,
             material_textures: Vec::new(),
             material_texture_views: Vec::new(),
@@ -345,11 +347,7 @@ impl RenderScene {
 
             // Create staging buffer
             let staging_buffer = rd
-                .create_buffer(
-                    texel_count as u64 * 4,
-                    vk::BufferUsageFlags::TRANSFER_SRC,
-                    vk::Format::UNDEFINED,
-                )
+                .create_buffer(texel_count as u64 * 4, vk::BufferUsageFlags::TRANSFER_SRC)
                 .unwrap();
 
             // Read to staging buffer
@@ -951,79 +949,6 @@ impl RednerLoop {
                 });
         }
 
-        {
-            /*
-            // Transition for compute
-            {
-                let sub_res_range = vk::ImageSubresourceRange::builder()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .layer_count(1)
-                    .level_count(1);
-                let image_barrier = vk::ImageMemoryBarrier::builder()
-                    .old_layout(swapchain_image_layout)
-                    .new_layout(vk::ImageLayout::GENERAL)
-                    .subresource_range(*sub_res_range)
-                    .image(swapchain.image[image_index as usize]);
-                unsafe {
-                    device.cmd_pipeline_barrier(
-                        command_buffer,
-                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                        vk::PipelineStageFlags::COMPUTE_SHADER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[*image_barrier],
-                    );
-                }
-                swapchain_image_layout = image_barrier.new_layout;
-            }
-
-            // Set and dispatch compute
-            {
-                unsafe {
-                    device.cmd_bind_pipeline(
-                        command_buffer,
-                        vk::PipelineBindPoint::COMPUTE,
-                        pipeline.handle,
-                    )
-                }
-
-                // Bind the swapchain image (the only descriptor)
-                unsafe {
-                    let image_info = vk::DescriptorImageInfo::builder()
-                        .image_view(swapchain.image_view[image_index as usize])
-                        .image_layout(swapchain_image_layout);
-                    let image_infos = [image_info.build()];
-                    let write = vk::WriteDescriptorSet::builder()
-                        .dst_set(pipeline.descriptor_sets[0])
-                        .dst_binding(0)
-                        .dst_array_element(0)
-                        .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                        .image_info(&image_infos);
-                    let writes = [write.build()];
-                    device.update_descriptor_sets(&writes, &[]);
-                }
-
-                unsafe {
-                    device.cmd_bind_descriptor_sets(
-                        command_buffer,
-                        vk::PipelineBindPoint::COMPUTE,
-                        pipeline.layout,
-                        0,
-                        &pipeline.descriptor_sets,
-                        &[],
-                    )
-                }
-
-                let dispatch_x = (swapchain.extent.width + 7) / 8;
-                let dispatch_y = (swapchain.extent.height + 3) / 4;
-                unsafe {
-                    device.cmd_dispatch(command_buffer, dispatch_x, dispatch_y, 1);
-                }
-            }
-            */
-        }
-
         // Draw (procedure) Sky
         let sky_pipeline = shaders.create_gfx_pipeline(
             ShaderDefinition::vert("sky_vsps.hlsl", "vs_main"),
@@ -1097,18 +1022,65 @@ impl RednerLoop {
             let extent = rd.swapchain.extent;
             let color = rd.swapchain.image_view[image_index as usize];
 
-            rg.new_pass("Ray Test", RenderPassType::Compute)
+            // Fill SBT
+            let sbt = &scene.shader_binding_table;
+            let handle_size = rd
+                .physical_device_ray_tracing_pipeline_properties
+                .shader_group_handle_size as usize;
+            {
+                let pipeline = shaders.get_pipeline(ray_test_pipeline).unwrap();
+
+                unsafe {
+                    let reygen_handle_data = rd
+                        .raytracing_pipeline_entry
+                        .get_ray_tracing_shader_group_handles(pipeline.handle, 0, 1, handle_size)
+                        .unwrap();
+
+                    // copy to SBT
+                    let data = std::slice::from_raw_parts_mut(sbt.data as *mut u8, handle_size);
+                    data.copy_from_slice(&reygen_handle_data);
+                };
+            }
+
+            rg.new_pass("Ray Test", RenderPassType::RayTracing)
                 .pipeline(ray_test_pipeline)
                 .rw_texture("rw_color", color.into())
-                .render(move |cb, shaders, pass| unsafe {
+                .mannual_transition(|ti, pass| {
+                    let rw_color = ti.get_image(pass.get_rw_textures("rw_color"));
+                    ti.cmd_buf.transition_image_layout(
+                        rw_color,
+                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                        //vk::PipelineStageFlags::COMPUTE_SHADER,
+                        vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
+                        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                        vk::ImageLayout::GENERAL,
+                        vk::ImageSubresourceRange {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            base_mip_level: 0,
+                            level_count: 1,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        },
+                    );
+                })
+                .render(move |cb, shaders, _pass| unsafe {
                     let pipeline = shaders.get_pipeline(ray_test_pipeline).unwrap();
 
                     cb.bind_pipeline(vk::PipelineBindPoint::RAY_TRACING_KHR, pipeline.handle);
 
-                    let raygen_shader_binding_tables: vk::StridedDeviceAddressRegionKHR = todo!();
-                    let miss_shader_binding_tables: vk::StridedDeviceAddressRegionKHR = todo!();
-                    let hit_shader_binding_tables: vk::StridedDeviceAddressRegionKHR = todo!();
-                    let callable_shader_binding_tables: vk::StridedDeviceAddressRegionKHR = todo!();
+                    let sbt_memory = scene.shader_binding_table.memory.as_raw();
+                    let handle_size = handle_size as u64;
+
+                    // TODO build shader tables
+                    let raygen_shader_binding_tables = vk::StridedDeviceAddressRegionKHR::builder()
+                        .size(handle_size) // only shader, no resources
+                        .stride(handle_size) // equal to size for raygen
+                        .device_address(sbt_memory)
+                        .build();
+                    let miss_shader_binding_tables = vk::StridedDeviceAddressRegionKHR::default();
+                    let hit_shader_binding_tables = vk::StridedDeviceAddressRegionKHR::default();
+                    let callable_shader_binding_tables =
+                        vk::StridedDeviceAddressRegionKHR::default();
                     cb.raytracing_pipeline.cmd_trace_rays(
                         cb.command_buffer,
                         &raygen_shader_binding_tables,
@@ -1127,6 +1099,7 @@ impl RednerLoop {
             let cb = CommandBuffer {
                 device: rd.device.clone(),
                 raytracing_pipeline: rd.raytracing_pipeline_entry.clone(),
+                nv_diagnostic_checkpoints: rd.nv_diagnostic_checkpoints.clone(),
                 command_buffer,
             };
             rg.execute(rd, &cb, &shaders);
@@ -1135,9 +1108,11 @@ impl RednerLoop {
             let swapchain = rd.swapchain.image[image_index as usize];
             cb.transition_image_layout(
                 swapchain.image,
-                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                //vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
                 vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                //vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::GENERAL,
                 vk::ImageLayout::PRESENT_SRC_KHR,
                 vk::ImageSubresourceRange {
                     aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -1147,6 +1122,7 @@ impl RednerLoop {
                     level_count: 1,
                 },
             );
+            cb.insert_checkpoint();
         }
 
         // End command recoding
@@ -1162,13 +1138,28 @@ impl RednerLoop {
                 .command_buffers(&command_buffers)
                 .signal_semaphores(&signal_semaphores);
             unsafe {
-                rd.device
-                    .queue_submit(
-                        rd.gfx_queue,
-                        &[*submit_info],
-                        self.command_buffer_finished_fence,
-                    )
-                    .unwrap();
+                let rt = rd.device.queue_submit(
+                    rd.gfx_queue,
+                    &[*submit_info],
+                    self.command_buffer_finished_fence,
+                );
+                if let Err(e) = rt {
+                    match e {
+                        vk::Result::ERROR_DEVICE_LOST => {
+                            // Try nv tool
+                            let len = rd
+                                .nv_diagnostic_checkpoints
+                                .get_queue_checkpoint_data_len(rd.gfx_queue);
+                            let mut cp = Vec::new();
+                            cp.resize(len, vk::CheckpointDataNV::default());
+                            rd.nv_diagnostic_checkpoints
+                                .get_queue_checkpoint_data(rd.gfx_queue, &mut cp);
+                            println!("cp: {:?}", cp);
+                        }
+                        _ => {}
+                    }
+                }
+                rt.unwrap()
             }
         }
 

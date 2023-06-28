@@ -1,9 +1,10 @@
-use ash::extensions::khr;
+use ash::extensions::{khr, nv};
 use ash::vk::{self};
 
 pub struct CommandBuffer {
     pub device: ash::Device,
     pub raytracing_pipeline: khr::RayTracingPipeline,
+    pub nv_diagnostic_checkpoints: nv::DeviceDiagnosticCheckpoints,
     pub command_buffer: vk::CommandBuffer,
 }
 
@@ -267,6 +268,14 @@ impl CommandBuffer {
                 vertex_offset,
                 first_instance,
             )
+        }
+    }
+
+    // Debugging
+    pub fn insert_checkpoint(&self) {
+        unsafe {
+            self.nv_diagnostic_checkpoints
+                .cmd_set_checkpoint(self.command_buffer, 0 as _);
         }
     }
 }

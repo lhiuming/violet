@@ -1,21 +1,25 @@
 use std::borrow::Cow;
-use std::collections::HashSet;
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::io::Write;
 use std::os::raw::c_void;
 
-use ash::extensions::{ext, khr};
+use ash::extensions::{ext, khr, nv};
 use ash::vk::{self, CommandPool, MemoryPropertyFlags};
 
 pub struct RenderDevice {
     pub entry: ash::Entry,
     pub instance: ash::Instance,
+    // TODO wrap this to a seperated physical device struct
     pub physical_device: vk::PhysicalDevice,
+    pub physical_device_properties: vk::PhysicalDeviceProperties,
+    pub physical_device_ray_tracing_pipeline_properties:
+        vk::PhysicalDeviceRayTracingPipelinePropertiesKHR,
     pub physical_device_mem_prop: vk::PhysicalDeviceMemoryProperties,
     pub device: ash::Device,
     pub swapchain_entry: SwapchainEntry,
     pub surface_entry: khr::Surface,
     pub raytracing_pipeline_entry: khr::RayTracingPipeline,
+    pub nv_diagnostic_checkpoints: nv::DeviceDiagnosticCheckpoints,
 
     pub gfx_queue: vk::Queue,
 
@@ -36,10 +40,11 @@ impl RenderDevice {
         let instance = {
             let app_info = vk::ApplicationInfo::builder().api_version(vk::API_VERSION_1_3);
 
+            let validation_layer_name =
+                CStr::from_bytes_with_nul(b"VK_LAYER_KHRONOS_validation\0").unwrap();
             let layer_names = [
-                CString::new("VK_LAYER_KHRONOS_validation").unwrap(), // Debug
+                validation_layer_name.as_ptr(), // Vulkan validation (debug layer)
             ];
-            let layer_names_raw: Vec<_> = layer_names.iter().map(|name| name.as_ptr()).collect();
 
             let ext_names_raw = [
                 khr::Surface::name().as_ptr(),
@@ -49,7 +54,7 @@ impl RenderDevice {
 
             let create_info = vk::InstanceCreateInfo::builder()
                 .application_info(&app_info)
-                .enabled_layer_names(&layer_names_raw)
+                .enabled_layer_names(&layer_names)
                 .enabled_extension_names(&ext_names_raw);
 
             print!("Vulkan: creating instance ... ");
@@ -96,7 +101,18 @@ impl RenderDevice {
             *picked.expect("Vulkan: None physical device?!")
         };
 
+        // Get Physical Device properties
+        let mut physical_device_ray_tracing_pipeline_properties =
+            vk::PhysicalDeviceRayTracingPipelinePropertiesKHR::builder().build();
+        let mut physical_device_properties2 = vk::PhysicalDeviceProperties2::builder()
+            .push_next(&mut physical_device_ray_tracing_pipeline_properties);
+        unsafe {
+            instance
+                .get_physical_device_properties2(physical_device, &mut physical_device_properties2)
+        }
+
         // Get supported device extensions (for debug info)
+        /*
         let supported_device_extensions: HashSet<_> = unsafe {
             let extension_properties = instance
                 .enumerate_device_extension_properties(physical_device)
@@ -106,6 +122,7 @@ impl RenderDevice {
                 .map(|ext| CStr::from_ptr(ext.extension_name.as_ptr()).to_owned())
                 .collect()
         };
+        */
 
         // Create device
         let gfx_queue_family_index;
@@ -147,16 +164,18 @@ impl RenderDevice {
                 vk::KhrRayTracingPipelineFn::name().as_ptr(),
                 vk::KhrAccelerationStructureFn::name().as_ptr(),
                 vk::KhrDeferredHostOperationsFn::name().as_ptr(),
+                // DEVICE_LOST debug tools
+                vk::NvDeviceDiagnosticCheckpointsFn::name().as_ptr(),
             ];
             // Query supported features
             let mut vulkan12_features = vk::PhysicalDeviceVulkan12Features::default();
             let mut vulkan13_features = vk::PhysicalDeviceVulkan13Features::default();
-            let mut rayTracingPipeline_feature =
+            let mut ray_tracing_pipeline_feature =
                 vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default();
             let mut supported_features = vk::PhysicalDeviceFeatures2::builder()
                 .push_next(&mut vulkan12_features)
                 .push_next(&mut vulkan13_features)
-                .push_next(&mut rayTracingPipeline_feature)
+                .push_next(&mut ray_tracing_pipeline_feature)
                 .build();
             unsafe {
                 instance.get_physical_device_features2(physical_device, &mut supported_features);
@@ -168,7 +187,7 @@ impl RenderDevice {
             assert!(vulkan12_features.descriptor_binding_partially_bound == vk::TRUE);
             assert!(vulkan12_features.runtime_descriptor_array == vk::TRUE);
             // Ray Tracing
-            assert!(rayTracingPipeline_feature.ray_tracing_pipeline == vk::TRUE);
+            assert!(ray_tracing_pipeline_feature.ray_tracing_pipeline == vk::TRUE);
             // Finally, create the device, with all supproted feature enabled (for simplicity)
             let create_info = vk::DeviceCreateInfo::builder()
                 .queue_create_infos(&queue_create_infos)
@@ -241,15 +260,20 @@ impl RenderDevice {
         // Load ray tracing entry
         let raytracing_pipeline_entry = khr::RayTracingPipeline::new(&instance, &device);
 
+        let nv_diagnostic_checkpoints = nv::DeviceDiagnosticCheckpoints::new(&instance, &device);
+
         RenderDevice {
             entry,
             instance,
             physical_device,
+            physical_device_properties: physical_device_properties2.properties,
+            physical_device_ray_tracing_pipeline_properties,
             physical_device_mem_prop,
             device,
             surface_entry,
             swapchain_entry,
             raytracing_pipeline_entry,
+            nv_diagnostic_checkpoints,
 
             gfx_queue,
 
@@ -514,7 +538,6 @@ pub struct Buffer {
     pub memory: vk::DeviceMemory,
     pub size: u64,
     pub data: *mut c_void,
-    pub srv: Option<vk::BufferView>,
 }
 
 impl RenderDevice {
@@ -548,12 +571,7 @@ impl RenderDevice {
 }
 
 impl RenderDevice {
-    pub fn create_buffer(
-        &self,
-        size: u64,
-        usage: vk::BufferUsageFlags,
-        srv_format: vk::Format,
-    ) -> Option<Buffer> {
+    pub fn create_buffer(&self, size: u64, usage: vk::BufferUsageFlags) -> Option<Buffer> {
         let device = &self.device;
 
         // Create the vk buffer object
@@ -591,26 +609,27 @@ impl RenderDevice {
         let map_flags = vk::MemoryMapFlags::default(); // dummy parameter
         let data = unsafe { device.map_memory(memory, offset, size, map_flags) }.ok()?;
 
-        // Create SRV
-        let srv = if srv_format != vk::Format::UNDEFINED {
-            let create_info = vk::BufferViewCreateInfo::builder()
-                .buffer(buffer)
-                .format(srv_format)
-                .offset(0)
-                .range(vk::WHOLE_SIZE);
-            let srv = unsafe { device.create_buffer_view(&create_info, None) }.ok()?;
-            Some(srv)
-        } else {
-            None
-        };
-
         Some(Buffer {
             buffer,
             memory,
             size,
             data,
-            srv,
         })
+    }
+
+    pub fn create_buffer_view(
+        &self,
+        buffer: vk::Buffer,
+        format: vk::Format,
+    ) -> Option<vk::BufferView> {
+        // Create SRV
+        let create_info = vk::BufferViewCreateInfo::builder()
+            .buffer(buffer)
+            .format(format)
+            .offset(0)
+            .range(vk::WHOLE_SIZE);
+        let srv = unsafe { self.device.create_buffer_view(&create_info, None) }.ok()?;
+        Some(srv)
     }
 }
 

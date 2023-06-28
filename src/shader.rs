@@ -166,13 +166,13 @@ impl Shaders {
             let pipeline_created = create_raytracing_pipeline(&self.pipeline_device, &cs, &hack);
             if let Some(pipeline) = pipeline_created {
                 let handle = self.add_pipeline(pipeline);
-                self.compute_pipelines_map.insert(key, handle);
+                self.raytracing_pipelines_map.insert(key, handle);
                 return Some(handle);
             }
             return None;
         }
 
-        Some(*self.compute_pipelines_map.get(&key).unwrap())
+        Some(*self.raytracing_pipelines_map.get(&key).unwrap())
     }
 
     pub fn get_pipeline(&self, handle: Handle<Pipeline>) -> Option<&Pipeline> {
@@ -759,11 +759,10 @@ pub fn create_raytracing_pipeline(
         .build();
     let groups = [group];
 
+    // TODO check ray tracing related flags
+    let flags = vk::PipelineCreateFlags::empty();
     let create_info = vk::RayTracingPipelineCreateInfoKHR::builder()
-        .flags(
-            vk::PipelineCreateFlags::RAY_TRACING_NO_NULL_MISS_SHADERS_KHR
-                | vk::PipelineCreateFlags::RAY_TRACING_NO_NULL_ANY_HIT_SHADERS_KHR,
-        ) // TODO need it?
+        .flags(flags)
         .stages(&stages)
         .groups(&groups)
         .max_pipeline_ray_recursion_depth(hack.ray_recursiion_depth) // TODO rt depth

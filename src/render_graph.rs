@@ -98,6 +98,7 @@ impl From<HandleEnum<TextureView>> for TextureView {
 pub enum RenderPassType {
     Graphics,
     Compute,
+    RayTracing,
 }
 
 #[allow(dead_code)]
@@ -172,6 +173,15 @@ impl RenderPass<'_> {
 
     pub fn get_color_targets(&self) -> &[ColorTarget] {
         &self.color_targets
+    }
+
+    pub fn get_rw_textures(&self, name: &str) -> HandleEnum<TextureView> {
+        for (n, t) in &self.rw_textures {
+            if n == &name {
+                return *t;
+            }
+        }
+        panic!("Cannot find rw texture with name: {}", name);
     }
 }
 
@@ -603,6 +613,7 @@ impl<'a> RenderGraph<'a> {
         let pipeline_bind_point = match pass.ty {
             RenderPassType::Graphics => vk::PipelineBindPoint::GRAPHICS,
             RenderPassType::Compute => vk::PipelineBindPoint::COMPUTE,
+            RenderPassType::RayTracing => vk::PipelineBindPoint::RAY_TRACING_KHR,
         };
         command_buffer.bind_descriptor_set(
             pipeline_bind_point,
@@ -676,6 +687,8 @@ impl<'a> RenderGraph<'a> {
             self.descriptor_sets.push(set);
         }
 
+        command_buffer.insert_checkpoint();
+
         let passes = self.passes.drain(0..self.passes.len()).collect::<Vec<_>>();
         for (pass_index, mut pass) in passes.into_iter().enumerate() {
             // TODO analysis of the DAG and sync properly
@@ -687,27 +700,35 @@ impl<'a> RenderGraph<'a> {
                 mannual_transition(&transition_interface, &mut pass);
             }
 
+            command_buffer.insert_checkpoint();
+
             // Begin render pass (if graphics)
             let is_graphic = pass.ty == RenderPassType::Graphics;
             if is_graphic {
                 self.begin_graphics(command_buffer, &pass);
+                command_buffer.insert_checkpoint();
             }
 
             // Bind resources
             let set = self.descriptor_sets[pass_index];
             if set != vk::DescriptorSet::null() {
                 self.bind_resources(rd, shaders, command_buffer, &pass, set);
+                command_buffer.insert_checkpoint();
             }
 
             // Run pass
             let render = pass.render.take().unwrap();
             render(command_buffer, &shaders, pass);
+            command_buffer.insert_checkpoint();
 
             // End render pass (if graphics)
             if is_graphic {
                 self.end_graphics(command_buffer);
+                command_buffer.insert_checkpoint();
             }
         }
+
+        command_buffer.insert_checkpoint();
 
         // Pool back all resource objects
         for view in self.texture_views.drain(0..self.texture_views.len()) {
