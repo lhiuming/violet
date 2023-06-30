@@ -60,7 +60,7 @@ pub struct PipelineDevice {
 impl PipelineDevice {
     pub fn new(rd: &RenderDevice) -> PipelineDevice {
         PipelineDevice {
-            device: rd.device.clone(),
+            device: rd.device_entry.clone(),
             raytracing_entry: rd.raytracing_pipeline_entry.clone(),
             pipeline_cache: vk::PipelineCache::null(),
         }
@@ -188,6 +188,7 @@ impl Shaders {
         // TODO reload all shaders by checking file timestamps (and checksum?)
         self.gfx_pipelines_map.clear();
         self.compute_pipelines_map.clear();
+        self.raytracing_pipelines_map.clear();
         self.pipelines.clear();
     }
 }
@@ -742,22 +743,22 @@ pub fn create_raytracing_pipeline(
         unsafe { device.device.create_pipeline_layout(&create_info, None) }.ok()?
     };
 
-    let ray_gen = vk::PipelineShaderStageCreateInfo::builder()
+    let raygen = vk::PipelineShaderStageCreateInfo::builder()
         .stage(vk::ShaderStageFlags::RAYGEN_KHR)
         .module(ray_gen.program.shader_module)
         .name(&ray_gen.program.entry_point_c);
     //let any_hit = vk::PipelineShaderStageCreateInfo::builder();
     //let miss = vk::PipelineShaderStageCreateInfo::builder();
-    let stages = [*ray_gen];
+    let stages = [*raygen];
 
-    let group = vk::RayTracingShaderGroupCreateInfoKHR::builder()
-        .ty(vk::RayTracingShaderGroupTypeKHR::TRIANGLES_HIT_GROUP)
-        .general_shader(vk::SHADER_UNUSED_KHR)
+    let raygen_group = vk::RayTracingShaderGroupCreateInfoKHR::builder()
+        .ty(vk::RayTracingShaderGroupTypeKHR::GENERAL)
+        .general_shader(0)
         .closest_hit_shader(vk::SHADER_UNUSED_KHR) // TODO
         .any_hit_shader(vk::SHADER_UNUSED_KHR) // TODO
         .intersection_shader(vk::SHADER_UNUSED_KHR)
         .build();
-    let groups = [group];
+    let groups = [raygen_group];
 
     // TODO check ray tracing related flags
     let flags = vk::PipelineCreateFlags::empty();
@@ -909,26 +910,35 @@ pub struct DescriptorSetWriteBuilder<'a> {
     buffer_infos: NamedVec<'a, vk::DescriptorBufferInfo>,
     image_infos: NamedVec<'a, vk::DescriptorImageInfo>,
     samplers: NamedVec<'a, vk::Sampler>,
+    accel_strusts: NamedVec<'a, vk::AccelerationStructureKHR>,
 
     writes: Vec<vk::WriteDescriptorSet>,
+}
+
+impl Default for DescriptorSetWriteBuilder<'_> {
+    fn default() -> Self {
+        Self {
+            buffer_views: Default::default(),
+            buffer_infos: Default::default(),
+            image_infos: Default::default(),
+            samplers: Default::default(),
+            accel_strusts: Default::default(),
+            writes: Default::default(),
+        }
+    }
 }
 
 #[allow(dead_code)]
 impl<'a> DescriptorSetWriteBuilder<'a> {
     pub fn new() -> Self {
-        Self {
-            buffer_views: Vec::new(),
-            buffer_infos: Vec::new(),
-            image_infos: Vec::new(),
-            samplers: Vec::new(),
-            writes: Vec::new(),
-        }
+        Default::default()
     }
 
     pub fn build<F>(
         &mut self,
         pipeline: &Pipeline,
         set: vk::DescriptorSet,
+        set_index: u32, // for sanity check
         fn_unused: F,
     ) -> &[vk::WriteDescriptorSet]
     where
@@ -936,6 +946,7 @@ impl<'a> DescriptorSetWriteBuilder<'a> {
     {
         for (name, buffer_view) in &self.buffer_views {
             if let Some(info) = pipeline.property_map.get(*name) {
+                assert!(info.set_index == set_index);
                 let write = vk::WriteDescriptorSet::builder()
                     .dst_set(set)
                     .dst_binding(info.binding_index)
@@ -950,6 +961,7 @@ impl<'a> DescriptorSetWriteBuilder<'a> {
 
         for (name, buffer_info) in &self.buffer_infos {
             if let Some(info) = pipeline.property_map.get(*name) {
+                assert!(info.set_index == set_index);
                 let write = vk::WriteDescriptorSet::builder()
                     .dst_set(set)
                     .dst_binding(info.binding_index)
@@ -964,6 +976,7 @@ impl<'a> DescriptorSetWriteBuilder<'a> {
 
         for (name, image_info) in &self.image_infos {
             if let Some(info) = pipeline.property_map.get(*name) {
+                assert!(info.set_index == set_index);
                 let write = vk::WriteDescriptorSet::builder()
                     .dst_set(set)
                     .dst_binding(info.binding_index)
@@ -973,6 +986,25 @@ impl<'a> DescriptorSetWriteBuilder<'a> {
                 self.writes.push(*write);
             } else {
                 fn_unused(name, "image_info");
+            }
+        }
+
+        for (name, accel_struct) in &self.accel_strusts {
+            if let Some(info) = pipeline.property_map.get(*name) {
+                assert!(info.set_index == set_index);
+                let mut as_write = vk::WriteDescriptorSetAccelerationStructureKHR::builder()
+                    .acceleration_structures(std::slice::from_ref(accel_struct))
+                    .build();
+
+                let write = vk::WriteDescriptorSet::builder()
+                    .dst_set(set)
+                    .dst_binding(info.binding_index)
+                    .dst_array_element(0)
+                    .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+                    .push_next(&mut as_write);
+                self.writes.push(*write);
+            } else {
+                fn_unused(name, "accel_struct");
             }
         }
 
@@ -1026,6 +1058,16 @@ impl<'a> DescriptorSetWriteBuilder<'a> {
                 image_layout: vk::ImageLayout::UNDEFINED,
             },
         ));
+        self
+    }
+
+    #[inline]
+    pub fn accel_struct(
+        &mut self,
+        name: &'a str,
+        accel_struct: vk::AccelerationStructureKHR,
+    ) -> &mut Self {
+        self.accel_strusts.push((name, accel_struct));
         self
     }
 }

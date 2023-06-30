@@ -4,22 +4,57 @@ use std::io::Write;
 use std::os::raw::c_void;
 
 use ash::extensions::{ext, khr, nv};
-use ash::vk::{self, CommandPool, MemoryPropertyFlags};
+use ash::vk;
+
+pub struct PhysicalDevice {
+    pub handle: vk::PhysicalDevice,
+    pub properties: vk::PhysicalDeviceProperties,
+    pub ray_tracing_pipeline_properties: vk::PhysicalDeviceRayTracingPipelinePropertiesKHR,
+    pub memory_properties: vk::PhysicalDeviceMemoryProperties,
+}
+
+impl PhysicalDevice {
+    pub fn pick_memory_type_index(
+        &self,
+        memory_type_bits: u32,
+        property_flags: vk::MemoryPropertyFlags,
+    ) -> Option<u32> {
+        let memory_types = &self.memory_properties.memory_types;
+        for i in 0..self.memory_properties.memory_type_count {
+            if ((memory_type_bits & (1 << i)) != 0)
+                && ((memory_types[i as usize].property_flags & property_flags) == property_flags)
+            {
+                return Some(i);
+            }
+        }
+
+        let mut support_properties = Vec::new();
+        for i in 0..self.memory_properties.memory_type_count {
+            if memory_type_bits & (1 << i) != 0 {
+                support_properties.push(memory_types[i as usize].property_flags);
+            }
+        }
+
+        println!(
+            "Vulkan: No compatible device memory type with required properties {:?}. Support types are: {:?}",
+            property_flags, support_properties
+        );
+        return None;
+    }
+}
 
 pub struct RenderDevice {
     pub entry: ash::Entry,
     pub instance: ash::Instance,
-    // TODO wrap this to a seperated physical device struct
-    pub physical_device: vk::PhysicalDevice,
-    pub physical_device_properties: vk::PhysicalDeviceProperties,
-    pub physical_device_ray_tracing_pipeline_properties:
-        vk::PhysicalDeviceRayTracingPipelinePropertiesKHR,
-    pub physical_device_mem_prop: vk::PhysicalDeviceMemoryProperties,
-    pub device: ash::Device,
-    pub swapchain_entry: SwapchainEntry,
+    pub physical_device: PhysicalDevice,
+
+    // Entry wrappers
+    pub device_entry: ash::Device,
+    pub swapchain_entry: SwapchainEntry, // TODO remove this wrapping
     pub surface_entry: khr::Surface,
     pub raytracing_pipeline_entry: khr::RayTracingPipeline,
-    pub nv_diagnostic_checkpoints: nv::DeviceDiagnosticCheckpoints,
+    pub acceleration_structure_entry: khr::AccelerationStructure,
+    pub nv_diagnostic_checkpoints_entry: nv::DeviceDiagnosticCheckpoints,
 
     pub gfx_queue: vk::Queue,
 
@@ -101,7 +136,7 @@ impl RenderDevice {
             *picked.expect("Vulkan: None physical device?!")
         };
 
-        // Get Physical Device properties
+        // Get Physical Device properties (core and extensions)
         let mut physical_device_ray_tracing_pipeline_properties =
             vk::PhysicalDeviceRayTracingPipelinePropertiesKHR::builder().build();
         let mut physical_device_properties2 = vk::PhysicalDeviceProperties2::builder()
@@ -124,12 +159,25 @@ impl RenderDevice {
         };
         */
 
+        // Get memory properties
+        let physical_device_mem_prop =
+            unsafe { instance.get_physical_device_memory_properties(physical_device) };
+
+        // Record in a wrapping struct
+        let physical_device = PhysicalDevice {
+            handle: physical_device,
+            properties: physical_device_properties2.properties,
+            ray_tracing_pipeline_properties: physical_device_ray_tracing_pipeline_properties,
+            memory_properties: physical_device_mem_prop,
+        };
+
         // Create device
         let gfx_queue_family_index;
         let device = {
             // Enumerate and pick queue families to create with the device
-            let queue_fams =
-                unsafe { instance.get_physical_device_queue_family_properties(physical_device) };
+            let queue_fams = unsafe {
+                instance.get_physical_device_queue_family_properties(physical_device.handle)
+            };
             let mut found_gfx_queue_family_index = 0;
             for i in 0..queue_fams.len() {
                 let queue_fam = &queue_fams[i];
@@ -167,18 +215,22 @@ impl RenderDevice {
                 // DEVICE_LOST debug tools
                 vk::NvDeviceDiagnosticCheckpointsFn::name().as_ptr(),
             ];
-            // Query supported features
+            // Get physical device supported features
             let mut vulkan12_features = vk::PhysicalDeviceVulkan12Features::default();
             let mut vulkan13_features = vk::PhysicalDeviceVulkan13Features::default();
-            let mut ray_tracing_pipeline_feature =
+            let mut ray_tracing_pipeline_features =
                 vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default();
+            let mut acceleration_structure_features =
+                vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default();
             let mut supported_features = vk::PhysicalDeviceFeatures2::builder()
                 .push_next(&mut vulkan12_features)
                 .push_next(&mut vulkan13_features)
-                .push_next(&mut ray_tracing_pipeline_feature)
+                .push_next(&mut ray_tracing_pipeline_features)
+                .push_next(&mut acceleration_structure_features)
                 .build();
             unsafe {
-                instance.get_physical_device_features2(physical_device, &mut supported_features);
+                instance
+                    .get_physical_device_features2(physical_device.handle, &mut supported_features);
             };
             // Check features
             // Dynamic Rendering
@@ -187,14 +239,17 @@ impl RenderDevice {
             assert!(vulkan12_features.descriptor_binding_partially_bound == vk::TRUE);
             assert!(vulkan12_features.runtime_descriptor_array == vk::TRUE);
             // Ray Tracing
-            assert!(ray_tracing_pipeline_feature.ray_tracing_pipeline == vk::TRUE);
+            assert!(ray_tracing_pipeline_features.ray_tracing_pipeline == vk::TRUE);
+            assert!(acceleration_structure_features.acceleration_structure == vk::TRUE);
+            // Buffer Device Address (required by ray tracing, to retrive buffer address for shader binding table)
+            assert!(vulkan12_features.buffer_device_address == vk::TRUE);
             // Finally, create the device, with all supproted feature enabled (for simplicity)
             let create_info = vk::DeviceCreateInfo::builder()
                 .queue_create_infos(&queue_create_infos)
                 .enabled_extension_names(&enabled_extension_names)
                 .push_next(&mut supported_features);
             unsafe {
-                let ret = instance.create_device(physical_device, &create_info, None);
+                let ret = instance.create_device(physical_device.handle, &create_info, None);
 
                 // Return extension not present
                 if let Err(err) = ret {
@@ -214,10 +269,6 @@ impl RenderDevice {
             }
         };
 
-        // Get memory properties
-        let physical_device_mem_prop =
-            unsafe { instance.get_physical_device_memory_properties(physical_device) };
-
         // Get quques
         let gfx_queue = unsafe { device.get_device_queue(gfx_queue_family_index, 0) };
 
@@ -233,7 +284,8 @@ impl RenderDevice {
                 .expect("Vulkan: failed to crate win32 surface");
             // Query format
             let formats = unsafe {
-                surface_entry.get_physical_device_surface_formats(physical_device, vk_surface)
+                surface_entry
+                    .get_physical_device_surface_formats(physical_device.handle, vk_surface)
             }
             .unwrap();
             assert!(formats.len() > 0);
@@ -253,27 +305,25 @@ impl RenderDevice {
         // Create swapchain
         let swapchain_entry = SwapchainEntry::new(&instance, &device);
         let swapchain = {
-            let surface_size = surface.query_size(&surface_entry, &physical_device);
+            let surface_size = surface.query_size(&surface_entry, &physical_device.handle);
             swapchain_entry.create(&device, &surface, &surface_size)
         };
 
-        // Load ray tracing entry
         let raytracing_pipeline_entry = khr::RayTracingPipeline::new(&instance, &device);
-
-        let nv_diagnostic_checkpoints = nv::DeviceDiagnosticCheckpoints::new(&instance, &device);
+        let acceleration_structure_entry = khr::AccelerationStructure::new(&instance, &device);
+        let nv_diagnostic_checkpoints_entry =
+            nv::DeviceDiagnosticCheckpoints::new(&instance, &device);
 
         RenderDevice {
             entry,
             instance,
             physical_device,
-            physical_device_properties: physical_device_properties2.properties,
-            physical_device_ray_tracing_pipeline_properties,
-            physical_device_mem_prop,
-            device,
+            device_entry: device,
             surface_entry,
             swapchain_entry,
             raytracing_pipeline_entry,
-            nv_diagnostic_checkpoints,
+            acceleration_structure_entry,
+            nv_diagnostic_checkpoints_entry,
 
             gfx_queue,
 
@@ -289,7 +339,7 @@ impl RenderDevice {
             } else {
                 vk::FenceCreateFlags::empty()
             });
-            self.device.create_fence(&create_info, None)
+            self.device_entry.create_fence(&create_info, None)
         }
         .expect("Vulakn: failed to create fence")
     }
@@ -297,7 +347,7 @@ impl RenderDevice {
     pub fn create_semaphore(&self) -> vk::Semaphore {
         unsafe {
             let create_info = vk::SemaphoreCreateInfo::builder();
-            self.device.create_semaphore(&create_info, None)
+            self.device_entry.create_semaphore(&create_info, None)
         }
         .expect("Vulkan: failed to create semaphore")
     }
@@ -307,19 +357,19 @@ impl RenderDevice {
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
             .build();
         unsafe {
-            self.device
+            self.device_entry
                 .create_command_pool(&create_info, None)
                 .expect("Vulkan: failed to create command pool?!")
         }
     }
 
-    pub fn create_command_buffer(&self, command_pool: CommandPool) -> vk::CommandBuffer {
+    pub fn create_command_buffer(&self, command_pool: vk::CommandPool) -> vk::CommandBuffer {
         let create_info = vk::CommandBufferAllocateInfo::builder()
             .command_pool(command_pool)
             .command_buffer_count(1)
             .build();
         unsafe {
-            self.device
+            self.device_entry
                 .allocate_command_buffers(&create_info)
                 .expect("Vulkan: failed to allocated command buffer?!")[0]
         }
@@ -335,7 +385,7 @@ impl RenderDevice {
             .flags(flags)
             .max_sets(max_sets)
             .pool_sizes(pool_sizes);
-        unsafe { self.device.create_descriptor_pool(&create_info, None) }
+        unsafe { self.device_entry.create_descriptor_pool(&create_info, None) }
             .expect("Vulkan: failed to create descriptor pool?!")
     }
 }
@@ -533,46 +583,23 @@ impl SwapchainEntry {
     */
 }
 
+#[derive(Clone, Copy)]
 pub struct Buffer {
-    pub buffer: vk::Buffer,
+    pub handle: vk::Buffer,
     pub memory: vk::DeviceMemory,
     pub size: u64,
     pub data: *mut c_void,
+    pub device_address: Option<vk::DeviceAddress>,
 }
 
 impl RenderDevice {
-    pub fn pick_memory_type_index(
+    pub fn create_buffer(
         &self,
-        memory_type_bits: u32,
-        property_flags: MemoryPropertyFlags,
-    ) -> Option<u32> {
-        let memory_types = &self.physical_device_mem_prop.memory_types;
-        for i in 0..self.physical_device_mem_prop.memory_type_count {
-            if ((memory_type_bits & (1 << i)) != 0)
-                && ((memory_types[i as usize].property_flags & property_flags) == property_flags)
-            {
-                return Some(i);
-            }
-        }
-
-        let mut support_properties = Vec::new();
-        for i in 0..self.physical_device_mem_prop.memory_type_count {
-            if memory_type_bits & (1 << i) != 0 {
-                support_properties.push(memory_types[i as usize].property_flags);
-            }
-        }
-
-        println!(
-            "Vulkan: No compatible device memory type with required properties {:?}. Support types are: {:?}",
-            property_flags, support_properties
-        );
-        return None;
-    }
-}
-
-impl RenderDevice {
-    pub fn create_buffer(&self, size: u64, usage: vk::BufferUsageFlags) -> Option<Buffer> {
-        let device = &self.device;
+        size: u64,
+        usage: vk::BufferUsageFlags,
+        memory_property: vk::MemoryPropertyFlags,
+    ) -> Option<Buffer> {
+        let device = &self.device_entry;
 
         // Create the vk buffer object
         // TODO drop buffer if later stage failed
@@ -581,22 +608,35 @@ impl RenderDevice {
             unsafe { device.create_buffer(&create_info, None) }.ok()?
         };
 
+        let has_device_address = usage.contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
+
         // Allocate memory for ths buffer
         // TODO drop device_memory if later stage failed
-        let memory = {
+        // TODO use a allocator like VMA to do sub allocate
+        let memory: vk::DeviceMemory = {
             let mem_req = unsafe { device.get_buffer_memory_requirements(buffer) };
 
             // Pick memory type
-            // TODO currently treating all buffer like a staging buffer
+            /*
             let mem_property_flags =
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+            */
             let memory_type_index = self
-                .pick_memory_type_index(mem_req.memory_type_bits, mem_property_flags)
+                .physical_device
+                .pick_memory_type_index(mem_req.memory_type_bits, memory_property)
                 .unwrap();
+
+            let mut flags = vk::MemoryAllocateFlags::default();
+            if has_device_address {
+                // allocation requirement (03339)
+                flags |= vk::MemoryAllocateFlags::DEVICE_ADDRESS;
+            }
+            let mut flag_info = vk::MemoryAllocateFlagsInfo::builder().flags(flags).build();
 
             let create_info = vk::MemoryAllocateInfo::builder()
                 .allocation_size(mem_req.size)
-                .memory_type_index(memory_type_index);
+                .memory_type_index(memory_type_index)
+                .push_next(&mut flag_info);
             unsafe { device.allocate_memory(&create_info, None) }.ok()?
         };
 
@@ -604,16 +644,32 @@ impl RenderDevice {
         let offset: vk::DeviceSize = 0;
         unsafe { device.bind_buffer_memory(buffer, memory, offset) }.ok()?;
 
+        // Get address (for later use, e.g. ray tracing)
+        let device_address = if has_device_address {
+            unsafe {
+                let info = vk::BufferDeviceAddressInfo::builder().buffer(buffer);
+                Some(device.get_buffer_device_address(&info))
+            }
+        } else {
+            None
+        };
+
         // Map (staging buffer) persistently
         // TODO unmap if later stage failed
-        let map_flags = vk::MemoryMapFlags::default(); // dummy parameter
-        let data = unsafe { device.map_memory(memory, offset, size, map_flags) }.ok()?;
+        let is_mappable = memory_property.contains(vk::MemoryPropertyFlags::HOST_VISIBLE);
+        let data = if is_mappable {
+            let map_flags = vk::MemoryMapFlags::default(); // dummy parameter
+            unsafe { device.map_memory(memory, offset, size, map_flags) }.unwrap()
+        } else {
+            std::ptr::null::<c_void>() as *mut _
+        };
 
         Some(Buffer {
-            buffer,
+            handle: buffer,
             memory,
             size,
             data,
+            device_address,
         })
     }
 
@@ -628,7 +684,7 @@ impl RenderDevice {
             .format(format)
             .offset(0)
             .range(vk::WHOLE_SIZE);
-        let srv = unsafe { self.device.create_buffer_view(&create_info, None) }.ok()?;
+        let srv = unsafe { self.device_entry.create_buffer_view(&create_info, None) }.ok()?;
         Some(srv)
     }
 }
@@ -749,11 +805,11 @@ pub struct TextureView {
 
 impl RenderDevice {
     pub fn create_texture(&self, desc: TextureDesc) -> Option<Texture> {
-        let device = &self.device;
+        let device = &self.device_entry;
 
         let format_prop = unsafe {
             self.instance.get_physical_device_image_format_properties(
-                self.physical_device,
+                self.physical_device.handle,
                 desc.format,
                 vk::ImageType::TYPE_2D,
                 vk::ImageTiling::default(),
@@ -790,7 +846,7 @@ impl RenderDevice {
         // Bind memory
         let device_memory = {
             let mem_requirements = unsafe { device.get_image_memory_requirements(image) };
-            let momory_type_index = self.pick_memory_type_index(
+            let momory_type_index = self.physical_device.pick_memory_type_index(
                 mem_requirements.memory_type_bits,
                 vk::MemoryPropertyFlags::DEVICE_LOCAL, // That's basically what texture can have
             )?;
@@ -813,7 +869,7 @@ impl RenderDevice {
         texture: Texture,
         desc: TextureViewDesc,
     ) -> Option<TextureView> {
-        let device = &self.device;
+        let device = &self.device_entry;
         let create_info = vk::ImageViewCreateInfo::builder()
             .image(texture.image)
             .view_type(desc.view_type)
@@ -832,5 +888,37 @@ impl RenderDevice {
             desc,
             image_view,
         })
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct AccelerationStructure {
+    pub buffer: Buffer,
+    pub ty: vk::AccelerationStructureTypeKHR,
+    pub handle: vk::AccelerationStructureKHR,
+}
+
+impl RenderDevice {
+    pub fn create_accel_struct(
+        &self,
+        buffer: Buffer,
+        offset: u64,
+        size: u64,
+        ty: vk::AccelerationStructureTypeKHR,
+    ) -> Option<AccelerationStructure> {
+        assert!(buffer.size >= (offset + size));
+        let create_info: vk::AccelerationStructureCreateInfoKHRBuilder<'_> =
+            vk::AccelerationStructureCreateInfoKHR::builder()
+                .buffer(buffer.handle)
+                .offset(offset)
+                .size(size)
+                .ty(ty);
+        let handle = unsafe {
+            self.acceleration_structure_entry
+                .create_acceleration_structure(&create_info, None)
+                .unwrap()
+        };
+
+        Some(AccelerationStructure { buffer, ty, handle })
     }
 }

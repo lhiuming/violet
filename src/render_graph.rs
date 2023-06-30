@@ -6,7 +6,9 @@ use std::ops::FnOnce;
 use ash::vk;
 
 use crate::command_buffer::CommandBuffer;
-use crate::render_device::{RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc};
+use crate::render_device::{
+    AccelerationStructure, Buffer, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
+};
 use crate::shader::{self, Handle, Pipeline, Shaders};
 
 pub struct RGHandle<T> {
@@ -138,6 +140,7 @@ pub struct RenderPass<'a> {
     pipeline: Handle<Pipeline>,
     descriptor_set_index: u32,
     textures: Vec<(&'a str, HandleEnum<TextureView>)>,
+    accel_structs: Vec<(&'a str, HandleEnum<AccelerationStructure>)>,
     color_targets: Vec<ColorTarget>,
     depth_stencil: Option<DepthStencilTarget>,
     rw_textures: Vec<(&'a str, HandleEnum<TextureView>)>,
@@ -153,6 +156,7 @@ impl RenderPass<'_> {
             pipeline: Handle::null(),
             descriptor_set_index: 0,
             textures: Vec::new(),
+            accel_structs: Vec::new(),
             color_targets: Vec::new(),
             depth_stencil: None,
             rw_textures: Vec::new(),
@@ -239,6 +243,15 @@ impl<'a, 'b> RenderPassBuilder<'a, 'b> {
 
     pub fn rw_texture(mut self, name: &'a str, texture: HandleEnum<TextureView>) -> Self {
         self.inner().rw_textures.push((name, texture));
+        self
+    }
+
+    pub fn accel_struct(
+        mut self,
+        name: &'a str,
+        accel_struct: HandleEnum<AccelerationStructure>,
+    ) -> Self {
+        self.inner().accel_structs.push((name, accel_struct));
         self
     }
 
@@ -341,7 +354,7 @@ impl RenderGraphCache {
             .descriptor_pool(self.vk_descriptor_pool)
             .set_layouts(&layouts);
         unsafe {
-            match rd.device.allocate_descriptor_sets(&create_info) {
+            match rd.device_entry.allocate_descriptor_sets(&create_info) {
                 Ok(sets) => sets[0],
                 Err(e) => {
                     panic!("Failed to allocate descriptor set: {:?}", e);
@@ -359,7 +372,7 @@ impl RenderGraphCache {
         if self.free_vk_descriptor_sets.len() > buffer_limit {
             let old_sets = &self.free_vk_descriptor_sets[0..release_heuristic];
             unsafe {
-                rd.device
+                rd.device_entry
                     .free_descriptor_sets(self.vk_descriptor_pool, &old_sets)
                     .expect("Failed to free descriptor set");
             }
@@ -598,14 +611,28 @@ impl<'a> RenderGraph<'a> {
                 let view = self.get_texture_view(*handle);
                 builder.image(name, view.image_view, vk::ImageLayout::GENERAL);
             }
-            let writes = builder.build(pipeline, set, |prop_name, ty_name| {
-                println!(
-                    "Warning[RenderGraph::{}]: property {}:{} is not found.",
-                    pass.name, prop_name, ty_name
-                );
-            });
+            for (name, handle) in &pass.accel_structs {
+                let accel_struct = match handle {
+                    HandleEnum::Inetrnal(handle) => {
+                        panic!("accel struct {} is internal.", handle.id)
+                    }
+                    HandleEnum::External(accel_struct) => accel_struct.handle,
+                };
+                builder.accel_struct(name, accel_struct);
+            }
+            let writes = builder.build(
+                pipeline,
+                set,
+                pass.descriptor_set_index,
+                |prop_name, ty_name| {
+                    println!(
+                        "Warning[RenderGraph::{}]: property {}:{} is not found.",
+                        pass.name, prop_name, ty_name
+                    );
+                },
+            );
             unsafe {
-                rd.device.update_descriptor_sets(&writes, &[]);
+                rd.device_entry.update_descriptor_sets(&writes, &[]);
             }
         }
 

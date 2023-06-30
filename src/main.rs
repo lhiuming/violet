@@ -109,8 +109,6 @@ fn main() {
     let mut sun_dir_theta = -0.271f32;
     let mut sun_dir_phi = 0.524f32;
 
-    let mut frame_index = 0;
-
     while !window.should_close() {
         window.poll_events();
 
@@ -236,8 +234,5 @@ fn main() {
         }
 
         render_loop.render(&mut rd, &mut shaders, &render_scene, &view_info);
-
-        println!("Frame {} finished.", frame_index);
-        frame_index += 1;
     }
 }

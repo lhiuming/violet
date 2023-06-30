@@ -1,4 +1,4 @@
-//RaytracingAccelerationStructure rayTracingScene;
+RaytracingAccelerationStructure rayTracingScene;
 RWTexture2D<float4> rw_color;
 
 /*
@@ -12,8 +12,11 @@ void raygen() {
     uint3 dispatch_ray_index = DispatchRaysIndex();
     uint3 dispatch_ray_dim = DispatchRaysDimensions();
 
-    float4 c = rw_color[dispatch_ray_index.xy];
-    rw_color[dispatch_ray_index.xy] = c + float4(0.01, 0.01, 0.5, 0.0f);
+    if (all(dispatch_ray_index.xy < 128))
+    {
+        float4 c = rw_color[dispatch_ray_index.xy];
+        rw_color[dispatch_ray_index.xy] = c + float4(0.5, 0.1, 0.2, 0.0f);
+    }
 
     /*
     Payload payload {

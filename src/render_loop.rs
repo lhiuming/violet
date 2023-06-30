@@ -1,7 +1,7 @@
 use std::mem::{self, size_of};
 use std::slice;
 
-use ash::vk::{self, Handle};
+use ash::vk;
 use glam::{Mat4, Vec3};
 
 use crate::command_buffer::{CommandBuffer, StencilOps};
@@ -60,10 +60,10 @@ impl UploadContext {
         // Find an existing command buffer that's ready to be used
         for i in 0..self.command_buffers.len() {
             let fence = self.finished_fences[i];
-            let finished = unsafe { rd.device.get_fence_status(fence) }.unwrap();
+            let finished = unsafe { rd.device_entry.get_fence_status(fence) }.unwrap();
             if finished {
                 let fences = [fence];
-                unsafe { rd.device.reset_fences(&fences) }.unwrap();
+                unsafe { rd.device_entry.reset_fences(&fences) }.unwrap();
                 return (self.command_buffers[i], fence);
             }
         }
@@ -84,7 +84,7 @@ impl UploadContext {
     {
         // TODO we will need semaphore to sync with rendering which will depends on operation here
 
-        let device = &rd.device;
+        let device = &rd.device_entry;
         let (command_buffer, finished_fence) = self.pick_command_buffer(rd);
 
         let begin_info = vk::CommandBufferBeginInfo::builder()
@@ -149,6 +149,7 @@ pub struct RenderScene {
 
     // todo
     pub shader_binding_table: Buffer,
+    pub shader_binding_table_addr: vk::DeviceAddress,
 
     // Global texture to store all loaded textures
     //pub material_texture: AllocTexture2D,
@@ -170,27 +171,54 @@ impl RenderScene {
         // Buffer for whole scene
         let ib_size = 4 * 1024 * 1024;
         let vb_size = 16 * 1024 * 1024;
+        let accel_strut_usafe = vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+            | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR;
         let index_buffer = AllocBuffer::new(
-            rd.create_buffer(ib_size, vk::BufferUsageFlags::INDEX_BUFFER)
-                .unwrap(),
+            rd.create_buffer(
+                ib_size,
+                vk::BufferUsageFlags::INDEX_BUFFER | accel_strut_usafe,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT, // TODO staing buffer
+            )
+            .unwrap(),
         );
         let vertex_buffer = AllocBuffer::new(
-            rd.create_buffer(vb_size, vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER)
-                .unwrap(),
+            rd.create_buffer(
+                vb_size,
+                vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER | accel_strut_usafe,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT, // TODO staging buffer
+            )
+            .unwrap(),
         );
         let vertex_buffer_view = rd
-            .create_buffer_view(vertex_buffer.buffer.buffer, vk::Format::R32_UINT)
+            .create_buffer_view(vertex_buffer.buffer.handle, vk::Format::R32_UINT)
             .unwrap();
 
+        let sg_handle_size = rd
+            .physical_device
+            .ray_tracing_pipeline_properties
+            .shader_group_handle_size as u64;
         let shader_binding_table = rd
-            .create_buffer(64, vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR)
+            .create_buffer(
+                sg_handle_size,
+                vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS, // for get_buffer_device_address
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
             .unwrap();
+
+        let shader_binding_table_addr = unsafe {
+            let info = vk::BufferDeviceAddressInfo::builder()
+                .buffer(shader_binding_table.handle)
+                .build();
+            rd.device_entry.get_buffer_device_address(&info)
+        };
 
         // View parameter constant buffer
         let view_params_cb = rd
             .create_buffer(
                 mem::size_of::<ViewParams>() as u64,
                 vk::BufferUsageFlags::UNIFORM_BUFFER,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
             )
             .unwrap();
 
@@ -199,7 +227,7 @@ impl RenderScene {
             let create_info = vk::SamplerCreateInfo::builder()
                 .min_filter(vk::Filter::LINEAR)
                 .mag_filter(vk::Filter::LINEAR);
-            rd.device.create_sampler(&create_info, None).unwrap()
+            rd.device_entry.create_sampler(&create_info, None).unwrap()
         };
 
         // Descriptor pool for whole scene bindless texture
@@ -253,7 +281,7 @@ impl RenderScene {
                 .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL) // for bindless
                 .push_next(&mut flags_create_info);
             unsafe {
-                rd.device
+                rd.device_entry
                     .create_descriptor_set_layout(&create_info, None)
                     .expect("Failed to create scene descriptor set layout")
             }
@@ -264,7 +292,7 @@ impl RenderScene {
                 .descriptor_pool(descriptor_pool)
                 .set_layouts(&layouts);
             unsafe {
-                rd.device
+                rd.device_entry
                     .allocate_descriptor_sets(&create_info)
                     .expect("Failed to create descriptor set for scene")[0]
             }
@@ -279,7 +307,7 @@ impl RenderScene {
                 .texel_buffer_view(slice::from_ref(&vertex_buffer_view))
                 .build();
             let cbuffer_info = vk::DescriptorBufferInfo::builder()
-                .buffer(view_params_cb.buffer)
+                .buffer(view_params_cb.handle)
                 .offset(0)
                 .range(vk::WHOLE_SIZE)
                 .build();
@@ -290,7 +318,7 @@ impl RenderScene {
                 .buffer_info(slice::from_ref(&cbuffer_info))
                 .build();
             unsafe {
-                rd.device
+                rd.device_entry
                     .update_descriptor_sets(&[write_buffer_view, write_cbuffer], &[])
             }
         }
@@ -305,6 +333,7 @@ impl RenderScene {
             vertex_buffer,
             index_buffer,
             shader_binding_table,
+            shader_binding_table_addr,
             //material_texture: material_texture,
             material_textures: Vec::new(),
             material_texture_views: Vec::new(),
@@ -347,7 +376,11 @@ impl RenderScene {
 
             // Create staging buffer
             let staging_buffer = rd
-                .create_buffer(texel_count as u64 * 4, vk::BufferUsageFlags::TRANSFER_SRC)
+                .create_buffer(
+                    texel_count as u64 * 4,
+                    vk::BufferUsageFlags::TRANSFER_SRC,
+                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                )
                 .unwrap();
 
             // Read to staging buffer
@@ -376,7 +409,7 @@ impl RenderScene {
                             base_array_layer: 0,
                             layer_count: 1,
                         });
-                    rd.device.cmd_pipeline_barrier(
+                    rd.device_entry.cmd_pipeline_barrier(
                         command_buffer,
                         vk::PipelineStageFlags::TOP_OF_PIPE,
                         vk::PipelineStageFlags::TRANSFER,
@@ -406,9 +439,9 @@ impl RenderScene {
                     });
                 let regions = [*region];
                 unsafe {
-                    rd.device.cmd_copy_buffer_to_image(
+                    rd.device_entry.cmd_copy_buffer_to_image(
                         command_buffer,
-                        staging_buffer.buffer,
+                        staging_buffer.handle,
                         texture.image,
                         dst_image_layout,
                         &regions,
@@ -430,7 +463,7 @@ impl RenderScene {
                             base_array_layer: 0,
                             layer_count: 1,
                         });
-                    rd.device.cmd_pipeline_barrier(
+                    rd.device_entry.cmd_pipeline_barrier(
                         command_buffer,
                         vk::PipelineStageFlags::TRANSFER,
                         vk::PipelineStageFlags::FRAGMENT_SHADER,
@@ -501,26 +534,33 @@ impl RenderScene {
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                 .image_info(&image_infos);
             unsafe {
-                rd.device.update_descriptor_sets(&[*write], &[]);
+                rd.device_entry.update_descriptor_sets(&[*write], &[]);
             }
         }
 
+        let mut blas_geometrys = Vec::<vk::AccelerationStructureGeometryKHR>::new();
+        let mut blas_range_info = Vec::<vk::AccelerationStructureBuildRangeInfoKHR>::new();
+        let mut max_primitive_counts = Vec::<u32>::new();
         for (material_index, mesh) in model.meshes.iter().enumerate() {
             // Upload indices
             let index_offset;
+            let index_offset_bytes;
             let index_count;
             {
                 index_count = mesh.indicies.len() as u32;
                 let (dst, offset) = index_buffer.alloc(index_count);
                 index_offset = offset / 2;
                 dst.copy_from_slice(&mesh.indicies);
+                index_offset_bytes = offset;
             }
             // Upload position
             let positions_offset;
+            let positions_offset_bytes;
             {
                 let (dst, offset) = vertex_buffer.alloc::<[f32; 3]>(mesh.positions.len() as u32);
                 positions_offset = offset / 4;
                 dst.copy_from_slice(&mesh.positions);
+                positions_offset_bytes = offset;
             }
             // Upload normal
             let normals_offset;
@@ -558,6 +598,112 @@ impl RenderScene {
                 texcoords_offset,
                 tangents_offset,
                 material_index: material_index_offset + material_index as u32,
+            });
+
+            // TODO assert index type
+            let vertex_data = vk::DeviceOrHostAddressConstKHR {
+                device_address: vertex_buffer.buffer.device_address.unwrap()
+                    + positions_offset_bytes as u64,
+            };
+            let index_data = vk::DeviceOrHostAddressConstKHR {
+                device_address: index_buffer.buffer.device_address.unwrap()
+                    + index_offset_bytes as u64,
+            };
+            let geo_data = vk::AccelerationStructureGeometryDataKHR {
+                triangles: vk::AccelerationStructureGeometryTrianglesDataKHR::builder()
+                    .vertex_format(vk::Format::R32G32B32_SFLOAT)
+                    .vertex_data(vertex_data)
+                    .vertex_stride(4 * 3) // f32 * 3
+                    .max_vertex(mesh.positions.len() as u32)
+                    .index_type(vk::IndexType::UINT16)
+                    .index_data(index_data)
+                    .transform_data(vk::DeviceOrHostAddressConstKHR::default()) // no xform
+                    .build(),
+            };
+            let blas_geo = vk::AccelerationStructureGeometryKHR::builder()
+                .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
+                .geometry(geo_data)
+                .flags(vk::GeometryFlagsKHR::OPAQUE) // todo check material
+                .build();
+            let range_info = vk::AccelerationStructureBuildRangeInfoKHR::builder()
+                .primitive_count(index_count / 3)
+                .primitive_offset(0) // a.k.a index_offset_bytes for indexed triangle geomtry; not using because already offset via address in GeometryDataKHR.index_data
+                .first_vertex(0) // a.k.a vertex_offset for indexed triangle geometry; not using because already offset via address in GeometryDataKHR.vertex_data
+                .transform_offset(0) // no xform
+                .build();
+            blas_geometrys.push(blas_geo);
+            blas_range_info.push(range_info);
+            max_primitive_counts.push(index_count / 3);
+        }
+
+        // Build BLAS for all added meshes
+        {
+            // Get build size
+            // NOTE: actual buffer addresses in blas_geometrys are ignored
+            let build_size_info = unsafe {
+                let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
+                    .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+                    .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+                    .geometries(&blas_geometrys)
+                    .build();
+                rd.acceleration_structure_entry
+                    .get_acceleration_structure_build_sizes(
+                        vk::AccelerationStructureBuildTypeKHR::DEVICE,
+                        &build_info,
+                        &max_primitive_counts,
+                    )
+            };
+
+            // Create buffer
+            let buffer = rd
+                .create_buffer(
+                    build_size_info.acceleration_structure_size,
+                    vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
+                        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                    vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                )
+                .unwrap();
+
+            // Create AS
+            let accel_struct = rd
+                .create_accel_struct(
+                    buffer,
+                    0,
+                    build_size_info.acceleration_structure_size,
+                    vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL,
+                )
+                .unwrap();
+
+            // Create Scratch buffer
+            let scratch_buffer = rd
+                .create_buffer(
+                    build_size_info.build_scratch_size,
+                    vk::BufferUsageFlags::STORAGE_BUFFER
+                        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                    vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                )
+                .unwrap();
+
+            upload_context.immediate_submit(rd, move |cb| {
+                let scratch_data = vk::DeviceOrHostAddressKHR {
+                    device_address: scratch_buffer.device_address.unwrap(),
+                };
+                let geo_info = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
+                    .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+                    .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+                    .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+                    .dst_acceleration_structure(accel_struct.handle)
+                    .geometries(&blas_geometrys)
+                    .scratch_data(scratch_data)
+                    .build();
+                unsafe {
+                    rd.acceleration_structure_entry
+                        .cmd_build_acceleration_structures(
+                            cb,
+                            slice::from_ref(&geo_info),
+                            &[&blas_range_info],
+                        )
+                };
             });
         }
     }
@@ -656,7 +802,10 @@ impl RednerLoop {
                 let fences = [fence];
                 let timeout_in_ns = 500000; // 500ms
                 loop {
-                    match rd.device.wait_for_fences(&fences, true, timeout_in_ns) {
+                    match rd
+                        .device_entry
+                        .wait_for_fences(&fences, true, timeout_in_ns)
+                    {
                         Ok(_) => return,
                         Err(_) => {
                             println!("Vulkan: Faild to wait {}, keep trying...", msg)
@@ -672,7 +821,7 @@ impl RednerLoop {
             );
 
             // Reset the fence
-            rd.device
+            rd.device_entry
                 .reset_fences(&[
                     self.present_finished_fence,
                     self.command_buffer_finished_fence,
@@ -682,7 +831,7 @@ impl RednerLoop {
 
         // Reuse the command buffer
         unsafe {
-            rd.device
+            rd.device_entry
                 .reset_command_buffer(self.command_buffer, vk::CommandBufferResetFlags::empty())
                 .expect("Vulkan: Reset command buffer failed???");
         };
@@ -723,7 +872,7 @@ impl RednerLoop {
             let begin_info = vk::CommandBufferBeginInfo::builder()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
             unsafe {
-                rd.device
+                rd.device_entry
                     .begin_command_buffer(command_buffer, &begin_info)
                     .unwrap();
             }
@@ -915,7 +1064,7 @@ impl RednerLoop {
 
                     // Draw meshs
                     cb.bind_index_buffer(
-                        scene.index_buffer.buffer.buffer,
+                        scene.index_buffer.buffer.handle,
                         0,
                         vk::IndexType::UINT16,
                     );
@@ -1025,12 +1174,22 @@ impl RednerLoop {
             // Fill SBT
             let sbt = &scene.shader_binding_table;
             let handle_size = rd
-                .physical_device_ray_tracing_pipeline_properties
+                .physical_device
+                .ray_tracing_pipeline_properties
                 .shader_group_handle_size as usize;
             {
                 let pipeline = shaders.get_pipeline(ray_test_pipeline).unwrap();
 
                 unsafe {
+                    assert!(
+                        rd.physical_device
+                            .ray_tracing_pipeline_properties
+                            .shader_group_handle_alignment
+                            <= rd
+                                .physical_device
+                                .ray_tracing_pipeline_properties
+                                .shader_group_handle_size
+                    );
                     let reygen_handle_data = rd
                         .raytracing_pipeline_entry
                         .get_ray_tracing_shader_group_handles(pipeline.handle, 0, 1, handle_size)
@@ -1044,6 +1203,7 @@ impl RednerLoop {
 
             rg.new_pass("Ray Test", RenderPassType::RayTracing)
                 .pipeline(ray_test_pipeline)
+                .accel_struct("rayTracingScene", todo!())
                 .rw_texture("rw_color", color.into())
                 .mannual_transition(|ti, pass| {
                     let rw_color = ti.get_image(pass.get_rw_textures("rw_color"));
@@ -1068,7 +1228,7 @@ impl RednerLoop {
 
                     cb.bind_pipeline(vk::PipelineBindPoint::RAY_TRACING_KHR, pipeline.handle);
 
-                    let sbt_memory = scene.shader_binding_table.memory.as_raw();
+                    let sbt_memory = scene.shader_binding_table_addr;
                     let handle_size = handle_size as u64;
 
                     // TODO build shader tables
@@ -1097,9 +1257,9 @@ impl RednerLoop {
         // Run render graph and fianlize
         {
             let cb = CommandBuffer {
-                device: rd.device.clone(),
+                device: rd.device_entry.clone(),
                 raytracing_pipeline: rd.raytracing_pipeline_entry.clone(),
-                nv_diagnostic_checkpoints: rd.nv_diagnostic_checkpoints.clone(),
+                nv_diagnostic_checkpoints: rd.nv_diagnostic_checkpoints_entry.clone(),
                 command_buffer,
             };
             rg.execute(rd, &cb, &shaders);
@@ -1127,7 +1287,7 @@ impl RednerLoop {
 
         // End command recoding
         unsafe {
-            rd.device.end_command_buffer(command_buffer).unwrap();
+            rd.device_entry.end_command_buffer(command_buffer).unwrap();
         }
 
         // Submit
@@ -1138,7 +1298,7 @@ impl RednerLoop {
                 .command_buffers(&command_buffers)
                 .signal_semaphores(&signal_semaphores);
             unsafe {
-                let rt = rd.device.queue_submit(
+                let rt = rd.device_entry.queue_submit(
                     rd.gfx_queue,
                     &[*submit_info],
                     self.command_buffer_finished_fence,
@@ -1148,11 +1308,11 @@ impl RednerLoop {
                         vk::Result::ERROR_DEVICE_LOST => {
                             // Try nv tool
                             let len = rd
-                                .nv_diagnostic_checkpoints
+                                .nv_diagnostic_checkpoints_entry
                                 .get_queue_checkpoint_data_len(rd.gfx_queue);
                             let mut cp = Vec::new();
                             cp.resize(len, vk::CheckpointDataNV::default());
-                            rd.nv_diagnostic_checkpoints
+                            rd.nv_diagnostic_checkpoints_entry
                                 .get_queue_checkpoint_data(rd.gfx_queue, &mut cp);
                             println!("cp: {:?}", cp);
                         }
