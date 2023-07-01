@@ -214,6 +214,9 @@ impl RenderDevice {
                 vk::KhrDeferredHostOperationsFn::name().as_ptr(),
                 // DEVICE_LOST debug tools
                 vk::NvDeviceDiagnosticCheckpointsFn::name().as_ptr(),
+                // Workaround a DXC bug (causing all raytracing shader requiring ray query extensions when it is not used at all)
+                // ref: https://github.com/microsoft/DirectXShaderCompiler/commit/ce31e10902732c8cd8f6f3b5b78699110afddb2b#diff-44e37c9720575ff94b7842b9ceb70a87fe72486d2b5da2e3828512dc64a352e6R217-R222
+                vk::KhrRayQueryFn::name().as_ptr(),
             ];
             // Get physical device supported features
             let mut vulkan12_features = vk::PhysicalDeviceVulkan12Features::default();
@@ -222,11 +225,13 @@ impl RenderDevice {
                 vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default();
             let mut acceleration_structure_features =
                 vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default();
+            let mut ray_query_features = vk::PhysicalDeviceRayQueryFeaturesKHR::default();
             let mut supported_features = vk::PhysicalDeviceFeatures2::builder()
                 .push_next(&mut vulkan12_features)
                 .push_next(&mut vulkan13_features)
                 .push_next(&mut ray_tracing_pipeline_features)
                 .push_next(&mut acceleration_structure_features)
+                .push_next(&mut ray_query_features)
                 .build();
             unsafe {
                 instance
