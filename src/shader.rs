@@ -79,7 +79,7 @@ pub struct Shaders {
     pipeline_device: PipelineDevice,
     gfx_pipelines_map: HashMap<(ShaderDefinition, ShaderDefinition), Handle<Pipeline>>,
     compute_pipelines_map: HashMap<ShaderDefinition, Handle<Pipeline>>,
-    raytracing_pipelines_map: HashMap<ShaderDefinition, Handle<Pipeline>>,
+    raytracing_pipelines_map: HashMap<(ShaderDefinition, ShaderDefinition), Handle<Pipeline>>,
     shader_loader: ShaderLoader,
 
     pipelines: Vec<Pipeline>,
@@ -155,15 +155,18 @@ impl Shaders {
     pub fn create_raytracing_pipeline(
         &mut self,
         ray_gen_def: ShaderDefinition,
+        miss_def: ShaderDefinition,
         hack: &HackStuff,
     ) -> Option<Handle<Pipeline>> {
-        let key = ray_gen_def;
+        let key = (ray_gen_def, miss_def);
 
         if !self.raytracing_pipelines_map.contains_key(&key) {
-            let cs = self
+            let raygen_cs = self
                 .shader_loader
                 .load(&self.pipeline_device, &ray_gen_def)?;
-            let pipeline_created = create_raytracing_pipeline(&self.pipeline_device, &cs, &hack);
+            let miss_cs = self.shader_loader.load(&self.pipeline_device, &miss_def)?;
+            let pipeline_created =
+                create_raytracing_pipeline(&self.pipeline_device, &raygen_cs, &miss_cs, &hack);
             if let Some(pipeline) = pipeline_created {
                 let handle = self.add_pipeline(pipeline);
                 self.raytracing_pipelines_map.insert(key, handle);
@@ -227,7 +230,7 @@ fn create_pipeline_program(
             .spv(binary_u32)
             .reflect()
             .unwrap();
-        assert!(entry_points.len() == 1);
+        //assert!(entry_points.len() == 1);
         entry_points[0].to_owned()
     };
 
@@ -276,6 +279,7 @@ pub enum ShaderStage {
     Vert,
     Frag,
     RayGen,
+    Miss,
 }
 
 #[derive(Hash, Eq, PartialEq, Copy, Clone)]
@@ -444,6 +448,7 @@ impl ShaderLoader {
             ShaderStage::Vert => "vs_5_0",
             ShaderStage::Frag => "ps_5_0",
             ShaderStage::RayGen => "lib_6_3",
+            ShaderStage::Miss => "lib_6_3",
         };
 
         // NOTE: -fspv-debug=vulkan-with-source requires extended instruction set support form the reflector
@@ -451,6 +456,8 @@ impl ShaderLoader {
             // output spirv
             "-spirv",
             // no optimization
+            "-Od",
+            // Debug Info
             "-Zi",
             // NOTE: requires Google extention in vulkan
             //"-fspv-reflect",
@@ -490,10 +497,10 @@ pub struct PipelineDescriptorInfo {
     // TODO type? array len?
 }
 
-// TODO file empty layouts?
 fn create_merged_descriptor_set_layouts(
     device: &ash::Device,
     stages_info: &[(vk::ShaderStageFlags, &rspirv_reflect::Reflection)],
+    used_set: &mut HashMap<u32, ()>,
     property_map: &mut HashMap<String, PipelineDescriptorInfo>,
     hack: &HackStuff,
 ) -> Vec<vk::DescriptorSetLayout> {
@@ -554,6 +561,9 @@ fn create_merged_descriptor_set_layouts(
                     }
                 }
             }
+
+            // Collect set index
+            used_set.insert(set_index, ());
         }
     }
 
@@ -654,6 +664,7 @@ pub struct Pipeline {
     pub layout: vk::PipelineLayout,
 
     // reflection info
+    pub used_set: HashMap<u32, ()>,
     pub property_map: HashMap<String, PipelineDescriptorInfo>,
     pub push_constant_ranges: Vec<vk::PushConstantRange>,
 }
@@ -673,10 +684,16 @@ pub fn create_compute_pipeline(
 
     // Reflection info to be collected
     let mut property_map = HashMap::new();
+    let mut used_set = HashMap::new();
 
     // Create all set layouts used
-    let set_layouts =
-        create_merged_descriptor_set_layouts(device, &stage_info, &mut property_map, hack);
+    let set_layouts = create_merged_descriptor_set_layouts(
+        device,
+        &stage_info,
+        &mut used_set,
+        &mut property_map,
+        hack,
+    );
 
     // Create all push constant range use in shader
     let push_constant_ranges = make_merged_push_constant_ranges(&stage_info);
@@ -710,6 +727,7 @@ pub fn create_compute_pipeline(
         handle: pipeline,
         set_layouts,
         layout,
+        used_set,
         property_map,
         push_constant_ranges,
     })
@@ -718,19 +736,29 @@ pub fn create_compute_pipeline(
 pub fn create_raytracing_pipeline(
     device: &PipelineDevice,
     ray_gen: &CompiledShader,
+    miss: &CompiledShader,
     hack: &HackStuff,
 ) -> Option<Pipeline> {
-    let stages_info = [(
-        vk::ShaderStageFlags::RAYGEN_KHR,
-        &ray_gen.program.reflect_module,
-    )];
+    let stages_info = [
+        (
+            vk::ShaderStageFlags::RAYGEN_KHR,
+            &ray_gen.program.reflect_module,
+        ),
+        (vk::ShaderStageFlags::MISS_KHR, &miss.program.reflect_module),
+    ];
 
     // Reflection info to be collect
     let mut property_map = HashMap::new();
+    let mut used_set = HashMap::new();
 
     // Set layout for all stages
-    let set_layouts =
-        create_merged_descriptor_set_layouts(&device.device, &stages_info, &mut property_map, hack);
+    let set_layouts = create_merged_descriptor_set_layouts(
+        &device.device,
+        &stages_info,
+        &mut used_set,
+        &mut property_map,
+        hack,
+    );
 
     // Push constant for all stages
     let push_constant_ranges = make_merged_push_constant_ranges(&stages_info);
@@ -747,9 +775,12 @@ pub fn create_raytracing_pipeline(
         .stage(vk::ShaderStageFlags::RAYGEN_KHR)
         .module(ray_gen.program.shader_module)
         .name(&ray_gen.program.entry_point_c);
+    let miss = vk::PipelineShaderStageCreateInfo::builder()
+        .stage(vk::ShaderStageFlags::MISS_KHR)
+        .module(miss.program.shader_module)
+        .name(&miss.program.entry_point_c);
     //let any_hit = vk::PipelineShaderStageCreateInfo::builder();
-    //let miss = vk::PipelineShaderStageCreateInfo::builder();
-    let stages = [*raygen];
+    let stages = [*raygen, *miss];
 
     let raygen_group = vk::RayTracingShaderGroupCreateInfoKHR::builder()
         .ty(vk::RayTracingShaderGroupTypeKHR::GENERAL)
@@ -758,7 +789,14 @@ pub fn create_raytracing_pipeline(
         .any_hit_shader(vk::SHADER_UNUSED_KHR) // TODO
         .intersection_shader(vk::SHADER_UNUSED_KHR)
         .build();
-    let groups = [raygen_group];
+    let miss_group = vk::RayTracingShaderGroupCreateInfoKHR::builder()
+        .ty(vk::RayTracingShaderGroupTypeKHR::GENERAL)
+        .general_shader(1)
+        .closest_hit_shader(vk::SHADER_UNUSED_KHR)
+        .any_hit_shader(vk::SHADER_UNUSED_KHR)
+        .intersection_shader(vk::SHADER_UNUSED_KHR)
+        .build();
+    let groups = [raygen_group, miss_group];
 
     // TODO check ray tracing related flags
     let flags = vk::PipelineCreateFlags::empty();
@@ -787,6 +825,7 @@ pub fn create_raytracing_pipeline(
         handle: pipeline,
         set_layouts,
         layout,
+        used_set,
         property_map,
         push_constant_ranges,
     })
@@ -808,10 +847,16 @@ pub fn create_graphics_pipeline(
 
     // Reflection info to be collected
     let mut property_map = HashMap::new();
+    let mut used_set = HashMap::new();
 
     // Create all set layouts used in all stages
-    let set_layouts =
-        create_merged_descriptor_set_layouts(device, &stages_info, &mut property_map, hack);
+    let set_layouts = create_merged_descriptor_set_layouts(
+        device,
+        &stages_info,
+        &mut used_set,
+        &mut property_map,
+        hack,
+    );
 
     // Create all push constant ranges use in all stages
     let push_constant_ranges = make_merged_push_constant_ranges(&stages_info);
@@ -897,6 +942,7 @@ pub fn create_graphics_pipeline(
         handle: pipeline,
         set_layouts,
         layout,
+        used_set,
         property_map,
         push_constant_ranges,
     })
@@ -910,8 +956,9 @@ pub struct DescriptorSetWriteBuilder<'a> {
     buffer_infos: NamedVec<'a, vk::DescriptorBufferInfo>,
     image_infos: NamedVec<'a, vk::DescriptorImageInfo>,
     samplers: NamedVec<'a, vk::Sampler>,
-    accel_strusts: NamedVec<'a, vk::AccelerationStructureKHR>,
+    accel_structs: NamedVec<'a, vk::AccelerationStructureKHR>,
 
+    write_accel_strusts: Vec<vk::WriteDescriptorSetAccelerationStructureKHR>,
     writes: Vec<vk::WriteDescriptorSet>,
 }
 
@@ -922,7 +969,8 @@ impl Default for DescriptorSetWriteBuilder<'_> {
             buffer_infos: Default::default(),
             image_infos: Default::default(),
             samplers: Default::default(),
-            accel_strusts: Default::default(),
+            accel_structs: Default::default(),
+            write_accel_strusts: Default::default(),
             writes: Default::default(),
         }
     }
@@ -944,6 +992,9 @@ impl<'a> DescriptorSetWriteBuilder<'a> {
     where
         F: Fn(&str, &str),
     {
+        self.writes.clear();
+        self.write_accel_strusts.clear();
+
         for (name, buffer_view) in &self.buffer_views {
             if let Some(info) = pipeline.property_map.get(*name) {
                 assert!(info.set_index == set_index);
@@ -989,20 +1040,26 @@ impl<'a> DescriptorSetWriteBuilder<'a> {
             }
         }
 
-        for (name, accel_struct) in &self.accel_strusts {
+        self.write_accel_strusts.reserve(self.accel_structs.len());
+        for (name, accel_struct) in &self.accel_structs {
             if let Some(info) = pipeline.property_map.get(*name) {
                 assert!(info.set_index == set_index);
-                let mut as_write = vk::WriteDescriptorSetAccelerationStructureKHR::builder()
-                    .acceleration_structures(std::slice::from_ref(accel_struct))
-                    .build();
+                self.write_accel_strusts.push(
+                    vk::WriteDescriptorSetAccelerationStructureKHR::builder()
+                        .acceleration_structures(std::slice::from_ref(accel_struct))
+                        .build(),
+                );
+                let write_accel_structure = self.write_accel_strusts.last_mut().unwrap();
 
-                let write = vk::WriteDescriptorSet::builder()
+                let mut write = vk::WriteDescriptorSet::builder()
                     .dst_set(set)
                     .dst_binding(info.binding_index)
                     .dst_array_element(0)
                     .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
-                    .push_next(&mut as_write);
-                self.writes.push(*write);
+                    .push_next(write_accel_structure)
+                    .build();
+                write.descriptor_count = write_accel_structure.acceleration_structure_count;
+                self.writes.push(write);
             } else {
                 fn_unused(name, "accel_struct");
             }
@@ -1067,7 +1124,7 @@ impl<'a> DescriptorSetWriteBuilder<'a> {
         name: &'a str,
         accel_struct: vk::AccelerationStructureKHR,
     ) -> &mut Self {
-        self.accel_strusts.push((name, accel_struct));
+        self.accel_structs.push((name, accel_struct));
         self
     }
 }

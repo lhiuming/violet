@@ -138,6 +138,7 @@ pub struct RenderPass<'a> {
     name: String,
     ty: RenderPassType,
     pipeline: Handle<Pipeline>,
+    external_descritpr_sets: Vec<(u32, vk::DescriptorSet)>,
     descriptor_set_index: u32,
     textures: Vec<(&'a str, HandleEnum<TextureView>)>,
     accel_structs: Vec<(&'a str, HandleEnum<AccelerationStructure>)>,
@@ -154,6 +155,7 @@ impl RenderPass<'_> {
             name: String::from(name),
             ty,
             pipeline: Handle::null(),
+            external_descritpr_sets: Vec::new(),
             descriptor_set_index: 0,
             textures: Vec::new(),
             accel_structs: Vec::new(),
@@ -220,8 +222,9 @@ impl<'a, 'b> RenderPassBuilder<'a, 'b> {
         self
     }
 
-    pub fn descriptor_set_index(mut self, index: u32) -> Self {
-        self.inner().descriptor_set_index = index;
+    // Binding an external descriptor set
+    pub fn descritpro_set(mut self, set_index: u32, set: vk::DescriptorSet) -> Self {
+        self.inner().external_descritpr_sets.push((set_index, set));
         self
     }
 
@@ -236,16 +239,25 @@ impl<'a, 'b> RenderPassBuilder<'a, 'b> {
         self
     }
 
+    // Index for the per-pass descriptor set
+    pub fn descriptor_set_index(mut self, index: u32) -> Self {
+        self.inner().descriptor_set_index = index;
+        self
+    }
+
+    // Binding texture to per-pass descriptor set
     pub fn texture(mut self, name: &'a str, texture: HandleEnum<TextureView>) -> Self {
         self.inner().textures.push((name, texture));
         self
     }
 
+    // Binding rw texture to per-pass descriptor set
     pub fn rw_texture(mut self, name: &'a str, texture: HandleEnum<TextureView>) -> Self {
         self.inner().rw_textures.push((name, texture));
         self
     }
 
+    // Binding acceleration structure to per-pass descriptor set
     pub fn accel_struct(
         mut self,
         name: &'a str,
@@ -582,7 +594,7 @@ impl<'a> RenderGraph<'a> {
         shaders: &Shaders,
         command_buffer: &CommandBuffer,
         pass: &RenderPass,
-        set: vk::DescriptorSet,
+        internal_set: vk::DescriptorSet,
     ) -> Option<()> {
         let pipeline = shaders.get_pipeline(pass.pipeline);
         if pipeline.is_none() {
@@ -594,10 +606,17 @@ impl<'a> RenderGraph<'a> {
         }
         let pipeline = pipeline.unwrap();
 
+        let pipeline_bind_point = match pass.ty {
+            RenderPassType::Graphics => vk::PipelineBindPoint::GRAPHICS,
+            RenderPassType::Compute => vk::PipelineBindPoint::COMPUTE,
+            RenderPassType::RayTracing => vk::PipelineBindPoint::RAY_TRACING_KHR,
+        };
+
         // Update descriptor set
         // TODO this struct can be reused (a lot vec)
-        let mut builder = shader::DescriptorSetWriteBuilder::new();
-        {
+        if internal_set != vk::DescriptorSet::null() {
+            let mut builder = shader::DescriptorSetWriteBuilder::new();
+
             let builder = &mut builder;
             for (name, handle) in &pass.textures {
                 let view = self.get_texture_view(*handle);
@@ -622,7 +641,7 @@ impl<'a> RenderGraph<'a> {
             }
             let writes = builder.build(
                 pipeline,
-                set,
+                internal_set,
                 pass.descriptor_set_index,
                 |prop_name, ty_name| {
                     println!(
@@ -631,24 +650,47 @@ impl<'a> RenderGraph<'a> {
                     );
                 },
             );
-            unsafe {
-                rd.device_entry.update_descriptor_sets(&writes, &[]);
+            if !writes.is_empty() {
+                unsafe {
+                    rd.device_entry.update_descriptor_sets(&writes, &[]);
+                }
             }
+
+            // Bind set
+            command_buffer.bind_descriptor_set(
+                pipeline_bind_point,
+                pipeline.layout,
+                pass.descriptor_set_index,
+                internal_set,
+                None,
+            );
         }
 
-        // Bind set
-        let pipeline_bind_point = match pass.ty {
-            RenderPassType::Graphics => vk::PipelineBindPoint::GRAPHICS,
-            RenderPassType::Compute => vk::PipelineBindPoint::COMPUTE,
-            RenderPassType::RayTracing => vk::PipelineBindPoint::RAY_TRACING_KHR,
-        };
-        command_buffer.bind_descriptor_set(
-            pipeline_bind_point,
-            pipeline.layout,
-            pass.descriptor_set_index,
-            set,
-            None,
-        );
+        // Set external set
+        for (set_index, set) in &pass.external_descritpr_sets {
+            if (*set_index == pass.descriptor_set_index)
+                && (internal_set != vk::DescriptorSet::null())
+            {
+                println!("Error: RenderPass {} external set index {} is conflicted with internal set index {}", pass.name, set_index, pass.descriptor_set_index);
+                continue;
+            }
+
+            if !pipeline.used_set.contains_key(set_index) {
+                println!(
+                    "Warning[RenderGraph: {}]: set index {} is not used",
+                    pass.name, set_index
+                );
+                continue;
+            }
+
+            command_buffer.bind_descriptor_set(
+                pipeline_bind_point,
+                pipeline.layout,
+                *set_index,
+                *set,
+                None,
+            );
+        }
 
         Some(())
     }
@@ -737,11 +779,14 @@ impl<'a> RenderGraph<'a> {
             }
 
             // Bind resources
-            let set = self.descriptor_sets[pass_index];
-            if set != vk::DescriptorSet::null() {
-                self.bind_resources(rd, shaders, command_buffer, &pass, set);
-                command_buffer.insert_checkpoint();
-            }
+            self.bind_resources(
+                rd,
+                shaders,
+                command_buffer,
+                &pass,
+                self.descriptor_sets[pass_index],
+            );
+            command_buffer.insert_checkpoint();
 
             // Run pass
             let render = pass.render.take().unwrap();

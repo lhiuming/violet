@@ -593,7 +593,7 @@ pub struct Buffer {
     pub handle: vk::Buffer,
     pub memory: vk::DeviceMemory,
     pub size: u64,
-    pub data: *mut c_void,
+    pub data: *mut c_void, // TODO make optional
     pub device_address: Option<vk::DeviceAddress>,
 }
 
@@ -901,6 +901,7 @@ pub struct AccelerationStructure {
     pub buffer: Buffer,
     pub ty: vk::AccelerationStructureTypeKHR,
     pub handle: vk::AccelerationStructureKHR,
+    pub device_address: vk::DeviceAddress, // used to fill vk::AccelerationStructureInstanceKHR::accelerationStructureReference
 }
 
 impl RenderDevice {
@@ -912,6 +913,7 @@ impl RenderDevice {
         ty: vk::AccelerationStructureTypeKHR,
     ) -> Option<AccelerationStructure> {
         assert!(buffer.size >= (offset + size));
+        assert!(offset & 0xff == 0); // required by spec
         let create_info: vk::AccelerationStructureCreateInfoKHRBuilder<'_> =
             vk::AccelerationStructureCreateInfoKHR::builder()
                 .buffer(buffer.handle)
@@ -924,6 +926,18 @@ impl RenderDevice {
                 .unwrap()
         };
 
-        Some(AccelerationStructure { buffer, ty, handle })
+        let device_address = unsafe {
+            let info = vk::AccelerationStructureDeviceAddressInfoKHR::builder()
+                .acceleration_structure(handle);
+            self.acceleration_structure_entry
+                .get_acceleration_structure_device_address(&info)
+        };
+
+        Some(AccelerationStructure {
+            buffer,
+            ty,
+            handle,
+            device_address,
+        })
     }
 }

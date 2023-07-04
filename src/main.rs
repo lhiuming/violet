@@ -83,6 +83,7 @@ fn main() {
     if let Ok(model) = model {
         println!("Uploading to GPU ...");
         render_scene.add(&rd, &model);
+        render_scene.rebuild_top_level_accel_struct(&rd);
     } else {
         println!(
             "Failed to load model ({}): {:?}",

@@ -2,15 +2,15 @@ use std::mem::{self, size_of};
 use std::slice;
 
 use ash::vk;
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, Vec4, Vec4Swizzles};
 
 use crate::command_buffer::{CommandBuffer, StencilOps};
 use crate::model::Model;
 use crate::render_device::{
-    Buffer, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
+    AccelerationStructure, Buffer, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
 };
 use crate::render_graph::{self};
-use crate::shader::{HackStuff, PushConstantsBuilder, ShaderDefinition, Shaders};
+use crate::shader::{HackStuff, PushConstantsBuilder, ShaderDefinition, ShaderStage, Shaders};
 
 // Allocatable buffer. Alway aligned to 4 bytes.
 pub struct AllocBuffer {
@@ -83,7 +83,6 @@ impl UploadContext {
         F: FnOnce(vk::CommandBuffer),
     {
         // TODO we will need semaphore to sync with rendering which will depends on operation here
-
         let device = &rd.device_entry;
         let (command_buffer, finished_fence) = self.pick_command_buffer(rd);
 
@@ -101,6 +100,11 @@ impl UploadContext {
             device
                 .queue_submit(rd.gfx_queue, &[*submit_info], finished_fence)
                 .unwrap();
+
+            // debug wait
+            let fences = [finished_fence];
+            let timeout = 1000 * 1000000; // 1s
+            device.wait_for_fences(&fences, true, timeout).unwrap();
         }
     }
 }
@@ -162,6 +166,10 @@ pub struct RenderScene {
     pub material_parmas: Vec<MaterialParams>,
     pub mesh_params: Vec<MeshParams>,
 
+    // Ray Tracing Acceleration structures for whole scene
+    pub mesh_bottom_level_accel_structs: Vec<AccelerationStructure>,
+    pub scene_top_level_accel_struct: Option<AccelerationStructure>,
+
     // Lighting settings
     pub sun_dir: Vec3,
 }
@@ -193,16 +201,23 @@ impl RenderScene {
             .create_buffer_view(vertex_buffer.buffer.handle, vk::Format::R32_UINT)
             .unwrap();
 
+        let shader_group_count = 2; // raygen + miss
         let sg_handle_size = rd
             .physical_device
             .ray_tracing_pipeline_properties
             .shader_group_handle_size as u64;
+        let table_size = std::cmp::max(
+            sg_handle_size,
+            rd.physical_device
+                .ray_tracing_pipeline_properties
+                .shader_group_base_alignment as u64,
+        ) * shader_group_count;
         let shader_binding_table = rd
             .create_buffer(
-                sg_handle_size,
+                table_size,
                 vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR
                     | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS, // for get_buffer_device_address
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT, // filling directly from host
             )
             .unwrap();
 
@@ -339,6 +354,8 @@ impl RenderScene {
             material_texture_views: Vec::new(),
             material_parmas: Vec::new(),
             mesh_params: Vec::new(),
+            mesh_bottom_level_accel_structs: Vec::new(),
+            scene_top_level_accel_struct: None,
             sun_dir: Vec3::new(0.0, 0.0, 1.0),
         }
     }
@@ -705,16 +722,170 @@ impl RenderScene {
                         )
                 };
             });
+
+            self.mesh_bottom_level_accel_structs.push(accel_struct);
         }
+    }
+
+    pub fn rebuild_top_level_accel_struct(&mut self, rd: &RenderDevice) {
+        // Create instance buffer
+        let num_blas = self.mesh_bottom_level_accel_structs.len();
+        let instance_buffer = rd
+            .create_buffer(
+                (size_of::<vk::AccelerationStructureInstanceKHR>() * num_blas) as u64,
+                vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                    | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .unwrap();
+
+        // Traverse all BLAS
+        let mut geometries = Vec::with_capacity(num_blas);
+        let mut range_infos = Vec::with_capacity(num_blas);
+        let mut max_primitive_counts = Vec::with_capacity(num_blas);
+        for (index, blas) in self.mesh_bottom_level_accel_structs.iter().enumerate() {
+            // Fill instance buffer (3x4 row-major affine transform)
+            let xform = vk::TransformMatrixKHR {
+                matrix: [
+                    1.0, 0.0, 0.0, 0.0, //
+                    0.0, 1.0, 0.0, 0.0, //
+                    0.0, 0.0, 1.0, 0.0, //
+                ],
+            };
+            let instance = vk::AccelerationStructureInstanceKHR {
+                transform: xform,
+                instance_custom_index_and_mask: vk::Packed24_8::new(
+                    0, // custom index is not used
+                    0xFF,
+                ),
+                instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(
+                    0, // TODO not used hit shader
+                    vk::GeometryInstanceFlagsKHR::TRIANGLE_FRONT_COUNTERCLOCKWISE.as_raw() as u8, // Keep consistent with rasterization
+                ),
+                acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
+                    device_handle: blas.device_address,
+                },
+            };
+            let dst = unsafe {
+                std::slice::from_raw_parts_mut::<vk::AccelerationStructureInstanceKHR>(
+                    instance_buffer.data as _,
+                    instance_buffer.size as usize,
+                )
+            };
+            dst[index] = instance;
+
+            // Add geometry entry
+            let instance_data_device_address = vk::DeviceOrHostAddressConstKHR {
+                device_address: instance_buffer.device_address.unwrap()
+                    + (size_of::<vk::AccelerationStructureInstanceKHR>() * index) as u64,
+            };
+            let geo_data = vk::AccelerationStructureGeometryDataKHR {
+                instances: vk::AccelerationStructureGeometryInstancesDataKHR::builder()
+                    .data(instance_data_device_address)
+                    .array_of_pointers(false)
+                    .build(),
+            };
+            let blas_geo = vk::AccelerationStructureGeometryKHR::builder()
+                .geometry_type(vk::GeometryTypeKHR::INSTANCES)
+                .geometry(geo_data)
+                .flags(vk::GeometryFlagsKHR::OPAQUE) // todo check material
+                .build();
+            geometries.push(blas_geo);
+
+            // Add (trivial) range info
+            let range_info = vk::AccelerationStructureBuildRangeInfoKHR::builder()
+                .primitive_count(1)
+                .primitive_offset(0)
+                .first_vertex(0)
+                .transform_offset(0)
+                .build();
+            range_infos.push(range_info);
+            max_primitive_counts.push(1);
+        }
+
+        // Get build size
+        // NOTE: actual buffer addresses in geometrys are ignored
+        let build_size_info = unsafe {
+            let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
+                .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
+                .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+                .geometries(&geometries)
+                .build();
+            rd.acceleration_structure_entry
+                .get_acceleration_structure_build_sizes(
+                    vk::AccelerationStructureBuildTypeKHR::DEVICE,
+                    &build_info,
+                    &max_primitive_counts,
+                )
+        };
+
+        // Create buffer
+        let buffer = rd
+            .create_buffer(
+                build_size_info.acceleration_structure_size,
+                vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
+            .unwrap();
+
+        // Create AS
+        let accel_struct = rd
+            .create_accel_struct(
+                buffer,
+                0,
+                build_size_info.acceleration_structure_size,
+                vk::AccelerationStructureTypeKHR::TOP_LEVEL,
+            )
+            .unwrap();
+
+        // Create Scratch buffer
+        let scratch_buffer = rd
+            .create_buffer(
+                build_size_info.build_scratch_size,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            )
+            .unwrap();
+
+        self.upload_context.immediate_submit(rd, move |cb| {
+            let geo_info = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
+                .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
+                .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+                .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+                .dst_acceleration_structure(accel_struct.handle)
+                .geometries(&geometries)
+                .scratch_data(vk::DeviceOrHostAddressKHR {
+                    device_address: scratch_buffer.device_address.unwrap(),
+                })
+                .build();
+            unsafe {
+                rd.acceleration_structure_entry
+                    .cmd_build_acceleration_structures(
+                        cb,
+                        slice::from_ref(&geo_info),
+                        &[&range_infos],
+                    )
+            };
+        });
+
+        self.scene_top_level_accel_struct.replace(accel_struct);
     }
 }
 
+#[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct ViewParams {
     pub view_proj: Mat4,
     pub inv_view_proj: Mat4,
     pub view_pos: Vec3,
-    pub padding: f32,
+    pub pad0: f32,
+    pub view_dir_top_left: Vec3,
+    pub pad1: f32,
+    pub view_dir_right_shift: Vec3,
+    pub pad2: f32,
+    pub view_dir_down_shift: Vec3,
+    pub pad3: f32,
     pub sun_dir: Vec3,
 }
 
@@ -768,7 +939,7 @@ impl RednerLoop {
         let mut hack = HackStuff {
             bindless_size: 1024,
             set_layout_override: std::collections::HashMap::new(),
-            ray_recursiion_depth: 1,
+            ray_recursiion_depth: 0,
         };
 
         // Acquire target image
@@ -800,7 +971,8 @@ impl RednerLoop {
 
             let wait_fence = |fence, msg| {
                 let fences = [fence];
-                let timeout_in_ns = 500000; // 500ms
+                let mut timeout_in_ns = 5 * 1000000; // 5ms
+                let timeout_max = 500 * 1000000; // 500ms
                 loop {
                     match rd
                         .device_entry
@@ -808,9 +980,14 @@ impl RednerLoop {
                     {
                         Ok(_) => return,
                         Err(_) => {
-                            println!("Vulkan: Faild to wait {}, keep trying...", msg)
+                            println!(
+                                "Vulkan: Failed to wait {} in {}ms, keep trying...",
+                                msg,
+                                timeout_in_ns / 1000000
+                            );
                         }
                     }
+                    timeout_in_ns = std::cmp::min(timeout_in_ns * 2, timeout_max);
                 }
             };
 
@@ -840,21 +1017,36 @@ impl RednerLoop {
         {
             // From row major float4x4 to column major Mat4
             let view_proj = view_info.projection * view_info.view_transform;
+            let inv_proj = view_proj.inverse();
+            let ndc_to_ray = |ndc: Vec4| {
+                let pos_ws_h = inv_proj * ndc;
+                let pos_ws = pos_ws_h.xyz() / pos_ws_h.w;
+                pos_ws - view_info.view_position
+            };
+            let view_dir_top_left = ndc_to_ray(Vec4::new(-1.0, -1.0, 1.0, 1.0));
+            let view_dir_right = ndc_to_ray(Vec4::new(1.0, 0.0, 1.0, 1.0));
+            let view_dir_left = ndc_to_ray(Vec4::new(-1.0, 0.0, 1.0, 1.0));
+            let view_dir_up = ndc_to_ray(Vec4::new(0.0, -1.0, 1.0, 1.0));
+            let view_dir_down = ndc_to_ray(Vec4::new(0.0, 1.0, 1.0, 1.0));
             let view_params = ViewParams {
                 view_proj: view_proj,
                 inv_view_proj: view_proj.inverse(),
                 view_pos: view_info.view_position,
-                padding: 0f32,
+                view_dir_top_left,
+                view_dir_right_shift: view_dir_right - view_dir_left,
+                view_dir_down_shift: view_dir_down - view_dir_up,
                 sun_dir: scene.sun_dir,
+                pad0: 0.0,
+                pad1: 0.0,
+                pad2: 0.0,
+                pad3: 0.0,
             };
+            println!("{:?}", view_params);
 
-            unsafe {
-                std::ptr::copy_nonoverlapping(
-                    std::ptr::addr_of!(view_params),
-                    scene.view_params_cb.data as *mut ViewParams,
-                    1,
-                );
-            }
+            let dst = unsafe {
+                std::slice::from_raw_parts_mut(scene.view_params_cb.data as *mut ViewParams, 1)
+            };
+            dst.copy_from_slice(std::slice::from_ref(&view_params));
         }
 
         // SIMPLE CONFIGURATION
@@ -980,6 +1172,7 @@ impl RednerLoop {
             let viewport_extent = rd.swapchain.extent;
             rg.new_pass("Base Pass", RenderPassType::Graphics)
                 .pipeline(pipeline)
+                .descritpro_set(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set)
                 .descriptor_set_index(2)
                 .color_targets(&[ColorTarget {
                     view: color_view.into(),
@@ -1052,15 +1245,6 @@ impl RednerLoop {
                     cb.set_stencil_reference(face_mask, 0xFF);
 
                     let pipeline = shaders.get_pipeline(pipeline).unwrap();
-
-                    // Bind scene resources
-                    cb.bind_descriptor_set(
-                        vk::PipelineBindPoint::GRAPHICS,
-                        pipeline.layout,
-                        SCENE_DESCRIPTOR_SET_INDEX,
-                        scene.descriptor_set,
-                        None,
-                    );
 
                     // Draw meshs
                     cb.bind_index_buffer(
@@ -1163,7 +1347,12 @@ impl RednerLoop {
             ShaderDefinition {
                 virtual_path: "ray_test.hlsl",
                 entry_point: "raygen",
-                stage: crate::shader::ShaderStage::RayGen,
+                stage: ShaderStage::RayGen,
+            },
+            ShaderDefinition {
+                virtual_path: "ray_test.hlsl",
+                entry_point: "miss",
+                stage: ShaderStage::Miss,
             },
             &hack,
         );
@@ -1177,6 +1366,10 @@ impl RednerLoop {
                 .physical_device
                 .ray_tracing_pipeline_properties
                 .shader_group_handle_size as usize;
+            let group_align = rd
+                .physical_device
+                .ray_tracing_pipeline_properties
+                .shader_group_base_alignment;
             {
                 let pipeline = shaders.get_pipeline(ray_test_pipeline).unwrap();
 
@@ -1190,27 +1383,46 @@ impl RednerLoop {
                                 .ray_tracing_pipeline_properties
                                 .shader_group_handle_size
                     );
+                    let group_count = 2; // raygen + miss
+                    let data_size = handle_size * group_count; // only shader group handles
                     let reygen_handle_data = rd
                         .raytracing_pipeline_entry
-                        .get_ray_tracing_shader_group_handles(pipeline.handle, 0, 1, handle_size)
+                        .get_ray_tracing_shader_group_handles(
+                            pipeline.handle,
+                            0,
+                            group_count as u32,
+                            data_size,
+                        )
                         .unwrap();
 
                     // copy to SBT
-                    let data = std::slice::from_raw_parts_mut(sbt.data as *mut u8, handle_size);
-                    data.copy_from_slice(&reygen_handle_data);
+                    let dst_raygen =
+                        std::slice::from_raw_parts_mut(sbt.data as *mut u8, handle_size);
+                    dst_raygen.copy_from_slice(&reygen_handle_data[0..handle_size]);
+                    let stride = rd
+                        .physical_device
+                        .ray_tracing_pipeline_properties
+                        .shader_group_base_alignment;
+                    let dst_raygen = std::slice::from_raw_parts_mut(
+                        sbt.data.offset(stride as isize) as *mut u8,
+                        handle_size,
+                    );
+                    dst_raygen.copy_from_slice(&reygen_handle_data[handle_size..handle_size * 2]);
                 };
             }
 
+            let tlas = scene.scene_top_level_accel_struct.as_ref().unwrap();
+
             rg.new_pass("Ray Test", RenderPassType::RayTracing)
                 .pipeline(ray_test_pipeline)
-                .accel_struct("rayTracingScene", todo!())
+                .descritpro_set(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set)
+                .accel_struct("rayTracingScene", (*tlas).into())
                 .rw_texture("rw_color", color.into())
                 .mannual_transition(|ti, pass| {
                     let rw_color = ti.get_image(pass.get_rw_textures("rw_color"));
                     ti.cmd_buf.transition_image_layout(
                         rw_color,
                         vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                        //vk::PipelineStageFlags::COMPUTE_SHADER,
                         vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
                         vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                         vk::ImageLayout::GENERAL,
@@ -1231,13 +1443,16 @@ impl RednerLoop {
                     let sbt_memory = scene.shader_binding_table_addr;
                     let handle_size = handle_size as u64;
 
-                    // TODO build shader tables
                     let raygen_shader_binding_tables = vk::StridedDeviceAddressRegionKHR::builder()
                         .size(handle_size) // only shader, no resources
                         .stride(handle_size) // equal to size for raygen
                         .device_address(sbt_memory)
                         .build();
-                    let miss_shader_binding_tables = vk::StridedDeviceAddressRegionKHR::default();
+                    let miss_shader_binding_tables = vk::StridedDeviceAddressRegionKHR::builder()
+                        .size(handle_size)
+                        .stride(handle_size)
+                        .device_address(sbt_memory + group_align as u64)
+                        .build();
                     let hit_shader_binding_tables = vk::StridedDeviceAddressRegionKHR::default();
                     let callable_shader_binding_tables =
                         vk::StridedDeviceAddressRegionKHR::default();
@@ -1268,10 +1483,8 @@ impl RednerLoop {
             let swapchain = rd.swapchain.image[image_index as usize];
             cb.transition_image_layout(
                 swapchain.image,
-                //vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                 vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
                 vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                //vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                 vk::ImageLayout::GENERAL,
                 vk::ImageLayout::PRESENT_SRC_KHR,
                 vk::ImageSubresourceRange {
