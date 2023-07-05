@@ -760,6 +760,12 @@ pub struct Texture {
     pub memory: vk::DeviceMemory,
 }
 
+impl PartialEq for Texture {
+    fn eq(&self, other: &Self) -> bool {
+        self.image == other.image
+    }
+}
+
 // Mini struct for a texture view
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub struct TextureViewDesc {
@@ -806,6 +812,12 @@ pub struct TextureView {
     pub texture: Texture,
     pub desc: TextureViewDesc,
     pub image_view: vk::ImageView,
+}
+
+impl PartialEq for TextureView {
+    fn eq(&self, other: &Self) -> bool {
+        self.image_view == other.image_view
+    }
 }
 
 impl RenderDevice {
@@ -902,6 +914,12 @@ pub struct AccelerationStructure {
     pub ty: vk::AccelerationStructureTypeKHR,
     pub handle: vk::AccelerationStructureKHR,
     pub device_address: vk::DeviceAddress, // used to fill vk::AccelerationStructureInstanceKHR::accelerationStructureReference
+}
+
+impl PartialEq for AccelerationStructure {
+    fn eq(&self, other: &Self) -> bool {
+        self.handle == other.handle
+    }
 }
 
 impl RenderDevice {

@@ -933,7 +933,7 @@ impl RednerLoop {
         let command_buffer = self.command_buffer;
 
         use render_graph::*;
-        let mut rg = RenderGraph::new(&mut self.render_graph_cache);
+        let mut rg = RenderGraphBuilder::new(&mut self.render_graph_cache);
 
         // Stupid shader compiling hack
         let mut hack = HackStuff {
@@ -1041,7 +1041,6 @@ impl RednerLoop {
                 pad2: 0.0,
                 pad3: 0.0,
             };
-            println!("{:?}", view_params);
 
             let dst = unsafe {
                 std::slice::from_raw_parts_mut(scene.view_params_cb.data as *mut ViewParams, 1)
@@ -1085,7 +1084,7 @@ impl RednerLoop {
                 flags: vk::ImageCreateFlags::CUBE_COMPATIBLE, // required for viewed as cube
             });
             let array_uav = rg.create_texture_view(
-                skycube_texture.into(),
+                skycube_texture,
                 TextureViewDesc {
                     view_type: vk::ImageViewType::TYPE_2D_ARRAY,
                     format: vk::Format::B10G11R11_UFLOAT_PACK32,
@@ -1095,11 +1094,11 @@ impl RednerLoop {
 
             rg.new_pass("Sky IBL gen", RenderPassType::Compute)
                 .pipeline(pipeline)
-                .rw_texture("rw_cube_texture", array_uav.into())
+                .rw_texture("rw_cube_texture", array_uav)
                 .mannual_transition(move |ti, _pass| {
                     // UAV Transition
                     ti.cmd_buf.transition_image_layout(
-                        ti.get_image(array_uav.into()),
+                        ti.get_image(array_uav),
                         vk::PipelineStageFlags::default(),
                         vk::PipelineStageFlags::COMPUTE_SHADER,
                         vk::ImageLayout::UNDEFINED,
@@ -1132,7 +1131,7 @@ impl RednerLoop {
         }
 
         let skycube = rg.create_texture_view(
-            skycube_texture.into(),
+            skycube_texture,
             TextureViewDesc {
                 view_type: vk::ImageViewType::CUBE,
                 format: vk::Format::B10G11R11_UFLOAT_PACK32,
@@ -1153,7 +1152,8 @@ impl RednerLoop {
         {
             let pipeline = mesh_gfx_pipeline.unwrap();
 
-            let color_view = rd.swapchain.image_view[image_index as usize];
+            let color_view =
+                rg.register_texture_view(rd.swapchain.image_view[image_index as usize]);
             main_depth_stencil = rg.create_texutre(TextureDesc::new_2d(
                 rd.swapchain.extent.width,
                 rd.swapchain.extent.height,
@@ -1161,7 +1161,7 @@ impl RednerLoop {
                 vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
             ));
             let ds_view = rg.create_texture_view(
-                main_depth_stencil.into(),
+                main_depth_stencil,
                 TextureViewDesc {
                     view_type: vk::ImageViewType::TYPE_2D,
                     format: vk::Format::D24_UNORM_S8_UINT,
@@ -1175,22 +1175,22 @@ impl RednerLoop {
                 .descritpro_set(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set)
                 .descriptor_set_index(2)
                 .color_targets(&[ColorTarget {
-                    view: color_view.into(),
+                    view: color_view,
                     load_op: ColorLoadOp::Clear(clear_color),
                 }])
                 .depth_stencil(DepthStencilTarget {
-                    view: ds_view.into(),
+                    view: ds_view,
                     load_op: DepthLoadOp::Clear(vk::ClearDepthStencilValue {
                         depth: 0.0,
                         stencil: 0,
                     }),
                     store_op: vk::AttachmentStoreOp::STORE,
                 })
-                .texture("skycube", skycube.into())
+                .texture("skycube", skycube)
                 .mannual_transition(move |ti, pass| {
                     // Prepare skycube
                     ti.cmd_buf.transition_image_layout(
-                        ti.get_image(skycube.into()),
+                        ti.get_image(skycube),
                         vk::PipelineStageFlags::COMPUTE_SHADER,
                         vk::PipelineStageFlags::FRAGMENT_SHADER,
                         vk::ImageLayout::GENERAL,
@@ -1292,9 +1292,10 @@ impl RednerLoop {
             let pipeline = sky_pipeline.unwrap();
 
             //let color_target = rg.register_texture_view(swapchain.image_view[image_index as usize]);
-            let color_target = rd.swapchain.image_view[image_index as usize];
+            let color_target =
+                rg.register_texture_view(rd.swapchain.image_view[image_index as usize]);
             let stencil = rg.create_texture_view(
-                main_depth_stencil.into(),
+                main_depth_stencil,
                 TextureViewDesc {
                     view_type: vk::ImageViewType::TYPE_2D,
                     format: vk::Format::D24_UNORM_S8_UINT,
@@ -1304,13 +1305,13 @@ impl RednerLoop {
 
             rg.new_pass("Sky", RenderPassType::Graphics)
                 .pipeline(pipeline)
-                .texture("skycube", skycube.into())
+                .texture("skycube", skycube)
                 .color_targets(&[ColorTarget {
-                    view: color_target.into(),
+                    view: color_target,
                     load_op: ColorLoadOp::Load,
                 }])
                 .depth_stencil(DepthStencilTarget {
-                    view: stencil.into(),
+                    view: stencil,
                     load_op: DepthLoadOp::Load,
                     store_op: vk::AttachmentStoreOp::NONE,
                 })
@@ -1358,7 +1359,7 @@ impl RednerLoop {
         );
         if let Some(ray_test_pipeline) = ray_test_pipeline {
             let extent = rd.swapchain.extent;
-            let color = rd.swapchain.image_view[image_index as usize];
+            let color = rg.register_texture_view(rd.swapchain.image_view[image_index as usize]);
 
             // Fill SBT
             let sbt = &scene.shader_binding_table;
@@ -1411,13 +1412,13 @@ impl RednerLoop {
                 };
             }
 
-            let tlas = scene.scene_top_level_accel_struct.as_ref().unwrap();
+            let tlas = rg.register_accel_struct(scene.scene_top_level_accel_struct.unwrap());
 
             rg.new_pass("Ray Test", RenderPassType::RayTracing)
                 .pipeline(ray_test_pipeline)
                 .descritpro_set(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set)
-                .accel_struct("rayTracingScene", (*tlas).into())
-                .rw_texture("rw_color", color.into())
+                .accel_struct("rayTracingScene", tlas)
+                .rw_texture("rw_color", color)
                 .mannual_transition(|ti, pass| {
                     let rw_color = ti.get_image(pass.get_rw_textures("rw_color"));
                     ti.cmd_buf.transition_image_layout(
@@ -1468,6 +1469,9 @@ impl RednerLoop {
                     );
                 });
         }
+
+        let swapchain_tex_handle = rg.register_texture(rd.swapchain.image[image_index as usize]);
+        rg.mark_outout_texture(swapchain_tex_handle);
 
         // Run render graph and fianlize
         {

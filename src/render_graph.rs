@@ -49,53 +49,6 @@ impl<T> Clone for RGHandle<T> {
 
 impl<T> Copy for RGHandle<T> {}
 
-// TODO better naming
-#[derive(Clone, Copy)]
-pub enum HandleEnum<T> {
-    Inetrnal(RGHandle<T>),
-    External(T),
-}
-
-impl<T> From<RGHandle<T>> for HandleEnum<T> {
-    fn from(handle: RGHandle<T>) -> Self {
-        HandleEnum::Inetrnal(handle)
-    }
-}
-
-impl<T> From<HandleEnum<T>> for RGHandle<T> {
-    fn from(handle: HandleEnum<T>) -> Self {
-        match handle {
-            HandleEnum::Inetrnal(h) => h,
-            _ => panic!("Cannot convert external handle to internal handle!"),
-        }
-    }
-}
-
-impl<T> From<T> for HandleEnum<T> {
-    fn from(t: T) -> Self {
-        HandleEnum::External(t)
-    }
-}
-
-// TODO make this a macro
-impl From<HandleEnum<Texture>> for Texture {
-    fn from(handle: HandleEnum<Texture>) -> Self {
-        match handle {
-            HandleEnum::External(t) => t,
-            _ => panic!("Cannot convert internal handle to external handle!"),
-        }
-    }
-}
-
-impl From<HandleEnum<TextureView>> for TextureView {
-    fn from(handle: HandleEnum<TextureView>) -> Self {
-        match handle {
-            HandleEnum::External(t) => t,
-            _ => panic!("Cannot convert internal handle to external handle!"),
-        }
-    }
-}
-
 #[derive(PartialEq, Eq)]
 pub enum RenderPassType {
     Graphics,
@@ -113,7 +66,7 @@ pub enum ColorLoadOp {
 
 #[derive(Clone, Copy)]
 pub struct ColorTarget {
-    pub view: HandleEnum<TextureView>,
+    pub view: RGHandle<TextureView>,
     pub load_op: ColorLoadOp,
 }
 
@@ -125,7 +78,7 @@ pub enum DepthLoadOp {
 
 #[derive(Clone, Copy)]
 pub struct DepthStencilTarget {
-    pub view: HandleEnum<TextureView>,
+    pub view: RGHandle<TextureView>,
     pub load_op: DepthLoadOp,
     pub store_op: vk::AttachmentStoreOp,
 }
@@ -140,11 +93,11 @@ pub struct RenderPass<'a> {
     pipeline: Handle<Pipeline>,
     external_descritpr_sets: Vec<(u32, vk::DescriptorSet)>,
     descriptor_set_index: u32,
-    textures: Vec<(&'a str, HandleEnum<TextureView>)>,
-    accel_structs: Vec<(&'a str, HandleEnum<AccelerationStructure>)>,
+    textures: Vec<(&'a str, RGHandle<TextureView>)>,
+    accel_structs: Vec<(&'a str, RGHandle<AccelerationStructure>)>,
     color_targets: Vec<ColorTarget>,
     depth_stencil: Option<DepthStencilTarget>,
-    rw_textures: Vec<(&'a str, HandleEnum<TextureView>)>,
+    rw_textures: Vec<(&'a str, RGHandle<TextureView>)>,
     mannual_transition: Option<Box<dyn 'a + FnOnce(&TransitionInterface, &RenderPass)>>, // Hack
     render: Option<Box<dyn 'a + FnOnce(&CommandBuffer, &Shaders, RenderPass)>>,
 }
@@ -168,7 +121,7 @@ impl RenderPass<'_> {
     }
 
     #[allow(dead_code)]
-    pub fn get_texture(&self, name: &str) -> HandleEnum<TextureView> {
+    pub fn get_texture(&self, name: &str) -> RGHandle<TextureView> {
         for (n, t) in &self.textures {
             if n == &name {
                 return *t;
@@ -181,7 +134,7 @@ impl RenderPass<'_> {
         &self.color_targets
     }
 
-    pub fn get_rw_textures(&self, name: &str) -> HandleEnum<TextureView> {
+    pub fn get_rw_textures(&self, name: &str) -> RGHandle<TextureView> {
         for (n, t) in &self.rw_textures {
             if n == &name {
                 return *t;
@@ -193,12 +146,16 @@ impl RenderPass<'_> {
 
 pub struct RenderPassBuilder<'a, 'b> {
     inner: Option<RenderPass<'a>>,
-    render_graph: &'b mut RenderGraph<'a>,
+    render_graph: &'b mut RenderGraphBuilder<'a>,
 }
 
 // TODO generate setter with macro?
 impl<'a, 'b> RenderPassBuilder<'a, 'b> {
-    pub fn new(render_graph: &'b mut RenderGraph<'a>, name: &str, ty: RenderPassType) -> Self {
+    pub fn new(
+        render_graph: &'b mut RenderGraphBuilder<'a>,
+        name: &str,
+        ty: RenderPassType,
+    ) -> Self {
         RenderPassBuilder {
             inner: Some(RenderPass::new(name, ty)),
             render_graph,
@@ -246,13 +203,13 @@ impl<'a, 'b> RenderPassBuilder<'a, 'b> {
     }
 
     // Binding texture to per-pass descriptor set
-    pub fn texture(mut self, name: &'a str, texture: HandleEnum<TextureView>) -> Self {
+    pub fn texture(mut self, name: &'a str, texture: RGHandle<TextureView>) -> Self {
         self.inner().textures.push((name, texture));
         self
     }
 
     // Binding rw texture to per-pass descriptor set
-    pub fn rw_texture(mut self, name: &'a str, texture: HandleEnum<TextureView>) -> Self {
+    pub fn rw_texture(mut self, name: &'a str, texture: RGHandle<TextureView>) -> Self {
         self.inner().rw_textures.push((name, texture));
         self
     }
@@ -261,7 +218,7 @@ impl<'a, 'b> RenderPassBuilder<'a, 'b> {
     pub fn accel_struct(
         mut self,
         name: &'a str,
-        accel_struct: HandleEnum<AccelerationStructure>,
+        accel_struct: RGHandle<AccelerationStructure>,
     ) -> Self {
         self.inner().accel_structs.push((name, accel_struct));
         self
@@ -393,84 +350,158 @@ impl RenderGraphCache {
     }
 }
 
-pub struct TransitionInterface<'a> {
-    render_graph: &'a RenderGraph<'a>, // TODO should only access the resouce part
-    pub cmd_buf: &'a CommandBuffer,
+struct RenderGraphExecuteContext {
+    // Created Resources
+    pub textures: Vec<Option<Texture>>,          // by handle::id
+    pub texture_views: Vec<Option<TextureView>>, // by handle::id
+
+    // Per-pass descriptor set
+    pub descriptor_sets: Vec<vk::DescriptorSet>, // by pass index
 }
 
-impl TransitionInterface<'_> {
-    pub fn get_image(&self, handle: HandleEnum<TextureView>) -> vk::Image {
-        match handle {
-            HandleEnum::Inetrnal(handle) => {
-                let view = self.render_graph.texture_views[handle.id];
-                view.texture.image
-            }
-            HandleEnum::External(view) => view.texture.image,
-        }
-    }
-}
-
-// A Render Graph to handle resource transitions automatically
-pub struct RenderGraph<'a> {
-    passes: Vec<RenderPass<'a>>,
-    cache: &'a mut RenderGraphCache,
-
-    // Array indexed by RGHandle
-    texture_descs: Vec<TextureDesc>,
-    texture_view_descs: Vec<TextureViewDesc>,
-    texture_view_textures: Vec<HandleEnum<Texture>>,
-
-    // Textures
-    textures: Vec<Texture>,          // by handle::id
-    texture_views: Vec<TextureView>, // by handle::id
-
-    descriptor_sets: Vec<vk::DescriptorSet>, // by pass
-}
-
-impl<'a> RenderGraph<'a> {
-    pub fn new(cache: &'a mut RenderGraphCache) -> Self {
+impl RenderGraphExecuteContext {
+    pub fn new() -> Self {
         Self {
-            passes: Vec::new(),
-            cache,
-            texture_descs: Vec::new(),
-            texture_view_descs: Vec::new(),
-            texture_view_textures: Vec::new(),
             textures: Vec::new(),
             texture_views: Vec::new(),
             descriptor_sets: Vec::new(),
         }
     }
+}
+
+pub struct TransitionInterface<'a> {
+    builder: &'a RenderGraphBuilder<'a>,
+    exec_context: &'a RenderGraphExecuteContext,
+    pub cmd_buf: &'a CommandBuffer,
+}
+
+impl TransitionInterface<'_> {
+    pub fn get_image(&self, handle: RGHandle<TextureView>) -> vk::Image {
+        let view = self.builder.get_texture_view(self.exec_context, handle);
+        view.texture.image
+    }
+}
+
+enum RenderResource<V, E> {
+    Virtual(V),
+    External(E),
+}
+
+struct VirtualTextureView {
+    pub texture: RGHandle<Texture>,
+    pub desc: TextureViewDesc,
+}
+
+// A Render Graph to handle resource transitions automatically
+pub struct RenderGraphBuilder<'a> {
+    cache: &'a mut RenderGraphCache,
+
+    passes: Vec<RenderPass<'a>>,
+
+    // Graph Outputs
+    output_textures: Vec<RGHandle<Texture>>,
+
+    // Array indexed by RGHandle
+    textures: Vec<RenderResource<TextureDesc, Texture>>,
+    texture_views: Vec<RenderResource<VirtualTextureView, TextureView>>,
+    accel_structs: Vec<RenderResource<(), AccelerationStructure>>,
+}
+
+// Interface
+impl<'a> RenderGraphBuilder<'a> {
+    pub fn new(cache: &'a mut RenderGraphCache) -> Self {
+        Self {
+            cache,
+            passes: Vec::new(),
+            output_textures: Vec::new(),
+            textures: Vec::new(),
+            texture_views: Vec::new(),
+            accel_structs: Vec::new(),
+        }
+    }
 
     pub fn create_texutre(&mut self, desc: TextureDesc) -> RGHandle<Texture> {
-        let id = self.texture_descs.len();
-        self.texture_descs.push(desc);
+        let id = self.textures.len();
+        self.textures.push(RenderResource::Virtual(desc));
         RGHandle::new(id)
     }
 
     pub fn create_texture_view(
         &mut self,
-        texture: HandleEnum<Texture>,
+        texture: RGHandle<Texture>,
         desc: TextureViewDesc,
     ) -> RGHandle<TextureView> {
-        let id = self.texture_view_descs.len();
-        self.texture_view_descs.push(desc);
-        self.texture_view_textures.push(texture);
+        let id = self.texture_views.len();
+        self.texture_views
+            .push(RenderResource::Virtual(VirtualTextureView {
+                texture,
+                desc,
+            }));
         RGHandle::new(id)
     }
 
-    /*
-    pub fn register_texture(&mut self, texture: Handle<Texture>) -> RGHandle<Handle<Texture>> {
-        let id = self.texture_descs.len();
-        RGHandle::new(id).external(true)
+    pub fn register_texture(&mut self, texture: Texture) -> RGHandle<Texture> {
+        // Check if already registered
+        // TOOD make this routine part of self.textures
+        for handle_id in 0..self.textures.len() {
+            let texture_resource = &self.textures[handle_id];
+            if let RenderResource::External(prev_tex) = texture_resource {
+                if *prev_tex == texture {
+                    return RGHandle::new(handle_id);
+                }
+            }
+        }
+
+        // Register the texture
+        let id = self.textures.len();
+        self.textures.push(RenderResource::External(texture));
+        RGHandle::new(id)
     }
 
-    pub fn register_texture_view(
-        &mut self,
-        texture_view: Handle<TextureView>,
-    ) -> RGHandle<TextureView> {
-        unimplemented!()
+    pub fn register_texture_view(&mut self, texture_view: TextureView) -> RGHandle<TextureView> {
+        // Check is already registered
+        for handle_id in 0..self.texture_views.len() {
+            let view_resource = &self.texture_views[handle_id];
+            if let RenderResource::External(prev_texture_view) = view_resource {
+                if *prev_texture_view == texture_view {
+                    return RGHandle::new(handle_id);
+                }
+            }
+        }
+
+        // Register underlying texture (for dependecy tracking)
+        self.register_texture(texture_view.texture);
+
+        // Register the view
+        let id = self.texture_views.len();
+        self.texture_views
+            .push(RenderResource::External(texture_view));
+        RGHandle::new(id)
     }
-    */
+
+    pub fn register_accel_struct(
+        &mut self,
+        accel_struct: AccelerationStructure,
+    ) -> RGHandle<AccelerationStructure> {
+        // Check is already registered
+        for handle_id in 0..self.accel_structs.len() {
+            let view_resource = &self.accel_structs[handle_id];
+            if let RenderResource::External(prev) = view_resource {
+                if *prev == accel_struct {
+                    return RGHandle::new(handle_id);
+                }
+            }
+        }
+
+        // Register the underlying buffer
+        // TODO
+
+        // Register the accel struct
+        let id = self.accel_structs.len();
+        self.accel_structs
+            .push(RenderResource::External(accel_struct));
+        RGHandle::new(id)
+    }
 
     #[allow(dead_code)]
     pub fn add_pass(&mut self, pass: RenderPass<'a>) {
@@ -483,27 +514,66 @@ impl<'a> RenderGraph<'a> {
         RenderPassBuilder::new(self, name, ty)
     }
 
-    fn get_texture_desc_from_view(&self, handle_enum: HandleEnum<TextureView>) -> TextureDesc {
-        match handle_enum {
-            HandleEnum::Inetrnal(handle) => {
-                let texture_handle = self.texture_view_textures.get(handle.id).unwrap();
-                match texture_handle {
-                    HandleEnum::Inetrnal(handle) => self.texture_descs[handle.id],
-                    HandleEnum::External(texture) => texture.desc,
+    pub fn mark_outout_texture(&mut self, texture: RGHandle<Texture>) {
+        self.output_textures.push(texture);
+    }
+}
+
+// Internal Methods
+impl RenderGraphBuilder<'_> {
+    // Assume execute context is already populated
+    #[inline]
+    fn get_texture(&self, ctx: &RenderGraphExecuteContext, handle: RGHandle<Texture>) -> Texture {
+        let resource = &self.textures[handle.id];
+        match resource {
+            RenderResource::Virtual(_) => ctx.textures[handle.id].unwrap(),
+            RenderResource::External(texture) => *texture,
+        }
+    }
+
+    // Assume execute context is already populated
+    #[inline]
+    fn get_texture_view(
+        &self,
+        ctx: &RenderGraphExecuteContext,
+        handle: RGHandle<TextureView>,
+    ) -> TextureView {
+        let resource = &self.texture_views[handle.id];
+        match resource {
+            RenderResource::Virtual(_) => ctx.texture_views[handle.id].unwrap(),
+            RenderResource::External(view) => *view,
+        }
+    }
+
+    fn get_texture_desc_from_view(&self, handle: RGHandle<TextureView>) -> TextureDesc {
+        let view = &self.texture_views[handle.id];
+        match view {
+            RenderResource::Virtual(virtual_view) => {
+                let texture = &self.textures[virtual_view.texture.id];
+                match texture {
+                    RenderResource::Virtual(desc) => *desc,
+                    RenderResource::External(texture) => texture.desc,
                 }
             }
-            HandleEnum::External(view) => view.texture.desc,
+            RenderResource::External(view) => view.texture.desc,
         }
     }
 
-    fn get_texture_view(&self, handle_enum: HandleEnum<TextureView>) -> TextureView {
-        match handle_enum {
-            HandleEnum::Inetrnal(handle) => self.texture_views[handle.id],
-            HandleEnum::External(view) => view,
+    #[inline]
+    fn get_accel_struct(&self, handle: RGHandle<AccelerationStructure>) -> AccelerationStructure {
+        let accel_struct = &self.accel_structs[handle.id];
+        match accel_struct {
+            RenderResource::Virtual(_) => unimplemented!(),
+            RenderResource::External(accel_struct) => *accel_struct,
         }
     }
 
-    fn begin_graphics(&mut self, command_buffer: &CommandBuffer, pass: &RenderPass) {
+    fn begin_graphics(
+        &mut self,
+        ctx: &RenderGraphExecuteContext,
+        command_buffer: &CommandBuffer,
+        pass: &RenderPass,
+    ) {
         let size = if pass.color_targets.len() > 0 {
             self.get_texture_desc_from_view(pass.color_targets[0].view)
                 .size_2d()
@@ -517,10 +587,7 @@ impl<'a> RenderGraph<'a> {
             .color_targets
             .iter()
             .map(|&target| {
-                let image_view = match target.view {
-                    HandleEnum::Inetrnal(handle) => self.texture_views[handle.id].image_view,
-                    HandleEnum::External(view) => view.image_view,
-                };
+                let image_view = self.get_texture_view(ctx, target.view).image_view;
 
                 let mut builder = vk::RenderingAttachmentInfo::builder()
                     .image_view(image_view)
@@ -540,10 +607,7 @@ impl<'a> RenderGraph<'a> {
             .collect();
 
         let depth_attachment = pass.depth_stencil.map(|target| {
-            let image_view = match target.view {
-                HandleEnum::Inetrnal(handle) => self.texture_views[handle.id].image_view,
-                HandleEnum::External(view) => view.image_view,
-            };
+            let image_view = self.get_texture_view(ctx, target.view).image_view;
 
             let mut builder = vk::RenderingAttachmentInfoKHR::builder()
                 .image_view(image_view)
@@ -590,6 +654,7 @@ impl<'a> RenderGraph<'a> {
 
     fn bind_resources(
         &mut self,
+        ctx: &RenderGraphExecuteContext,
         rd: &RenderDevice,
         shaders: &Shaders,
         command_buffer: &CommandBuffer,
@@ -619,7 +684,7 @@ impl<'a> RenderGraph<'a> {
 
             let builder = &mut builder;
             for (name, handle) in &pass.textures {
-                let view = self.get_texture_view(*handle);
+                let view = self.get_texture_view(ctx, *handle);
                 builder.image(
                     name,
                     view.image_view,
@@ -627,17 +692,12 @@ impl<'a> RenderGraph<'a> {
                 );
             }
             for (name, handle) in &pass.rw_textures {
-                let view = self.get_texture_view(*handle);
+                let view = self.get_texture_view(ctx, *handle);
                 builder.image(name, view.image_view, vk::ImageLayout::GENERAL);
             }
             for (name, handle) in &pass.accel_structs {
-                let accel_struct = match handle {
-                    HandleEnum::Inetrnal(handle) => {
-                        panic!("accel struct {} is internal.", handle.id)
-                    }
-                    HandleEnum::External(accel_struct) => accel_struct.handle,
-                };
-                builder.accel_struct(name, accel_struct);
+                let accel_struct = self.get_accel_struct(*handle);
+                builder.accel_struct(name, accel_struct.handle);
             }
             let writes = builder.build(
                 pipeline,
@@ -701,30 +761,52 @@ impl<'a> RenderGraph<'a> {
         command_buffer: &CommandBuffer,
         shaders: &Shaders,
     ) {
-        // Populate textures and views
-        // TODO memory aliasing
-        for i in 0..self.texture_descs.len() {
-            let desc = self.texture_descs[i];
-            let texture = self
-                .cache
-                .texture_pool
-                .pop(&desc)
-                .unwrap_or_else(|| rd.create_texture(desc).unwrap());
-            self.textures.push(texture);
+        let mut exec_context = RenderGraphExecuteContext::new();
+
+        // Build Dependency
+        /*
+        for (pass_index, pass) in self.passes.iter().enumerate() {
+            for t in pass.textures {}
         }
-        for i in 0..self.texture_view_descs.len() {
-            let desc = self.texture_view_descs[i];
-            let texture_handle = self.texture_view_textures[i];
-            let texture = match texture_handle {
-                HandleEnum::Inetrnal(handle) => self.textures[handle.id],
-                HandleEnum::External(texture) => texture,
+         */
+
+        // Populate textures and views
+        // TODO drain self.texture, self.texture_views to context
+        // TODO memory aliasing
+        for i in 0..self.textures.len() {
+            let texture_resource = &self.textures[i];
+            let texture = match texture_resource {
+                // Create texture
+                RenderResource::Virtual(desc) => {
+                    let tex = self
+                        .cache
+                        .texture_pool
+                        .pop(&desc)
+                        .unwrap_or_else(|| rd.create_texture(*desc).unwrap());
+                    Some(tex)
+                }
+                RenderResource::External(_) => None,
             };
-            let view = self
-                .cache
-                .texture_view_pool
-                .pop(&desc)
-                .unwrap_or_else(|| rd.create_texture_view(texture, desc).unwrap());
-            self.texture_views.push(view);
+            exec_context.textures.push(texture);
+        }
+        for i in 0..self.texture_views.len() {
+            let view_resource = &self.texture_views[i];
+            let view = match view_resource {
+                // Create texture view
+                RenderResource::Virtual(virtual_view) => {
+                    let texture = self.get_texture(&exec_context, virtual_view.texture);
+                    let view = self
+                        .cache
+                        .texture_view_pool
+                        .pop(&virtual_view.desc)
+                        .unwrap_or_else(|| {
+                            rd.create_texture_view(texture, virtual_view.desc).unwrap()
+                        });
+                    Some(view)
+                }
+                RenderResource::External(_) => None,
+            };
+            exec_context.texture_views.push(view);
         }
         // Create (temp) descriptor set for each pass
         for pass in &self.passes {
@@ -753,7 +835,7 @@ impl<'a> RenderGraph<'a> {
                 }
             };
 
-            self.descriptor_sets.push(set);
+            exec_context.descriptor_sets.push(set);
         }
 
         command_buffer.insert_checkpoint();
@@ -763,7 +845,8 @@ impl<'a> RenderGraph<'a> {
             // TODO analysis of the DAG and sync properly
             if let Some(mannual_transition) = pass.mannual_transition.take() {
                 let transition_interface = TransitionInterface {
-                    render_graph: self,
+                    builder: &self,
+                    exec_context: &exec_context,
                     cmd_buf: command_buffer,
                 };
                 mannual_transition(&transition_interface, &mut pass);
@@ -774,17 +857,18 @@ impl<'a> RenderGraph<'a> {
             // Begin render pass (if graphics)
             let is_graphic = pass.ty == RenderPassType::Graphics;
             if is_graphic {
-                self.begin_graphics(command_buffer, &pass);
+                self.begin_graphics(&exec_context, command_buffer, &pass);
                 command_buffer.insert_checkpoint();
             }
 
             // Bind resources
             self.bind_resources(
+                &exec_context,
                 rd,
                 shaders,
                 command_buffer,
                 &pass,
-                self.descriptor_sets[pass_index],
+                exec_context.descriptor_sets[pass_index],
             );
             command_buffer.insert_checkpoint();
 
@@ -803,13 +887,23 @@ impl<'a> RenderGraph<'a> {
         command_buffer.insert_checkpoint();
 
         // Pool back all resource objects
-        for view in self.texture_views.drain(0..self.texture_views.len()) {
-            self.cache.texture_view_pool.push(view.desc, view);
+        for view in exec_context
+            .texture_views
+            .drain(0..exec_context.texture_views.len())
+        {
+            if let Some(view) = view {
+                self.cache.texture_view_pool.push(view.desc, view);
+            }
         }
-        for texture in self.textures.drain(0..self.textures.len()) {
-            self.cache.texture_pool.push(texture.desc, texture);
+        for texture in exec_context.textures.drain(0..exec_context.textures.len()) {
+            if let Some(texture) = texture {
+                self.cache.texture_pool.push(texture.desc, texture);
+            }
         }
-        for set in self.descriptor_sets.drain(0..self.descriptor_sets.len()) {
+        for set in exec_context
+            .descriptor_sets
+            .drain(0..exec_context.descriptor_sets.len())
+        {
             if set != vk::DescriptorSet::null() {
                 // TODO may be need some frame buffering, because it may be still using?
                 self.cache.release_descriptor_set(rd, set);
