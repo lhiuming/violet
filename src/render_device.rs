@@ -560,7 +560,7 @@ impl SwapchainEntry {
                     .create_image_view(&create_info, None)
                     .expect("Vulkan: failed to create image view for swapchain")
             };
-            let desc = TextureViewDesc::auto(texture);
+            let desc = TextureViewDesc::auto(&texture.desc);
             ret.image_view.push(TextureView {
                 texture,
                 desc,
@@ -809,38 +809,41 @@ impl Default for TextureViewDesc {
     }
 }
 
+pub fn format_has_depth(format: vk::Format) -> bool {
+    (format == vk::Format::D16_UNORM)
+        || (format == vk::Format::D16_UNORM_S8_UINT)
+        || (format == vk::Format::D24_UNORM_S8_UINT)
+        || (format == vk::Format::D32_SFLOAT)
+        || (format == vk::Format::D32_SFLOAT_S8_UINT)
+}
+
 impl TextureViewDesc {
-    pub fn auto(texture: Texture) -> TextureViewDesc {
-        let tex_desc = &texture.desc;
-        let view_type = if texture.desc.layer_count > 1 {
+    pub fn auto(texture_desc: &TextureDesc) -> TextureViewDesc {
+        let view_type = if texture_desc.layer_count > 1 {
             vk::ImageViewType::TYPE_2D_ARRAY
         } else {
             vk::ImageViewType::TYPE_2D
         };
-        let format = tex_desc.format;
-        let is_depth = (format == vk::Format::D16_UNORM)
-            || (format == vk::Format::D16_UNORM_S8_UINT)
-            || (format == vk::Format::D24_UNORM_S8_UINT)
-            || (format == vk::Format::D32_SFLOAT)
-            || (format == vk::Format::D32_SFLOAT_S8_UINT);
-        let aspect = if is_depth {
+        let format = texture_desc.format;
+        let has_depth = format_has_depth(format);
+        let aspect = if has_depth {
             vk::ImageAspectFlags::DEPTH
         } else {
             vk::ImageAspectFlags::COLOR
         };
         TextureViewDesc {
             view_type,
-            format: tex_desc.format,
+            format: texture_desc.format,
             aspect,
             base_mip_level: 0,
-            level_count: tex_desc.mip_level_count,
+            level_count: texture_desc.mip_level_count,
             base_array_layer: 0,
-            layer_count: tex_desc.layer_count,
+            layer_count: texture_desc.layer_count,
         }
     }
 
-    pub fn with_format(texture: Texture, format: vk::Format) -> TextureViewDesc {
-        let mut desc = Self::auto(texture);
+    pub fn with_format(texture_desc: &TextureDesc, format: vk::Format) -> TextureViewDesc {
+        let mut desc = Self::auto(texture_desc);
         desc.format = format;
         desc
     }

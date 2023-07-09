@@ -515,7 +515,10 @@ impl RenderScene {
                         vk::Format::R8G8B8A8_UNORM
                     };
                     let texture_view = rd
-                        .create_texture_view(texture, TextureViewDesc::with_format(texture, format))
+                        .create_texture_view(
+                            texture,
+                            TextureViewDesc::with_format(&texture.desc, format),
+                        )
                         .unwrap();
                     let texture_view_index = self.material_texture_views.len() as u32;
                     self.material_texture_views.push(texture_view);
@@ -1048,16 +1051,6 @@ impl RednerLoop {
             dst.copy_from_slice(std::slice::from_ref(&view_params));
         }
 
-        // SIMPLE CONFIGURATION
-        let clear_color = vk::ClearColorValue {
-            float32: [
-                0x5A as f32 / 255.0,
-                0x44 as f32 / 255.0,
-                0x94 as f32 / 255.0,
-                0xFF as f32 / 255.0,
-            ],
-        };
-
         // Being command recording
         {
             let begin_info = vk::CommandBufferBeginInfo::builder()
@@ -1125,48 +1118,57 @@ impl RednerLoop {
             },
         );
 
+        // Define GBuffer
+        let gbuffer_size = rd.swapchain.extent;
+        let gbuffer_depth;
+        let gbuffer_color;
+        let gbuffer_color_clear;
+        {
+            // helper
+            let mut create_gbuffer = |format: vk::Format| {
+                let is_depth = crate::render_device::format_has_depth(format);
+                let usage: vk::ImageUsageFlags = if is_depth {
+                    vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+                } else {
+                    vk::ImageUsageFlags::COLOR_ATTACHMENT
+                } | vk::ImageUsageFlags::SAMPLED;
+                let texture_desc =
+                    TextureDesc::new_2d(gbuffer_size.width, gbuffer_size.height, format, usage);
+                let texture_view_desc = TextureViewDesc::auto(&texture_desc);
+                let texture = rg.create_texutre(texture_desc);
+                let view = rg.create_texture_view(texture, texture_view_desc);
+
+                (texture, view)
+            };
+
+            // define
+            gbuffer_depth = create_gbuffer(vk::Format::D24_UNORM_S8_UINT);
+            gbuffer_color = create_gbuffer(vk::Format::R32G32B32A32_UINT);
+            gbuffer_color_clear = vk::ClearColorValue {
+                uint32: [0, 0, 0, 0],
+            };
+        }
+
         // Draw mesh
         hack.set_layout_override
             .insert(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set_layout);
         let mesh_gfx_pipeline = shaders.create_gfx_pipeline(
-            ShaderDefinition::vert("MeshVSPS.hlsl", "vs_main"),
-            ShaderDefinition::frag("MeshVSPS.hlsl", "ps_main"),
+            ShaderDefinition::vert("mesh_gbuffer.hlsl", "vs_main"),
+            ShaderDefinition::frag("mesh_gbuffer.hlsl", "ps_main"),
             &hack,
         );
-
-        let main_depth_stencil;
-        {
-            let pipeline = mesh_gfx_pipeline.unwrap();
-
-            let color_view =
-                rg.register_texture_view(rd.swapchain.image_view[image_index as usize]);
-            main_depth_stencil = rg.create_texutre(TextureDesc::new_2d(
-                rd.swapchain.extent.width,
-                rd.swapchain.extent.height,
-                vk::Format::D24_UNORM_S8_UINT,
-                vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-            ));
-            let ds_view = rg.create_texture_view(
-                main_depth_stencil,
-                TextureViewDesc {
-                    view_type: vk::ImageViewType::TYPE_2D,
-                    format: vk::Format::D24_UNORM_S8_UINT,
-                    aspect: vk::ImageAspectFlags::DEPTH,
-                    ..Default::default()
-                },
-            );
-
+        if let Some(pipeline) = mesh_gfx_pipeline {
             let viewport_extent = rd.swapchain.extent;
-            rg.new_pass("Base Pass", RenderPassType::Graphics)
+            rg.new_pass("GBuffer_Gen", RenderPassType::Graphics)
                 .pipeline(pipeline)
                 .descritpro_set(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set)
                 .descriptor_set_index(2)
                 .color_targets(&[ColorTarget {
-                    view: color_view,
-                    load_op: ColorLoadOp::Clear(clear_color),
+                    view: gbuffer_color.1,
+                    load_op: ColorLoadOp::Clear(gbuffer_color_clear),
                 }])
                 .depth_stencil(DepthStencilTarget {
-                    view: ds_view,
+                    view: gbuffer_depth.1,
                     load_op: DepthLoadOp::Clear(vk::ClearDepthStencilValue {
                         depth: 0.0,
                         stencil: 0,
@@ -1235,6 +1237,8 @@ impl RednerLoop {
                 });
         }
 
+        let final_color = rg.register_texture_view(rd.swapchain.image_view[image_index as usize]);
+
         // Draw (procedure) Sky
         let sky_pipeline = shaders.create_gfx_pipeline(
             ShaderDefinition::vert("sky_vsps.hlsl", "vs_main"),
@@ -1244,11 +1248,8 @@ impl RednerLoop {
         {
             let pipeline = sky_pipeline.unwrap();
 
-            //let color_target = rg.register_texture_view(swapchain.image_view[image_index as usize]);
-            let color_target =
-                rg.register_texture_view(rd.swapchain.image_view[image_index as usize]);
             let stencil = rg.create_texture_view(
-                main_depth_stencil,
+                gbuffer_depth.0,
                 TextureViewDesc {
                     view_type: vk::ImageViewType::TYPE_2D,
                     format: vk::Format::D24_UNORM_S8_UINT,
@@ -1261,7 +1262,7 @@ impl RednerLoop {
                 .pipeline(pipeline)
                 .texture("skycube", skycube)
                 .color_targets(&[ColorTarget {
-                    view: color_target,
+                    view: final_color,
                     load_op: ColorLoadOp::Load,
                 }])
                 .depth_stencil(DepthStencilTarget {
@@ -1297,6 +1298,28 @@ impl RednerLoop {
                 });
         }
 
+        // GBuffer Lighting
+        let gbuffer_lighting = shaders.create_compute_pipeline(
+            ShaderDefinition::compute("gbuffer_lighting.hlsl", "main"),
+            &hack,
+        );
+        if let Some(pipeline) = gbuffer_lighting {
+            rg.new_pass("GBuffer_Lighting", RenderPassType::Compute)
+                .pipeline(pipeline)
+                .descritpro_set(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set)
+                .texture("skycube", skycube)
+                .texture("gbuffer_depth", gbuffer_depth.1)
+                .texture("gbuffer_color", gbuffer_color.1)
+                .rw_texture("out_lighting", final_color)
+                .render(move |cb, shaders, _pass| {
+                    let pipeline = shaders.get_pipeline(pipeline).unwrap();
+                    cb.bind_pipeline(vk::PipelineBindPoint::COMPUTE, pipeline.handle);
+                    let dispatch_x = (gbuffer_size.width + 7) / 8;
+                    let diapatch_y = (gbuffer_size.height + 7) / 8;
+                    cb.dispatch(dispatch_x, diapatch_y, 1);
+                });
+        }
+
         // Ray tracing test
         let ray_test_pipeline = shaders.create_raytracing_pipeline(
             ShaderDefinition {
@@ -1313,7 +1336,6 @@ impl RednerLoop {
         );
         if let Some(ray_test_pipeline) = ray_test_pipeline {
             let extent = rd.swapchain.extent;
-            let color = rg.register_texture_view(rd.swapchain.image_view[image_index as usize]);
 
             // Fill SBT
             let sbt = &scene.shader_binding_table;
@@ -1372,7 +1394,7 @@ impl RednerLoop {
                 .pipeline(ray_test_pipeline)
                 .descritpro_set(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set)
                 .accel_struct("rayTracingScene", tlas)
-                .rw_texture("rw_color", color)
+                .rw_texture("rw_color", final_color)
                 .render(move |cb, shaders, _pass| unsafe {
                     let pipeline = shaders.get_pipeline(ray_test_pipeline).unwrap();
 
@@ -1423,26 +1445,6 @@ impl RednerLoop {
                 command_buffer,
             };
             rg.execute(rd, &cb, &shaders);
-
-            /*
-                       // Transition swapchain for present
-                       let swapchain = rd.swapchain.image[image_index as usize];
-                       cb.transition_image_layout(
-                           swapchain.image,
-                           vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
-                           vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                           vk::ImageLayout::GENERAL,
-                           vk::ImageLayout::PRESENT_SRC_KHR,
-                           vk::ImageSubresourceRange {
-                               aspect_mask: vk::ImageAspectFlags::COLOR,
-                               base_array_layer: 0,
-                               base_mip_level: 0,
-                               layer_count: 1,
-                               level_count: 1,
-                           },
-                       );
-                       cb.insert_checkpoint();
-            */
         }
 
         // End command recoding

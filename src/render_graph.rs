@@ -154,7 +154,7 @@ impl<'a, 'b> RenderPassBuilder<'a, 'b> {
         self.inner.as_mut().unwrap()
     }
 
-    pub fn done(&mut self) {
+    fn done(&mut self) {
         if self.inner.is_none() {
             panic!("RenderPassBuilder::done is called multiple times!");
         }
@@ -469,6 +469,14 @@ impl<'a> RenderGraphBuilder<'a> {
         self.accel_structs
             .push(RenderResource::External(accel_struct));
         RGHandle::new(id)
+    }
+
+    #[allow(dead_code)]
+    pub fn get_texture_desc(&self, texture: RGHandle<Texture>) -> &TextureDesc {
+        match &self.textures[texture.id] {
+            RenderResource::Virtual(desc) => desc,
+            RenderResource::External(texture) => &texture.desc,
+        }
     }
 
     #[allow(dead_code)]
@@ -988,6 +996,7 @@ impl RenderGraphBuilder<'_> {
 
             exec_context.descriptor_sets.push(set);
         }
+        assert!(exec_context.descriptor_sets.len() == self.passes.len());
 
         command_buffer.insert_checkpoint();
 

@@ -34,7 +34,7 @@ void raygen() {
         );
 
     float4 color = rw_color[dispatch_ray_index.xy];
-    color.r = payload.missed;
+    color.r += payload.missed * 0.5;
     color.a = 1.0f;
     rw_color[dispatch_ray_index.xy] = color;
 }
