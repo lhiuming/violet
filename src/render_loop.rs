@@ -1078,10 +1078,11 @@ impl RednerLoop {
             skycube_texture = rg.create_texutre(TextureDesc {
                 width: skycube_size,
                 height: skycube_size,
-                array_len: 6,
+                layer_count: 6,
                 format: vk::Format::B10G11R11_UFLOAT_PACK32,
                 usage: vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
                 flags: vk::ImageCreateFlags::CUBE_COMPATIBLE, // required for viewed as cube
+                ..Default::default()
             });
             let array_uav = rg.create_texture_view(
                 skycube_texture,
@@ -1089,29 +1090,13 @@ impl RednerLoop {
                     view_type: vk::ImageViewType::TYPE_2D_ARRAY,
                     format: vk::Format::B10G11R11_UFLOAT_PACK32,
                     aspect: vk::ImageAspectFlags::COLOR,
+                    ..Default::default()
                 },
             );
 
             rg.new_pass("Sky IBL gen", RenderPassType::Compute)
                 .pipeline(pipeline)
                 .rw_texture("rw_cube_texture", array_uav)
-                .mannual_transition(move |ti, _pass| {
-                    // UAV Transition
-                    ti.cmd_buf.transition_image_layout(
-                        ti.get_image(array_uav),
-                        vk::PipelineStageFlags::default(),
-                        vk::PipelineStageFlags::COMPUTE_SHADER,
-                        vk::ImageLayout::UNDEFINED,
-                        vk::ImageLayout::GENERAL,
-                        vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_array_layer: 0,
-                            base_mip_level: 0,
-                            layer_count: 6,
-                            level_count: 1,
-                        },
-                    );
-                })
                 .render(move |cb, shaders, _pass| {
                     let pipeline = shaders.get_pipeline(pipeline).unwrap();
 
@@ -1136,6 +1121,7 @@ impl RednerLoop {
                 view_type: vk::ImageViewType::CUBE,
                 format: vk::Format::B10G11R11_UFLOAT_PACK32,
                 aspect: vk::ImageAspectFlags::COLOR,
+                ..Default::default()
             },
         );
 
@@ -1166,6 +1152,7 @@ impl RednerLoop {
                     view_type: vk::ImageViewType::TYPE_2D,
                     format: vk::Format::D24_UNORM_S8_UINT,
                     aspect: vk::ImageAspectFlags::DEPTH,
+                    ..Default::default()
                 },
             );
 
@@ -1187,40 +1174,6 @@ impl RednerLoop {
                     store_op: vk::AttachmentStoreOp::STORE,
                 })
                 .texture("skycube", skycube)
-                .mannual_transition(move |ti, pass| {
-                    // Prepare skycube
-                    ti.cmd_buf.transition_image_layout(
-                        ti.get_image(skycube),
-                        vk::PipelineStageFlags::COMPUTE_SHADER,
-                        vk::PipelineStageFlags::FRAGMENT_SHADER,
-                        vk::ImageLayout::GENERAL,
-                        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                        vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_array_layer: 0,
-                            base_mip_level: 0,
-                            layer_count: 6,
-                            level_count: 1,
-                        },
-                    );
-
-                    // transition external image (swapchain)
-                    ti.cmd_buf.transition_image_layout(
-                        ti.get_image(pass.get_color_targets()[0].view),
-                        //vk::PipelineStageFlags::TOP_OF_PIPE, // TODO auto this?
-                        vk::PipelineStageFlags::default(),
-                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                        vk::ImageLayout::UNDEFINED, // TODO auto this?
-                        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                        vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0,
-                            level_count: 1,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        },
-                    );
-                })
                 .render(move |cb, shaders, _pass| {
                     // set up raster state
                     cb.set_viewport_0(vk::Viewport {
@@ -1300,6 +1253,7 @@ impl RednerLoop {
                     view_type: vk::ImageViewType::TYPE_2D,
                     format: vk::Format::D24_UNORM_S8_UINT,
                     aspect: vk::ImageAspectFlags::STENCIL,
+                    ..Default::default()
                 },
             );
 
@@ -1419,23 +1373,6 @@ impl RednerLoop {
                 .descritpro_set(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set)
                 .accel_struct("rayTracingScene", tlas)
                 .rw_texture("rw_color", color)
-                .mannual_transition(|ti, pass| {
-                    let rw_color = ti.get_image(pass.get_rw_textures("rw_color"));
-                    ti.cmd_buf.transition_image_layout(
-                        rw_color,
-                        vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                        vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
-                        vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                        vk::ImageLayout::GENERAL,
-                        vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0,
-                            level_count: 1,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        },
-                    );
-                })
                 .render(move |cb, shaders, _pass| unsafe {
                     let pipeline = shaders.get_pipeline(ray_test_pipeline).unwrap();
 
@@ -1470,8 +1407,12 @@ impl RednerLoop {
                 });
         }
 
-        let swapchain_tex_handle = rg.register_texture(rd.swapchain.image[image_index as usize]);
-        rg.mark_outout_texture(swapchain_tex_handle);
+        // TODO define an extra Output node instead of hacking RenderPass node
+        let swapchain_view_handle =
+            rg.register_texture_view(rd.swapchain.image_view[image_index as usize]);
+        rg.new_pass("Present", RenderPassType::Present)
+            .present_texture(swapchain_view_handle)
+            .render(|_, _, _| {});
 
         // Run render graph and fianlize
         {
@@ -1483,23 +1424,25 @@ impl RednerLoop {
             };
             rg.execute(rd, &cb, &shaders);
 
-            // Transition swapchain for present
-            let swapchain = rd.swapchain.image[image_index as usize];
-            cb.transition_image_layout(
-                swapchain.image,
-                vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
-                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-                vk::ImageLayout::GENERAL,
-                vk::ImageLayout::PRESENT_SRC_KHR,
-                vk::ImageSubresourceRange {
-                    aspect_mask: vk::ImageAspectFlags::COLOR,
-                    base_array_layer: 0,
-                    base_mip_level: 0,
-                    layer_count: 1,
-                    level_count: 1,
-                },
-            );
-            cb.insert_checkpoint();
+            /*
+                       // Transition swapchain for present
+                       let swapchain = rd.swapchain.image[image_index as usize];
+                       cb.transition_image_layout(
+                           swapchain.image,
+                           vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
+                           vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                           vk::ImageLayout::GENERAL,
+                           vk::ImageLayout::PRESENT_SRC_KHR,
+                           vk::ImageSubresourceRange {
+                               aspect_mask: vk::ImageAspectFlags::COLOR,
+                               base_array_layer: 0,
+                               base_mip_level: 0,
+                               layer_count: 1,
+                               level_count: 1,
+                           },
+                       );
+                       cb.insert_checkpoint();
+            */
         }
 
         // End command recoding

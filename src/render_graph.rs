@@ -7,7 +7,7 @@ use ash::vk;
 
 use crate::command_buffer::CommandBuffer;
 use crate::render_device::{
-    AccelerationStructure, Buffer, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
+    AccelerationStructure, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
 };
 use crate::shader::{self, Handle, Pipeline, Shaders};
 
@@ -54,6 +54,7 @@ pub enum RenderPassType {
     Graphics,
     Compute,
     RayTracing,
+    Present,
 }
 
 #[allow(dead_code)]
@@ -98,8 +99,8 @@ pub struct RenderPass<'a> {
     color_targets: Vec<ColorTarget>,
     depth_stencil: Option<DepthStencilTarget>,
     rw_textures: Vec<(&'a str, RGHandle<TextureView>)>,
-    mannual_transition: Option<Box<dyn 'a + FnOnce(&TransitionInterface, &RenderPass)>>, // Hack
-    render: Option<Box<dyn 'a + FnOnce(&CommandBuffer, &Shaders, RenderPass)>>,
+    present_texture: Option<RGHandle<TextureView>>,
+    render: Option<Box<dyn 'a + FnOnce(&CommandBuffer, &Shaders, &RenderPass)>>,
 }
 
 impl RenderPass<'_> {
@@ -115,7 +116,7 @@ impl RenderPass<'_> {
             color_targets: Vec::new(),
             depth_stencil: None,
             rw_textures: Vec::new(),
-            mannual_transition: None,
+            present_texture: None,
             render: None,
         }
     }
@@ -128,19 +129,6 @@ impl RenderPass<'_> {
             }
         }
         panic!("Cannot find texture with name: {}", name);
-    }
-
-    pub fn get_color_targets(&self) -> &[ColorTarget] {
-        &self.color_targets
-    }
-
-    pub fn get_rw_textures(&self, name: &str) -> RGHandle<TextureView> {
-        for (n, t) in &self.rw_textures {
-            if n == &name {
-                return *t;
-            }
-        }
-        panic!("Cannot find rw texture with name: {}", name);
     }
 }
 
@@ -224,17 +212,14 @@ impl<'a, 'b> RenderPassBuilder<'a, 'b> {
         self
     }
 
-    pub fn mannual_transition<F>(mut self, f: F) -> Self
-    where
-        F: FnOnce(&TransitionInterface, &RenderPass) + 'a,
-    {
-        self.inner().mannual_transition = Some(Box::new(f));
+    pub fn present_texture(mut self, texture: RGHandle<TextureView>) -> Self {
+        self.inner().present_texture = Some(texture);
         self
     }
 
     pub fn render<F>(mut self, f: F) -> Self
     where
-        F: FnOnce(&CommandBuffer, &Shaders, RenderPass) + 'a,
+        F: FnOnce(&CommandBuffer, &Shaders, &RenderPass) + 'a,
     {
         self.inner().render = Some(Box::new(f));
         self
@@ -369,19 +354,6 @@ impl RenderGraphExecuteContext {
     }
 }
 
-pub struct TransitionInterface<'a> {
-    builder: &'a RenderGraphBuilder<'a>,
-    exec_context: &'a RenderGraphExecuteContext,
-    pub cmd_buf: &'a CommandBuffer,
-}
-
-impl TransitionInterface<'_> {
-    pub fn get_image(&self, handle: RGHandle<TextureView>) -> vk::Image {
-        let view = self.builder.get_texture_view(self.exec_context, handle);
-        view.texture.image
-    }
-}
-
 enum RenderResource<V, E> {
     Virtual(V),
     External(E),
@@ -398,9 +370,6 @@ pub struct RenderGraphBuilder<'a> {
 
     passes: Vec<RenderPass<'a>>,
 
-    // Graph Outputs
-    output_textures: Vec<RGHandle<Texture>>,
-
     // Array indexed by RGHandle
     textures: Vec<RenderResource<TextureDesc, Texture>>,
     texture_views: Vec<RenderResource<VirtualTextureView, TextureView>>,
@@ -413,7 +382,6 @@ impl<'a> RenderGraphBuilder<'a> {
         Self {
             cache,
             passes: Vec::new(),
-            output_textures: Vec::new(),
             textures: Vec::new(),
             texture_views: Vec::new(),
             accel_structs: Vec::new(),
@@ -513,10 +481,6 @@ impl<'a> RenderGraphBuilder<'a> {
         //println!("Adding new pass: {}", name);
         RenderPassBuilder::new(self, name, ty)
     }
-
-    pub fn mark_outout_texture(&mut self, texture: RGHandle<Texture>) {
-        self.output_textures.push(texture);
-    }
 }
 
 // Internal Methods
@@ -569,7 +533,7 @@ impl RenderGraphBuilder<'_> {
     }
 
     fn begin_graphics(
-        &mut self,
+        &self,
         ctx: &RenderGraphExecuteContext,
         command_buffer: &CommandBuffer,
         pass: &RenderPass,
@@ -653,7 +617,7 @@ impl RenderGraphBuilder<'_> {
     }
 
     fn bind_resources(
-        &mut self,
+        &self,
         ctx: &RenderGraphExecuteContext,
         rd: &RenderDevice,
         shaders: &Shaders,
@@ -661,6 +625,15 @@ impl RenderGraphBuilder<'_> {
         pass: &RenderPass,
         internal_set: vk::DescriptorSet,
     ) -> Option<()> {
+        let pipeline_bind_point = match pass.ty {
+            RenderPassType::Graphics => vk::PipelineBindPoint::GRAPHICS,
+            RenderPassType::Compute => vk::PipelineBindPoint::COMPUTE,
+            RenderPassType::RayTracing => vk::PipelineBindPoint::RAY_TRACING_KHR,
+            _ => {
+                return None;
+            }
+        };
+
         let pipeline = shaders.get_pipeline(pass.pipeline);
         if pipeline.is_none() {
             println!(
@@ -670,12 +643,6 @@ impl RenderGraphBuilder<'_> {
             return None;
         }
         let pipeline = pipeline.unwrap();
-
-        let pipeline_bind_point = match pass.ty {
-            RenderPassType::Graphics => vk::PipelineBindPoint::GRAPHICS,
-            RenderPassType::Compute => vk::PipelineBindPoint::COMPUTE,
-            RenderPassType::RayTracing => vk::PipelineBindPoint::RAY_TRACING_KHR,
-        };
 
         // Update descriptor set
         // TODO this struct can be reused (a lot vec)
@@ -755,6 +722,195 @@ impl RenderGraphBuilder<'_> {
         Some(())
     }
 
+    fn ad_hoc_transition(
+        &self,
+        command_buffer: &CommandBuffer,
+        ctx: &mut RenderGraphExecuteContext,
+        pass_index: u32,
+    ) {
+        // helper
+        let get_last_mutating_pass =
+            |tex_view: TextureView, end_pass_index: u32| -> Option<(u32, vk::ImageLayout)> {
+                for pass_index in (0..end_pass_index).rev() {
+                    let pass = &self.passes[pass_index as usize];
+                    // Check all mutating view
+                    for rt in &pass.color_targets {
+                        let rt_view = self.get_texture_view(ctx, rt.view);
+                        if (rt_view.texture == tex_view.texture)
+                            && (rt_view.desc.aspect == tex_view.desc.aspect)
+                        {
+                            return Some((pass_index, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL));
+                        }
+                    }
+                    for rw in &pass.rw_textures {
+                        let rw_view = self.get_texture_view(ctx, rw.1);
+                        if (rw_view.texture == tex_view.texture)
+                            && (rw_view.desc.aspect == tex_view.desc.aspect)
+                        {
+                            return Some((pass_index, vk::ImageLayout::GENERAL));
+                        }
+                    }
+                }
+                None
+            };
+
+        // helper
+        let get_first_read_pass = |tex_view: TextureView, pass_range: std::ops::Range<u32>| {
+            for pass_index in pass_range {
+                let pass = &self.passes[pass_index as usize];
+                for (_name, srv) in &pass.textures {
+                    let read_view = self.get_texture_view(ctx, *srv);
+                    if (read_view.texture == tex_view.texture)
+                        && (read_view.desc.aspect == tex_view.desc.aspect)
+                    {
+                        return Some(pass_index);
+                    }
+                }
+            }
+            None
+        };
+
+        // helper
+        let map_stage_mask = |pass: &RenderPass<'_>| match pass.ty {
+            RenderPassType::Graphics => vk::PipelineStageFlags::ALL_GRAPHICS, // TODO fragment access? vertex access? color output?
+            RenderPassType::Compute => vk::PipelineStageFlags::COMPUTE_SHADER,
+            RenderPassType::RayTracing => vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
+            RenderPassType::Present => vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+        };
+
+        let pass = &self.passes[pass_index as usize];
+
+        // Check read-only textures
+        for (_name, handle) in &pass.textures {
+            let view = self.get_texture_view(ctx, *handle);
+            let texture = view.texture;
+
+            if let Some((mutating_pass_index, old_layout)) =
+                get_last_mutating_pass(view, pass_index)
+            {
+                if let Some(first_read_index) =
+                    get_first_read_pass(view, mutating_pass_index..pass_index)
+                {
+                    // If already transitioned, skip
+                    if first_read_index < pass_index {
+                        continue;
+                    }
+                }
+
+                let dependent_pass = &self.passes[mutating_pass_index as usize];
+                let src_stage_mask = map_stage_mask(dependent_pass);
+                let dst_stage_mask = map_stage_mask(pass);
+                let new_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+
+                /*
+                println!(
+                    "RenderGraph::{}: Transition for {}, {:?} -> {:?}",
+                    pass.name, name, old_layout, new_layout
+                );
+                */
+
+                command_buffer.transition_image_layout(
+                    texture.image,
+                    src_stage_mask,
+                    dst_stage_mask,
+                    old_layout,
+                    new_layout,
+                    view.desc.make_subresource_range(),
+                )
+            } else {
+                command_buffer.transition_image_layout(
+                    texture.image,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    map_stage_mask(pass),
+                    vk::ImageLayout::UNDEFINED,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    view.desc.make_subresource_range(),
+                );
+            }
+        }
+
+        let transition_for_mutates =
+            |handle: RGHandle<TextureView>, _name: &str, new_layout: vk::ImageLayout| {
+                let view = self.get_texture_view(ctx, handle);
+                let texture = view.texture;
+
+                if let Some((mutating_pass_index, mutates_layout)) =
+                    get_last_mutating_pass(view, pass_index)
+                {
+                    let src_stage_mask: vk::PipelineStageFlags;
+                    let old_layout: vk::ImageLayout;
+                    // If last access is a Read
+                    if let Some(last_read_index) =
+                        get_first_read_pass(view, pass_index..mutating_pass_index)
+                    {
+                        let last_read_pass = &self.passes[last_read_index as usize];
+                        src_stage_mask = map_stage_mask(last_read_pass);
+                        old_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+                    } else {
+                        // Else, last acces is a mutate
+                        let dependent_pass = &self.passes[mutating_pass_index as usize];
+                        src_stage_mask = map_stage_mask(dependent_pass);
+                        old_layout = mutates_layout;
+                    }
+
+                    let dst_stage_mask = map_stage_mask(pass);
+
+                    /*
+                    println!(
+                        "RenderGraph::{}: Transition for {}: {:?} -> {:?}",
+                        pass.name, name, old_layout, new_layout
+                    );
+                    */
+
+                    command_buffer.transition_image_layout(
+                        texture.image,
+                        src_stage_mask,
+                        dst_stage_mask,
+                        old_layout,
+                        new_layout,
+                        view.desc.make_subresource_range(),
+                    )
+                } else {
+                    command_buffer.transition_image_layout(
+                        texture.image,
+                        vk::PipelineStageFlags::TOP_OF_PIPE,
+                        map_stage_mask(pass),
+                        vk::ImageLayout::UNDEFINED,
+                        new_layout,
+                        view.desc.make_subresource_range(),
+                    )
+                }
+            };
+
+        // Check read-write textures
+        for (name, handle) in &pass.rw_textures {
+            transition_for_mutates(*handle, name, vk::ImageLayout::GENERAL);
+        }
+
+        // Check color targets textures
+        for (rt_index, rt) in pass.color_targets.iter().enumerate() {
+            transition_for_mutates(
+                rt.view,
+                &format!("color_target_{}", rt_index),
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            );
+        }
+
+        // Check denpth stencil
+        if let Some(ds) = pass.depth_stencil {
+            transition_for_mutates(
+                ds.view,
+                "depth_stencil",
+                vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL, // TODO finer grain for depth-stencil access
+            );
+        }
+
+        // Special: check present, transition after last access
+        if let Some(present_tex) = pass.present_texture {
+            transition_for_mutates(present_tex, "present", vk::ImageLayout::PRESENT_SRC_KHR);
+        }
+    }
+
     pub fn execute(
         &mut self,
         rd: &RenderDevice,
@@ -762,13 +918,6 @@ impl RenderGraphBuilder<'_> {
         shaders: &Shaders,
     ) {
         let mut exec_context = RenderGraphExecuteContext::new();
-
-        // Build Dependency
-        /*
-        for (pass_index, pass) in self.passes.iter().enumerate() {
-            for t in pass.textures {}
-        }
-         */
 
         // Populate textures and views
         // TODO drain self.texture, self.texture_views to context
@@ -827,10 +976,12 @@ impl RenderGraphBuilder<'_> {
                     }
                 }
                 None => {
-                    println!(
+                    if pass.ty != RenderPassType::Present {
+                        println!(
                         "Warning[RenderGraph]: pipeline not provided by pass {}; temporal descriptor set is not created.",
                         pass.name
                     );
+                    }
                     vk::DescriptorSet::null()
                 }
             };
@@ -840,24 +991,21 @@ impl RenderGraphBuilder<'_> {
 
         command_buffer.insert_checkpoint();
 
-        let passes = self.passes.drain(0..self.passes.len()).collect::<Vec<_>>();
-        for (pass_index, mut pass) in passes.into_iter().enumerate() {
+        for pass_index in 0..self.passes.len() {
+            // take the callback before unmutable reference
+            let render = self.passes[pass_index].render.take().unwrap();
+
+            let pass = &self.passes[pass_index];
+
             // TODO analysis of the DAG and sync properly
-            if let Some(mannual_transition) = pass.mannual_transition.take() {
-                let transition_interface = TransitionInterface {
-                    builder: &self,
-                    exec_context: &exec_context,
-                    cmd_buf: command_buffer,
-                };
-                mannual_transition(&transition_interface, &mut pass);
-            }
+            self.ad_hoc_transition(command_buffer, &mut exec_context, pass_index as u32);
 
             command_buffer.insert_checkpoint();
 
             // Begin render pass (if graphics)
             let is_graphic = pass.ty == RenderPassType::Graphics;
             if is_graphic {
-                self.begin_graphics(&exec_context, command_buffer, &pass);
+                self.begin_graphics(&exec_context, command_buffer, pass);
                 command_buffer.insert_checkpoint();
             }
 
@@ -873,7 +1021,6 @@ impl RenderGraphBuilder<'_> {
             command_buffer.insert_checkpoint();
 
             // Run pass
-            let render = pass.render.take().unwrap();
             render(command_buffer, &shaders, pass);
             command_buffer.insert_checkpoint();
 

@@ -560,7 +560,7 @@ impl SwapchainEntry {
                     .create_image_view(&create_info, None)
                     .expect("Vulkan: failed to create image view for swapchain")
             };
-            let desc = TextureViewDesc::default(texture);
+            let desc = TextureViewDesc::auto(texture);
             ret.image_view.push(TextureView {
                 texture,
                 desc,
@@ -698,10 +698,25 @@ impl RenderDevice {
 pub struct TextureDesc {
     pub width: u32,
     pub height: u32,
-    pub array_len: u32,
+    pub layer_count: u32,
+    pub mip_level_count: u32,
     pub format: vk::Format,
     pub usage: vk::ImageUsageFlags,
     pub flags: vk::ImageCreateFlags,
+}
+
+impl Default for TextureDesc {
+    fn default() -> Self {
+        Self {
+            width: 1,
+            height: 1,
+            layer_count: 1,
+            mip_level_count: 1,
+            format: vk::Format::UNDEFINED,
+            usage: vk::ImageUsageFlags::default(),
+            flags: vk::ImageCreateFlags::default(),
+        }
+    }
 }
 
 impl TextureDesc {
@@ -714,7 +729,8 @@ impl TextureDesc {
         TextureDesc {
             width,
             height,
-            array_len: 1,
+            layer_count: 1,
+            mip_level_count: 1,
             format,
             usage,
             flags: vk::ImageCreateFlags::default(),
@@ -732,7 +748,8 @@ impl TextureDesc {
         TextureDesc {
             width,
             height,
-            array_len,
+            layer_count: array_len,
+            mip_level_count: 1,
             format,
             usage,
             flags: vk::ImageCreateFlags::default(),
@@ -772,12 +789,30 @@ pub struct TextureViewDesc {
     pub view_type: vk::ImageViewType,
     pub format: vk::Format,
     pub aspect: vk::ImageAspectFlags,
+    pub base_mip_level: u32,
+    pub level_count: u32,
+    pub base_array_layer: u32,
+    pub layer_count: u32,
+}
+
+impl Default for TextureViewDesc {
+    fn default() -> Self {
+        TextureViewDesc {
+            view_type: vk::ImageViewType::TYPE_2D,
+            format: vk::Format::UNDEFINED,
+            aspect: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: vk::REMAINING_MIP_LEVELS,
+            base_array_layer: 0,
+            layer_count: vk::REMAINING_ARRAY_LAYERS,
+        }
+    }
 }
 
 impl TextureViewDesc {
-    pub fn default(texture: Texture) -> TextureViewDesc {
+    pub fn auto(texture: Texture) -> TextureViewDesc {
         let tex_desc = &texture.desc;
-        let view_type = if texture.desc.array_len > 1 {
+        let view_type = if texture.desc.layer_count > 1 {
             vk::ImageViewType::TYPE_2D_ARRAY
         } else {
             vk::ImageViewType::TYPE_2D
@@ -797,13 +832,27 @@ impl TextureViewDesc {
             view_type,
             format: tex_desc.format,
             aspect,
+            base_mip_level: 0,
+            level_count: tex_desc.mip_level_count,
+            base_array_layer: 0,
+            layer_count: tex_desc.layer_count,
         }
     }
 
     pub fn with_format(texture: Texture, format: vk::Format) -> TextureViewDesc {
-        let mut desc = Self::default(texture);
+        let mut desc = Self::auto(texture);
         desc.format = format;
         desc
+    }
+
+    pub fn make_subresource_range(&self) -> vk::ImageSubresourceRange {
+        vk::ImageSubresourceRange {
+            aspect_mask: self.aspect,
+            base_mip_level: self.base_mip_level,
+            level_count: self.level_count,
+            base_array_layer: self.base_array_layer,
+            layer_count: self.layer_count,
+        }
     }
 }
 
@@ -852,7 +901,7 @@ impl RenderDevice {
                 height: desc.height,
                 depth: 1,
             })
-            .array_layers(desc.array_len)
+            .array_layers(desc.layer_count)
             .mip_levels(1)
             .samples(vk::SampleCountFlags::TYPE_1)
             .initial_layout(initial_layout)
@@ -896,7 +945,7 @@ impl RenderDevice {
                 base_mip_level: 0,
                 level_count: 1,
                 base_array_layer: 0,
-                layer_count: texture.desc.array_len,
+                layer_count: texture.desc.layer_count,
             });
         let image_view = unsafe { device.create_image_view(&create_info, None) }.ok()?;
 
