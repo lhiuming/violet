@@ -1,10 +1,13 @@
 #include "gbuffer.hlsl"
 #include "scene_bindings.hlsl"
 
-TextureCube<float4> skycube;
 
 Texture2D<float> gbuffer_depth;
 Texture2D<uint4> gbuffer_color;
+
+TextureCube<float4> skycube;
+Texture2D<float> shadow_mask;
+
 RWTexture2D<float4> out_lighting;
 
 
@@ -105,20 +108,20 @@ void main(uint2 dispatch_thread_id: SV_DISPATCHTHREADID) {
     uint2 buffer_size;
     gbuffer_depth.GetDimensions(buffer_size.x, buffer_size.y);
 
+    float shadow_atten = shadow_mask[dispatch_thread_id.xy];
+
 	// world position reconstruction
     float2 screen_pos = (dispatch_thread_id + 0.5f) / float2(buffer_size);
 	float3 position_ws = mul(view_params.inv_view_proj, float4(screen_pos * 2.0f - 1.0f, depth, 1.0f)).xyz;
 
     // Direct lighting
 	float3 view = normalize(view_params.view_pos - position_ws);
-	float3 light = view_params.sun_dir;
-	float metallic = gbuffer.metallic;
-	float roughness = gbuffer.perceptual_roughness;
-	float3 diffuseColor = gbuffer.color.rgb * (1.0f - metallic);
-	float3 specularColor = lerp(float3(0.04f, 0.04f, 0.04f), gbuffer.color.rgb, metallic);
-	float3 light_inten = float3(1.0f, 1.0f, 1.0f) * PI;
-	float3 lighting = cal_lighting(view, light, gbuffer.normal, gbuffer.perceptual_roughness, diffuseColor, specularColor) * light_inten;
+	float3 diffuseColor = gbuffer.color.rgb * (1.0f - gbuffer.metallic);
+	float3 specularColor = lerp(float3(0.04f, 0.04f, 0.04f), gbuffer.color, gbuffer.metallic);
+	float3 light_inten = float3(1.2f, 1.1f, 1.0f) * PI;
+	float3 lighting = cal_lighting(view, view_params.sun_dir, gbuffer.normal, gbuffer.perceptual_roughness, diffuseColor, specularColor) * light_inten * shadow_atten;
 
+#if 0
 	// IBL fake
 	//if (roughness < 0.01f)
 	{
@@ -129,16 +132,19 @@ void main(uint2 dispatch_thread_id: SV_DISPATCHTHREADID) {
 	    float3 ambient = 0.5f * roughness;
 	    lighting += diffuseColor * ambient;
 	}
+#endif
 
     // Output
     out_lighting[dispatch_thread_id] = float4(lighting, 1.0f);
 
     // Debug
 #if 0
-    float3 debug_color;
+    float3 debug_color = float3(0, 0, 0);
     //debug_color = gbuffer.normal * 0.5f + 0.5f;
     //debug_color = position_ws * 0.5f + 0.5f;
     //debug_color = reflect(-view, gbuffer.normal) * 0.5f + 0.5f;
+    //debug_color.x = shadow_atten;
+    debug_color = float3(gbuffer.metallic, gbuffer.perceptual_roughness, 0.0f);
     out_lighting[dispatch_thread_id] = float4(debug_color, 1.0f);
 #endif
 }

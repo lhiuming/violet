@@ -1010,4 +1010,75 @@ impl RenderDevice {
             device_address,
         })
     }
+
+    pub fn get_ray_tracing_shader_group_handles(
+        &self,
+        pipeline: vk::Pipeline,
+        first_group: u32,
+        group_count: u32,
+    ) -> Vec<u8> {
+        let handle_size = self
+            .physical_device
+            .ray_tracing_pipeline_properties
+            .shader_group_handle_size;
+        let data_size = group_count * handle_size;
+        unsafe {
+            self.raytracing_pipeline_entry
+                .get_ray_tracing_shader_group_handles(
+                    pipeline,
+                    first_group,
+                    group_count,
+                    data_size as usize,
+                )
+                .unwrap()
+        }
+    }
+}
+
+// Helper to fill Shader Binding Table
+pub struct ShaderBindingTableFiller {
+    dst: *mut u8,
+    pos: isize,
+    handle_size: u32,
+    base_alignment: u32,
+}
+
+impl ShaderBindingTableFiller {
+    pub fn new(physical_device: &PhysicalDevice, dst: *mut u8) -> ShaderBindingTableFiller {
+        ShaderBindingTableFiller {
+            dst,
+            pos: 0,
+            handle_size: physical_device
+                .ray_tracing_pipeline_properties
+                .shader_group_handle_size,
+            base_alignment: physical_device
+                .ray_tracing_pipeline_properties
+                .shader_group_base_alignment,
+        }
+    }
+
+    pub fn start_group(&mut self) -> u32 {
+        let mask = (self.base_alignment - 1) as isize;
+        self.pos = (self.pos + mask) & !mask;
+        self.pos as u32
+    }
+
+    pub fn write_handles(&mut self, data: &[u8], first_handle: u32, handle_count: u32) -> u32 {
+        assert!(data.len() % self.handle_size as usize == 0);
+        assert!(handle_count + first_handle <= (data.len() / self.handle_size as usize) as u32);
+        let size = (handle_count * self.handle_size) as usize;
+
+        unsafe {
+            let src = std::slice::from_raw_parts(
+                data.as_ptr()
+                    .offset(first_handle as isize * self.handle_size as isize),
+                size,
+            );
+            let dst = std::slice::from_raw_parts_mut(self.dst.offset(self.pos as isize), size);
+            dst.copy_from_slice(src);
+        }
+
+        self.pos += size as isize;
+        size as u32
+    }
 }

@@ -10,31 +10,33 @@ use crate::render_device::RenderDevice;
 
 // BEGIN Handle
 
-#[derive(PartialEq, Eq, Hash)]
+#[derive(Eq, Hash)]
 pub struct Handle<T> {
-    id: usize,
+    id: u16,
+    generation: u16,
     _phantom_data: std::marker::PhantomData<T>,
 }
 
 impl<T> Handle<T> {
-    pub fn new(id: usize) -> Self {
+    pub fn new(id: u16, generation: u16) -> Self {
         Self {
             id,
+            generation,
             _phantom_data: std::marker::PhantomData,
         }
     }
 
     pub fn null() -> Self {
-        Self::new(usize::MAX)
+        Self::new(u16::MAX, u16::MAX)
     }
 
-    pub fn id(&self) -> usize {
+    pub fn id(&self) -> u16 {
         self.id
     }
 
     #[allow(dead_code)]
     pub fn is_null(&self) -> bool {
-        self.id == usize::MAX
+        self.id == u16::MAX
     }
 }
 
@@ -42,12 +44,19 @@ impl<T> Clone for Handle<T> {
     fn clone(&self) -> Self {
         Self {
             id: self.id,
+            generation: self.generation,
             _phantom_data: self._phantom_data.clone(),
         }
     }
 }
 
 impl<T> Copy for Handle<T> {}
+
+impl<Pipeline> PartialEq for Handle<Pipeline> {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id && self.generation == other.generation
+    }
+}
 
 // END Handle
 
@@ -83,6 +92,7 @@ pub struct Shaders {
     shader_loader: ShaderLoader,
 
     pipelines: Vec<Pipeline>,
+    generation: u16,
 }
 
 impl Shaders {
@@ -94,6 +104,7 @@ impl Shaders {
             raytracing_pipelines_map: HashMap::new(),
             shader_loader: ShaderLoader::new(),
             pipelines: Vec::new(),
+            generation: 0,
         }
     }
 
@@ -101,7 +112,7 @@ impl Shaders {
     fn add_pipeline(&mut self, pipeline: Pipeline) -> Handle<Pipeline> {
         let id = self.pipelines.len();
         self.pipelines.push(pipeline);
-        Handle::new(id)
+        Handle::new(id as u16, self.generation)
     }
 
     pub fn create_gfx_pipeline(
@@ -179,11 +190,11 @@ impl Shaders {
     }
 
     pub fn get_pipeline(&self, handle: Handle<Pipeline>) -> Option<&Pipeline> {
-        if handle.is_null() {
+        if handle.is_null() || handle.generation != self.generation {
             None
         } else {
             let id = handle.id();
-            Some(&self.pipelines[id])
+            Some(&self.pipelines[id as usize])
         }
     }
 
@@ -193,6 +204,8 @@ impl Shaders {
         self.compute_pipelines_map.clear();
         self.raytracing_pipelines_map.clear();
         self.pipelines.clear();
+
+        self.generation += 1;
     }
 }
 
@@ -324,6 +337,22 @@ impl ShaderDefinition {
             virtual_path,
             entry_point,
             stage: ShaderStage::Frag,
+        }
+    }
+
+    pub fn raygen(virtual_path: &'static str, entry_point: &'static str) -> ShaderDefinition {
+        ShaderDefinition {
+            virtual_path,
+            entry_point,
+            stage: ShaderStage::RayGen,
+        }
+    }
+
+    pub fn miss(virtual_path: &'static str, entry_point: &'static str) -> ShaderDefinition {
+        ShaderDefinition {
+            virtual_path,
+            entry_point,
+            stage: ShaderStage::Miss,
         }
     }
 }

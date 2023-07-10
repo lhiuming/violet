@@ -7,10 +7,11 @@ use glam::{Mat4, Vec3, Vec4, Vec4Swizzles};
 use crate::command_buffer::{CommandBuffer, StencilOps};
 use crate::model::Model;
 use crate::render_device::{
-    AccelerationStructure, Buffer, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
+    AccelerationStructure, Buffer, RenderDevice, ShaderBindingTableFiller, Texture, TextureDesc,
+    TextureView, TextureViewDesc,
 };
 use crate::render_graph::{self};
-use crate::shader::{HackStuff, PushConstantsBuilder, ShaderDefinition, ShaderStage, Shaders};
+use crate::shader::{HackStuff, Handle, Pipeline, PushConstantsBuilder, ShaderDefinition, Shaders};
 
 // Allocatable buffer. Alway aligned to 4 bytes.
 pub struct AllocBuffer {
@@ -151,13 +152,6 @@ pub struct RenderScene {
     pub vertex_buffer: AllocBuffer,
     pub index_buffer: AllocBuffer,
 
-    // todo
-    pub shader_binding_table: Buffer,
-    pub shader_binding_table_addr: vk::DeviceAddress,
-
-    // Global texture to store all loaded textures
-    //pub material_texture: AllocTexture2D,
-
     // Global texture arrays, mapping the bindless textures
     pub material_textures: Vec<Texture>,
     pub material_texture_views: Vec<TextureView>,
@@ -200,33 +194,6 @@ impl RenderScene {
         let vertex_buffer_view = rd
             .create_buffer_view(vertex_buffer.buffer.handle, vk::Format::R32_UINT)
             .unwrap();
-
-        let shader_group_count = 2; // raygen + miss
-        let sg_handle_size = rd
-            .physical_device
-            .ray_tracing_pipeline_properties
-            .shader_group_handle_size as u64;
-        let table_size = std::cmp::max(
-            sg_handle_size,
-            rd.physical_device
-                .ray_tracing_pipeline_properties
-                .shader_group_base_alignment as u64,
-        ) * shader_group_count;
-        let shader_binding_table = rd
-            .create_buffer(
-                table_size,
-                vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR
-                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS, // for get_buffer_device_address
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT, // filling directly from host
-            )
-            .unwrap();
-
-        let shader_binding_table_addr = unsafe {
-            let info = vk::BufferDeviceAddressInfo::builder()
-                .buffer(shader_binding_table.handle)
-                .build();
-            rd.device_entry.get_buffer_device_address(&info)
-        };
 
         // View parameter constant buffer
         let view_params_cb = rd
@@ -347,9 +314,6 @@ impl RenderScene {
             descriptor_set,
             vertex_buffer,
             index_buffer,
-            shader_binding_table,
-            shader_binding_table_addr,
-            //material_texture: material_texture,
             material_textures: Vec::new(),
             material_texture_views: Vec::new(),
             material_parmas: Vec::new(),
@@ -898,6 +862,81 @@ pub struct ViewInfo {
     pub projection: Mat4,
 }
 
+pub struct RayTracedShadowResources {
+    pub shader_binding_table: Buffer,
+    pub prev_pipeline_handle: Handle<Pipeline>,
+    pub raygen_region: vk::StridedDeviceAddressRegionKHR,
+    pub miss_region: vk::StridedDeviceAddressRegionKHR,
+}
+
+impl RayTracedShadowResources {
+    pub fn new(rd: &RenderDevice) -> RayTracedShadowResources {
+        let sbt_size = 256; // should be big engough
+        let sbt = rd
+            .create_buffer(
+                sbt_size,
+                vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .unwrap();
+
+        let handle_size = rd
+            .physical_device
+            .ray_tracing_pipeline_properties
+            .shader_group_handle_size as vk::DeviceSize;
+        let raygen_region = vk::StridedDeviceAddressRegionKHR {
+            device_address: sbt.device_address.unwrap(),
+            stride: handle_size,
+            size: handle_size,
+        };
+
+        let group_alignment = rd
+            .physical_device
+            .ray_tracing_pipeline_properties
+            .shader_group_base_alignment as vk::DeviceSize;
+        let miss_offset = std::cmp::max(handle_size, group_alignment);
+        let miss_region = vk::StridedDeviceAddressRegionKHR {
+            device_address: sbt.device_address.unwrap() + miss_offset,
+            stride: handle_size,
+            size: handle_size,
+        };
+
+        RayTracedShadowResources {
+            shader_binding_table: sbt,
+            prev_pipeline_handle: Handle::null(),
+            raygen_region,
+            miss_region,
+        }
+    }
+
+    pub fn update_shader_group_handles(
+        &mut self,
+        rd: &RenderDevice,
+        shaders: &Shaders,
+        pipeline_handle: Handle<Pipeline>,
+    ) {
+        if self.prev_pipeline_handle != pipeline_handle {
+            if let Some(pipeline) = shaders.get_pipeline(pipeline_handle) {
+                self.fill_shader_group_handles(rd, pipeline);
+                self.prev_pipeline_handle = pipeline_handle;
+            }
+        }
+    }
+
+    fn fill_shader_group_handles(&self, rd: &RenderDevice, pipeline: &Pipeline) {
+        let handle_data = rd.get_ray_tracing_shader_group_handles(pipeline.handle, 0, 2);
+
+        let mut filler = ShaderBindingTableFiller::new(
+            &rd.physical_device,
+            self.shader_binding_table.data as *mut u8,
+        );
+        filler.write_handles(&handle_data, 0, 1);
+        filler.start_group();
+        filler.write_handles(&handle_data, 1, 1);
+    }
+}
+
 pub struct RednerLoop {
     pub command_pool: vk::CommandPool,
     pub command_buffer: vk::CommandBuffer,
@@ -908,6 +947,8 @@ pub struct RednerLoop {
     pub command_buffer_finished_fence: vk::Fence,
 
     pub render_graph_cache: render_graph::RenderGraphCache,
+
+    pub raytraced_shadow: RayTracedShadowResources,
 }
 
 impl RednerLoop {
@@ -923,6 +964,7 @@ impl RednerLoop {
             present_ready_semaphore: rd.create_semaphore(),
             command_buffer_finished_fence: rd.create_fence(true),
             render_graph_cache: render_graph::RenderGraphCache::new(rd),
+            raytraced_shadow: RayTracedShadowResources::new(rd),
         }
     }
 
@@ -1298,6 +1340,51 @@ impl RednerLoop {
                 });
         }
 
+        let scene_tlas = rg.register_accel_struct(scene.scene_top_level_accel_struct.unwrap());
+
+        let raytraced_shadow_mask = {
+            let tex_desc = TextureDesc::new_2d(
+                gbuffer_size.width,
+                gbuffer_size.height,
+                vk::Format::R8_UNORM,
+                vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+            );
+            let rt_shadow_tex = rg.create_texutre(tex_desc);
+            rg.create_texture_view(rt_shadow_tex, TextureViewDesc::auto(&tex_desc))
+        };
+
+        // Ray Traced Shadow
+        if let Some(raytraced_shadow) = shaders.create_raytracing_pipeline(
+            ShaderDefinition::raygen("raytraced_shadow.hlsl", "raygen"),
+            ShaderDefinition::miss("raytraced_shadow.hlsl", "miss"),
+            &hack,
+        ) {
+            self.raytraced_shadow
+                .update_shader_group_handles(rd, shaders, raytraced_shadow);
+            let raygen_sbt = self.raytraced_shadow.raygen_region;
+            let miss_sbt = self.raytraced_shadow.miss_region;
+
+            rg.new_pass("RayTracedShadow", RenderPassType::RayTracing)
+                .pipeline(raytraced_shadow)
+                .descritpro_set(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set)
+                .accel_struct("scene_tlas", scene_tlas)
+                .texture("gbuffer_depth", gbuffer_depth.1)
+                .rw_texture("rw_shadow", raytraced_shadow_mask)
+                .render(move |cb, shaders, _pass| {
+                    let pipeline = shaders.get_pipeline(raytraced_shadow).unwrap();
+                    cb.bind_pipeline(vk::PipelineBindPoint::RAY_TRACING_KHR, pipeline.handle);
+                    cb.trace_rays(
+                        &raygen_sbt,
+                        &miss_sbt,
+                        &vk::StridedDeviceAddressRegionKHR::default(),
+                        &vk::StridedDeviceAddressRegionKHR::default(),
+                        gbuffer_size.width,
+                        gbuffer_size.height,
+                        1,
+                    )
+                });
+        }
+
         // GBuffer Lighting
         let gbuffer_lighting = shaders.create_compute_pipeline(
             ShaderDefinition::compute("gbuffer_lighting.hlsl", "main"),
@@ -1307,9 +1394,10 @@ impl RednerLoop {
             rg.new_pass("GBuffer_Lighting", RenderPassType::Compute)
                 .pipeline(pipeline)
                 .descritpro_set(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set)
-                .texture("skycube", skycube)
                 .texture("gbuffer_depth", gbuffer_depth.1)
                 .texture("gbuffer_color", gbuffer_color.1)
+                .texture("skycube", skycube)
+                .texture("shadow_mask", raytraced_shadow_mask)
                 .rw_texture("out_lighting", final_color)
                 .render(move |cb, shaders, _pass| {
                     let pipeline = shaders.get_pipeline(pipeline).unwrap();
@@ -1317,115 +1405,6 @@ impl RednerLoop {
                     let dispatch_x = (gbuffer_size.width + 7) / 8;
                     let diapatch_y = (gbuffer_size.height + 7) / 8;
                     cb.dispatch(dispatch_x, diapatch_y, 1);
-                });
-        }
-
-        // Ray tracing test
-        let ray_test_pipeline = shaders.create_raytracing_pipeline(
-            ShaderDefinition {
-                virtual_path: "ray_test.hlsl",
-                entry_point: "raygen",
-                stage: ShaderStage::RayGen,
-            },
-            ShaderDefinition {
-                virtual_path: "ray_test.hlsl",
-                entry_point: "miss",
-                stage: ShaderStage::Miss,
-            },
-            &hack,
-        );
-        if let Some(ray_test_pipeline) = ray_test_pipeline {
-            let extent = rd.swapchain.extent;
-
-            // Fill SBT
-            let sbt = &scene.shader_binding_table;
-            let handle_size = rd
-                .physical_device
-                .ray_tracing_pipeline_properties
-                .shader_group_handle_size as usize;
-            let group_align = rd
-                .physical_device
-                .ray_tracing_pipeline_properties
-                .shader_group_base_alignment;
-            {
-                let pipeline = shaders.get_pipeline(ray_test_pipeline).unwrap();
-
-                unsafe {
-                    assert!(
-                        rd.physical_device
-                            .ray_tracing_pipeline_properties
-                            .shader_group_handle_alignment
-                            <= rd
-                                .physical_device
-                                .ray_tracing_pipeline_properties
-                                .shader_group_handle_size
-                    );
-                    let group_count = 2; // raygen + miss
-                    let data_size = handle_size * group_count; // only shader group handles
-                    let reygen_handle_data = rd
-                        .raytracing_pipeline_entry
-                        .get_ray_tracing_shader_group_handles(
-                            pipeline.handle,
-                            0,
-                            group_count as u32,
-                            data_size,
-                        )
-                        .unwrap();
-
-                    // copy to SBT
-                    let dst_raygen =
-                        std::slice::from_raw_parts_mut(sbt.data as *mut u8, handle_size);
-                    dst_raygen.copy_from_slice(&reygen_handle_data[0..handle_size]);
-                    let stride = rd
-                        .physical_device
-                        .ray_tracing_pipeline_properties
-                        .shader_group_base_alignment;
-                    let dst_raygen = std::slice::from_raw_parts_mut(
-                        sbt.data.offset(stride as isize) as *mut u8,
-                        handle_size,
-                    );
-                    dst_raygen.copy_from_slice(&reygen_handle_data[handle_size..handle_size * 2]);
-                };
-            }
-
-            let tlas = rg.register_accel_struct(scene.scene_top_level_accel_struct.unwrap());
-
-            rg.new_pass("Ray Test", RenderPassType::RayTracing)
-                .pipeline(ray_test_pipeline)
-                .descritpro_set(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set)
-                .accel_struct("rayTracingScene", tlas)
-                .rw_texture("rw_color", final_color)
-                .render(move |cb, shaders, _pass| unsafe {
-                    let pipeline = shaders.get_pipeline(ray_test_pipeline).unwrap();
-
-                    cb.bind_pipeline(vk::PipelineBindPoint::RAY_TRACING_KHR, pipeline.handle);
-
-                    let sbt_memory = scene.shader_binding_table_addr;
-                    let handle_size = handle_size as u64;
-
-                    let raygen_shader_binding_tables = vk::StridedDeviceAddressRegionKHR::builder()
-                        .size(handle_size) // only shader, no resources
-                        .stride(handle_size) // equal to size for raygen
-                        .device_address(sbt_memory)
-                        .build();
-                    let miss_shader_binding_tables = vk::StridedDeviceAddressRegionKHR::builder()
-                        .size(handle_size)
-                        .stride(handle_size)
-                        .device_address(sbt_memory + group_align as u64)
-                        .build();
-                    let hit_shader_binding_tables = vk::StridedDeviceAddressRegionKHR::default();
-                    let callable_shader_binding_tables =
-                        vk::StridedDeviceAddressRegionKHR::default();
-                    cb.raytracing_pipeline.cmd_trace_rays(
-                        cb.command_buffer,
-                        &raygen_shader_binding_tables,
-                        &miss_shader_binding_tables,
-                        &hit_shader_binding_tables,
-                        &callable_shader_binding_tables,
-                        extent.width,
-                        extent.height,
-                        1,
-                    );
                 });
         }
 
