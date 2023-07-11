@@ -593,7 +593,7 @@ pub struct Buffer {
     pub handle: vk::Buffer,
     pub memory: vk::DeviceMemory,
     pub size: u64,
-    pub data: *mut c_void, // TODO make optional
+    pub data: *mut u8, // TODO make optional
     pub device_address: Option<vk::DeviceAddress>,
 }
 
@@ -664,9 +664,9 @@ impl RenderDevice {
         let is_mappable = memory_property.contains(vk::MemoryPropertyFlags::HOST_VISIBLE);
         let data = if is_mappable {
             let map_flags = vk::MemoryMapFlags::default(); // dummy parameter
-            unsafe { device.map_memory(memory, offset, size, map_flags) }.unwrap()
+            unsafe { device.map_memory(memory, offset, size, map_flags) }.unwrap() as *mut u8
         } else {
-            std::ptr::null::<c_void>() as *mut _
+            std::ptr::null_mut::<u8>()
         };
 
         Some(Buffer {

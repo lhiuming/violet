@@ -110,10 +110,12 @@ impl UploadContext {
     }
 }
 
+#[repr(C)]
 pub struct MaterialParams {
     pub base_color_index: u32,
     pub metallic_roughness_index: u32,
     pub normal_index: u32,
+    pub pad: u32,
 }
 
 pub struct MeshParams {
@@ -128,11 +130,13 @@ pub struct MeshParams {
     pub material_index: u32,
 }
 
+// Matching constants in `shader/scene_bindings.hlsl`
 const SCENE_DESCRIPTOR_SET_INDEX: u32 = 1;
 const VERTEX_BUFFER_BINDING_INDEX: u32 = 0;
-const BINDLESS_TEXTURE_BINDING_INDEX: u32 = 1;
-const VIEWPARAMS_BINDING_INDEX: u32 = 2;
-const SAMPLER_BINDING_INDEX: u32 = 3;
+const MATERIAL_PARAMS_BINDING_INDEX: u32 = 1;
+const BINDLESS_TEXTURE_BINDING_INDEX: u32 = 2;
+const VIEWPARAMS_BINDING_INDEX: u32 = 3;
+const SAMPLER_BINDING_INDEX: u32 = 4;
 
 // Contain everything to be rendered
 pub struct RenderScene {
@@ -151,6 +155,9 @@ pub struct RenderScene {
     // Global buffer to store all loaded meshes
     pub vertex_buffer: AllocBuffer,
     pub index_buffer: AllocBuffer,
+
+    // Global material parameter buffer for all loaded mesh; map to `material_params`
+    pub material_param_buffer: Buffer,
 
     // Global texture arrays, mapping the bindless textures
     pub material_textures: Vec<Texture>,
@@ -195,6 +202,16 @@ impl RenderScene {
             .create_buffer_view(vertex_buffer.buffer.handle, vk::Format::R32_UINT)
             .unwrap();
 
+        // Material Parameters buffer
+        let material_param_size = 3 * 4;
+        let material_param_buffer = rd
+            .create_buffer(
+                material_param_size * 1024,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT, // TODO staging buffer
+            )
+            .unwrap();
+
         // View parameter constant buffer
         let view_params_cb = rd
             .create_buffer(
@@ -224,10 +241,16 @@ impl RenderScene {
         );
 
         // Create the scene/persistent binding set
+        // see also: `shader/scene_bindings.hlsl`
         let descriptor_set_layout = {
             let vbuffer = vk::DescriptorSetLayoutBinding::builder()
                 .binding(VERTEX_BUFFER_BINDING_INDEX)
                 .descriptor_type(vk::DescriptorType::UNIFORM_TEXEL_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::ALL);
+            let mat_buffer = vk::DescriptorSetLayoutBinding::builder()
+                .binding(MATERIAL_PARAMS_BINDING_INDEX)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::ALL);
             let bindless_textures = vk::DescriptorSetLayoutBinding::builder()
@@ -249,13 +272,21 @@ impl RenderScene {
                 .descriptor_type(vk::DescriptorType::SAMPLER)
                 .stage_flags(vk::ShaderStageFlags::ALL)
                 .immutable_samplers(&samplers);
-            let bindings = [*vbuffer, *bindless_textures, *cbuffer, *sampler_ll];
+            let bindings = [
+                *vbuffer,
+                *mat_buffer,
+                *bindless_textures,
+                *cbuffer,
+                *sampler_ll,
+            ];
             let binding_flags = [
+                vk::DescriptorBindingFlags::default(),
                 vk::DescriptorBindingFlags::default(),
                 bindless_textures_flags,
                 vk::DescriptorBindingFlags::default(),
                 vk::DescriptorBindingFlags::default(),
             ];
+            assert_eq!(bindings.len(), binding_flags.len());
             let mut flags_create_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::builder()
                 .binding_flags(&binding_flags);
             let create_info = vk::DescriptorSetLayoutCreateInfo::builder()
@@ -282,11 +313,22 @@ impl RenderScene {
 
         // Initialize descriptor set
         {
-            let write_buffer_view = vk::WriteDescriptorSet::builder()
+            let write_vbuffer = vk::WriteDescriptorSet::builder()
                 .dst_set(descriptor_set)
                 .dst_binding(VERTEX_BUFFER_BINDING_INDEX)
                 .descriptor_type(vk::DescriptorType::UNIFORM_TEXEL_BUFFER)
                 .texel_buffer_view(slice::from_ref(&vertex_buffer_view))
+                .build();
+            let mat_buffer_info = vk::DescriptorBufferInfo::builder()
+                .buffer(material_param_buffer.handle)
+                .offset(0)
+                .range(vk::WHOLE_SIZE)
+                .build();
+            let write_mat_buffer = vk::WriteDescriptorSet::builder()
+                .dst_set(descriptor_set)
+                .dst_binding(MATERIAL_PARAMS_BINDING_INDEX)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(slice::from_ref(&mat_buffer_info))
                 .build();
             let cbuffer_info = vk::DescriptorBufferInfo::builder()
                 .buffer(view_params_cb.handle)
@@ -301,7 +343,7 @@ impl RenderScene {
                 .build();
             unsafe {
                 rd.device_entry
-                    .update_descriptor_sets(&[write_buffer_view, write_cbuffer], &[])
+                    .update_descriptor_sets(&[write_vbuffer, write_mat_buffer, write_cbuffer], &[])
             }
         }
 
@@ -314,6 +356,7 @@ impl RenderScene {
             descriptor_set,
             vertex_buffer,
             index_buffer,
+            material_param_buffer,
             material_textures: Vec::new(),
             material_texture_views: Vec::new(),
             material_parmas: Vec::new(),
@@ -366,10 +409,7 @@ impl RenderScene {
 
             // Read to staging buffer
             let staging_slice = unsafe {
-                std::slice::from_raw_parts_mut(
-                    staging_buffer.data as *mut u8,
-                    texel_count as usize * 4,
-                )
+                std::slice::from_raw_parts_mut(staging_buffer.data, texel_count as usize * 4)
             };
             staging_slice.copy_from_slice(&image.data);
 
@@ -495,7 +535,25 @@ impl RenderScene {
                 base_color_index: resolve(&material.base_color_map, true),
                 metallic_roughness_index: resolve(&material.metallic_roughness_map, true),
                 normal_index: resolve(&material.normal_map, false),
+                pad: 0,
             });
+        }
+
+        // Upload new material params
+        unsafe {
+            let param_size = std::mem::size_of::<MaterialParams>();
+            let param_count = self.material_parmas.len() - material_index_offset as usize;
+            let data_offset = material_index_offset as isize * param_size as isize;
+            let data_size = param_size * param_count;
+            let src = std::slice::from_raw_parts(
+                (self.material_parmas.as_ptr() as *const u8).offset(data_offset),
+                data_size,
+            );
+            let dst = std::slice::from_raw_parts_mut(
+                self.material_param_buffer.data.offset(data_offset),
+                data_size,
+            );
+            dst.copy_from_slice(src);
         }
 
         // Add new texture view to bindless texture array
@@ -927,10 +985,8 @@ impl RayTracedShadowResources {
     fn fill_shader_group_handles(&self, rd: &RenderDevice, pipeline: &Pipeline) {
         let handle_data = rd.get_ray_tracing_shader_group_handles(pipeline.handle, 0, 2);
 
-        let mut filler = ShaderBindingTableFiller::new(
-            &rd.physical_device,
-            self.shader_binding_table.data as *mut u8,
-        );
+        let mut filler =
+            ShaderBindingTableFiller::new(&rd.physical_device, self.shader_binding_table.data);
         filler.write_handles(&handle_data, 0, 1);
         filler.start_group();
         filler.write_handles(&handle_data, 1, 1);
@@ -1251,8 +1307,6 @@ impl RednerLoop {
                     );
                     cb.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, pipeline.handle);
                     for mesh_params in &scene.mesh_params {
-                        let material_params =
-                            &scene.material_parmas[mesh_params.material_index as usize];
                         // PushConstant for everything per-draw
                         let model_xform = glam::Mat4::IDENTITY; // Not used for now
                         let constants = PushConstantsBuilder::new()
@@ -1264,9 +1318,7 @@ impl RednerLoop {
                             .push(&mesh_params.normals_offset)
                             .push(&mesh_params.tangents_offset)
                             // material params
-                            .push(&material_params.base_color_index)
-                            .push(&material_params.normal_index)
-                            .push(&material_params.metallic_roughness_index);
+                            .push(&mesh_params.material_index);
                         cb.push_constants(
                             pipeline.layout,
                             pipeline.push_constant_ranges[0].stage_flags, // TODO

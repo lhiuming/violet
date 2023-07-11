@@ -12,10 +12,7 @@ struct PushConstants
 	uint texcoords_offset;
 	uint normals_offset;
 	uint tangnets_offset;
-	// Bindless Materials
-	uint color_texture;
-	uint normal_texture;
-	uint metal_rough_texture;
+	uint material_index;
 };
 [[vk::push_constant]]
 PushConstants pc;
@@ -59,9 +56,11 @@ void ps_main(
 	// Output
 	out uint4 output : SV_Target0)
 {
-	float4 base_color = bindless_textures[pc.color_texture].Sample(sampler_linear_clamp, uv);
-	float4 normal_map = bindless_textures[pc.normal_texture].Sample(sampler_linear_clamp, uv);
-	float4 metal_rough = bindless_textures[pc.metal_rough_texture].Sample(sampler_linear_clamp, uv);
+	MaterialParams mat = material_params[pc.material_index];
+
+	float4 base_color = bindless_textures[mat.base_color_index].Sample(sampler_linear_clamp, uv);
+	float4 normal_map = bindless_textures[mat.normal_index].Sample(sampler_linear_clamp, uv);
+	float4 metal_rough = bindless_textures[mat.metallic_roughness_index].Sample(sampler_linear_clamp, uv);
 
 	// normal mapping
 	float3 normal_ts = normal_map.xyz * 2.0f - 1.0f;

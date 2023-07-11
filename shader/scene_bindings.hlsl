@@ -18,7 +18,14 @@ See: https://github.com/Microsoft/DirectXShaderCompiler/blob/master/docs/SPIR-V.
 
 // Scene/Persistent Bindings
 [[vk::binding(0, SCENE_DESCRIPTOR_SET_INDEX)]] Buffer<uint> vertex_buffer;
-[[vk::binding(1, SCENE_DESCRIPTOR_SET_INDEX)]] Texture2D bindless_textures[];
+struct MaterialParams {
+    uint base_color_index;
+    uint metallic_roughness_index;
+    uint normal_index;
+    uint pad;
+};
+[[vk::binding(1, SCENE_DESCRIPTOR_SET_INDEX)]] StructuredBuffer<MaterialParams> material_params;
+[[vk::binding(2, SCENE_DESCRIPTOR_SET_INDEX)]] Texture2D bindless_textures[];
 struct ViewParams 
 {
 	float4x4 view_proj;
@@ -29,5 +36,5 @@ struct ViewParams
 	float3 view_ray_down_shift;
 	float3 sun_dir;
 };
-[[vk::binding(2, SCENE_DESCRIPTOR_SET_INDEX)]] ConstantBuffer<ViewParams> view_params;
-[[vk::binding(3, SCENE_DESCRIPTOR_SET_INDEX)]] SamplerState sampler_linear_clamp;
+[[vk::binding(3, SCENE_DESCRIPTOR_SET_INDEX)]] ConstantBuffer<ViewParams> view_params;
+[[vk::binding(4, SCENE_DESCRIPTOR_SET_INDEX)]] SamplerState sampler_linear_clamp;

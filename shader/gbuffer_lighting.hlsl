@@ -112,7 +112,8 @@ void main(uint2 dispatch_thread_id: SV_DISPATCHTHREADID) {
 
 	// world position reconstruction
     float2 screen_pos = (dispatch_thread_id + 0.5f) / float2(buffer_size);
-	float3 position_ws = mul(view_params.inv_view_proj, float4(screen_pos * 2.0f - 1.0f, depth, 1.0f)).xyz;
+	float4 position_ws_h = mul(view_params.inv_view_proj, float4(screen_pos * 2.0f - 1.0f, depth, 1.0f));
+	float3 position_ws = position_ws_h.xyz / position_ws_h.w;
 
     // Direct lighting
 	float3 view = normalize(view_params.view_pos - position_ws);
@@ -143,8 +144,9 @@ void main(uint2 dispatch_thread_id: SV_DISPATCHTHREADID) {
     //debug_color = gbuffer.normal * 0.5f + 0.5f;
     //debug_color = position_ws * 0.5f + 0.5f;
     //debug_color = reflect(-view, gbuffer.normal) * 0.5f + 0.5f;
+    debug_color = view * 0.5f + 0.5f;
     //debug_color.x = shadow_atten;
-    debug_color = float3(gbuffer.metallic, gbuffer.perceptual_roughness, 0.0f);
+    //debug_color = float3(gbuffer.metallic, gbuffer.perceptual_roughness, 0.0f);
     out_lighting[dispatch_thread_id] = float4(debug_color, 1.0f);
 #endif
 }
