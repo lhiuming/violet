@@ -128,6 +128,8 @@ pub struct MeshParams {
     pub tangents_offset: u32,
 
     pub material_index: u32,
+
+    pub pad: u32,
 }
 
 // Matching constants in `shader/scene_bindings.hlsl`
@@ -136,7 +138,9 @@ const VERTEX_BUFFER_BINDING_INDEX: u32 = 0;
 const MATERIAL_PARAMS_BINDING_INDEX: u32 = 1;
 const BINDLESS_TEXTURE_BINDING_INDEX: u32 = 2;
 const VIEWPARAMS_BINDING_INDEX: u32 = 3;
-const SAMPLER_BINDING_INDEX: u32 = 4;
+const MESH_PARAMS_BINDING_INDEX: u32 = 4;
+const INDEX_BUFFER_BINDING_INDEX: u32 = 5;
+const SAMPLER_BINDING_INDEX: u32 = 6;
 
 // Contain everything to be rendered
 pub struct RenderScene {
@@ -156,9 +160,6 @@ pub struct RenderScene {
     pub vertex_buffer: AllocBuffer,
     pub index_buffer: AllocBuffer,
 
-    // Global material parameter buffer for all loaded mesh; map to `material_params`
-    pub material_param_buffer: Buffer,
-
     // Global texture arrays, mapping the bindless textures
     pub material_textures: Vec<Texture>,
     pub material_texture_views: Vec<TextureView>,
@@ -166,6 +167,12 @@ pub struct RenderScene {
     // Stuff to be rendered
     pub material_parmas: Vec<MaterialParams>,
     pub mesh_params: Vec<MeshParams>,
+
+    // Global material parameter buffer for all loaded mesh; map to `material_params`
+    pub material_param_buffer: Buffer,
+
+    // Global mesh paramter buffer for all loaded mesh; map to `mesh_params`
+    pub mesh_param_buffer: Buffer,
 
     // Ray Tracing Acceleration structures for whole scene
     pub mesh_bottom_level_accel_structs: Vec<AccelerationStructure>,
@@ -185,11 +192,16 @@ impl RenderScene {
         let index_buffer = AllocBuffer::new(
             rd.create_buffer(
                 ib_size,
-                vk::BufferUsageFlags::INDEX_BUFFER | accel_strut_usafe,
+                vk::BufferUsageFlags::INDEX_BUFFER
+                    | vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER
+                    | accel_strut_usafe,
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT, // TODO staing buffer
             )
             .unwrap(),
         );
+        let index_buffer_view = rd
+            .create_buffer_view(index_buffer.buffer.handle, vk::Format::R16_UINT)
+            .unwrap();
         let vertex_buffer = AllocBuffer::new(
             rd.create_buffer(
                 vb_size,
@@ -203,12 +215,22 @@ impl RenderScene {
             .unwrap();
 
         // Material Parameters buffer
-        let material_param_size = 3 * 4;
+        let material_param_size = std::mem::size_of::<MaterialParams>() as vk::DeviceSize;
         let material_param_buffer = rd
             .create_buffer(
                 material_param_size * 1024,
                 vk::BufferUsageFlags::STORAGE_BUFFER,
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT, // TODO staging buffer
+            )
+            .unwrap();
+
+        // Mesh Paramters buffer
+        let mesh_param_size = std::mem::size_of::<MeshParams>() as vk::DeviceSize;
+        let mesh_param_buffer = rd
+            .create_buffer(
+                mesh_param_size * 1024,
+                vk::BufferUsageFlags::STORAGE_BUFFER,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
             )
             .unwrap();
 
@@ -248,6 +270,11 @@ impl RenderScene {
                 .descriptor_type(vk::DescriptorType::UNIFORM_TEXEL_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::ALL);
+            let ibuffer = vk::DescriptorSetLayoutBinding::builder()
+                .binding(INDEX_BUFFER_BINDING_INDEX)
+                .descriptor_type(vk::DescriptorType::UNIFORM_TEXEL_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::ALL); // TODO only hit shader
             let mat_buffer = vk::DescriptorSetLayoutBinding::builder()
                 .binding(MATERIAL_PARAMS_BINDING_INDEX)
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
@@ -266,6 +293,11 @@ impl RenderScene {
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::ALL);
+            let mesh_buffer = vk::DescriptorSetLayoutBinding::builder()
+                .binding(MESH_PARAMS_BINDING_INDEX)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::ALL);
             let samplers = [shared_sampler];
             let sampler_ll = vk::DescriptorSetLayoutBinding::builder()
                 .binding(SAMPLER_BINDING_INDEX)
@@ -274,15 +306,19 @@ impl RenderScene {
                 .immutable_samplers(&samplers);
             let bindings = [
                 *vbuffer,
+                *ibuffer,
                 *mat_buffer,
                 *bindless_textures,
                 *cbuffer,
+                *mesh_buffer,
                 *sampler_ll,
             ];
             let binding_flags = [
                 vk::DescriptorBindingFlags::default(),
                 vk::DescriptorBindingFlags::default(),
+                vk::DescriptorBindingFlags::default(),
                 bindless_textures_flags,
+                vk::DescriptorBindingFlags::default(),
                 vk::DescriptorBindingFlags::default(),
                 vk::DescriptorBindingFlags::default(),
             ];
@@ -319,6 +355,12 @@ impl RenderScene {
                 .descriptor_type(vk::DescriptorType::UNIFORM_TEXEL_BUFFER)
                 .texel_buffer_view(slice::from_ref(&vertex_buffer_view))
                 .build();
+            let write_ibuffer = vk::WriteDescriptorSet::builder()
+                .dst_set(descriptor_set)
+                .dst_binding(INDEX_BUFFER_BINDING_INDEX)
+                .descriptor_type(vk::DescriptorType::UNIFORM_TEXEL_BUFFER)
+                .texel_buffer_view(slice::from_ref(&index_buffer_view))
+                .build();
             let mat_buffer_info = vk::DescriptorBufferInfo::builder()
                 .buffer(material_param_buffer.handle)
                 .offset(0)
@@ -341,9 +383,28 @@ impl RenderScene {
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .buffer_info(slice::from_ref(&cbuffer_info))
                 .build();
+            let mesh_buffer_info = vk::DescriptorBufferInfo::builder()
+                .buffer(mesh_param_buffer.handle)
+                .offset(0)
+                .range(vk::WHOLE_SIZE)
+                .build();
+            let write_mesh_buffer = vk::WriteDescriptorSet::builder()
+                .dst_set(descriptor_set)
+                .dst_binding(MESH_PARAMS_BINDING_INDEX)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(slice::from_ref(&mesh_buffer_info))
+                .build();
             unsafe {
-                rd.device_entry
-                    .update_descriptor_sets(&[write_vbuffer, write_mat_buffer, write_cbuffer], &[])
+                rd.device_entry.update_descriptor_sets(
+                    &[
+                        write_vbuffer,
+                        write_ibuffer,
+                        write_mat_buffer,
+                        write_cbuffer,
+                        write_mesh_buffer,
+                    ],
+                    &[],
+                )
             }
         }
 
@@ -356,11 +417,12 @@ impl RenderScene {
             descriptor_set,
             vertex_buffer,
             index_buffer,
-            material_param_buffer,
             material_textures: Vec::new(),
             material_texture_views: Vec::new(),
             material_parmas: Vec::new(),
             mesh_params: Vec::new(),
+            material_param_buffer,
+            mesh_param_buffer,
             mesh_bottom_level_accel_structs: Vec::new(),
             scene_top_level_accel_struct: None,
             sun_dir: Vec3::new(0.0, 0.0, 1.0),
@@ -580,9 +642,10 @@ impl RenderScene {
             }
         }
 
-        let mut blas_geometrys = Vec::<vk::AccelerationStructureGeometryKHR>::new();
-        let mut blas_range_info = Vec::<vk::AccelerationStructureBuildRangeInfoKHR>::new();
-        let mut max_primitive_counts = Vec::<u32>::new();
+        let mut blas_geometries = Vec::<vk::AccelerationStructureGeometryKHR>::new();
+        let mut blas_range_infos = Vec::<vk::AccelerationStructureBuildRangeInfoKHR>::new();
+        let mut max_primitive_counts = Vec::<u32>::new(); // or blas_primitive_counts, since the scratch buffer is allocated for this blas exclusively
+        let mesh_index_offset = self.mesh_params.len();
         for (material_index, mesh) in model.meshes.iter().enumerate() {
             // Upload indices
             let index_offset;
@@ -640,7 +703,10 @@ impl RenderScene {
                 texcoords_offset,
                 tangents_offset,
                 material_index: material_index_offset + material_index as u32,
+                pad: 0,
             });
+
+            let triangle_count = index_count / 3;
 
             // TODO assert index type
             let vertex_data = vk::DeviceOrHostAddressConstKHR {
@@ -668,14 +734,31 @@ impl RenderScene {
                 .flags(vk::GeometryFlagsKHR::OPAQUE) // todo check material
                 .build();
             let range_info = vk::AccelerationStructureBuildRangeInfoKHR::builder()
-                .primitive_count(index_count / 3)
+                .primitive_count(triangle_count)
                 .primitive_offset(0) // a.k.a index_offset_bytes for indexed triangle geomtry; not using because already offset via address in GeometryDataKHR.index_data
                 .first_vertex(0) // a.k.a vertex_offset for indexed triangle geometry; not using because already offset via address in GeometryDataKHR.vertex_data
                 .transform_offset(0) // no xform
                 .build();
-            blas_geometrys.push(blas_geo);
-            blas_range_info.push(range_info);
-            max_primitive_counts.push(index_count / 3);
+            blas_geometries.push(blas_geo);
+            blas_range_infos.push(range_info);
+            max_primitive_counts.push(triangle_count);
+        }
+
+        // Upload new mesh params
+        unsafe {
+            let param_size = std::mem::size_of::<MeshParams>();
+            let param_count = self.mesh_params.len() - mesh_index_offset;
+            let data_offset = mesh_index_offset as isize * param_size as isize;
+            let data_size = param_size * param_count;
+            let src = std::slice::from_raw_parts(
+                (self.mesh_params.as_ptr() as *const u8).offset(data_offset),
+                data_size,
+            );
+            let dst = std::slice::from_raw_parts_mut(
+                self.mesh_param_buffer.data.offset(data_offset),
+                data_size,
+            );
+            dst.copy_from_slice(src);
         }
 
         // Build BLAS for all added meshes
@@ -683,10 +766,11 @@ impl RenderScene {
             // Get build size
             // NOTE: actual buffer addresses in blas_geometrys are ignored
             let build_size_info = unsafe {
+                assert_eq!(blas_geometries.len(), max_primitive_counts.len());
                 let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
                     .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
                     .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
-                    .geometries(&blas_geometrys)
+                    .geometries(&blas_geometries)
                     .build();
                 rd.acceleration_structure_entry
                     .get_acceleration_structure_build_sizes(
@@ -730,20 +814,22 @@ impl RenderScene {
                 let scratch_data = vk::DeviceOrHostAddressKHR {
                     device_address: scratch_buffer.device_address.unwrap(),
                 };
+                assert_eq!(blas_geometries.len(), blas_range_infos.len());
                 let geo_info = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
                     .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
                     .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
                     .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
                     .dst_acceleration_structure(accel_struct.handle)
-                    .geometries(&blas_geometrys)
+                    .geometries(&blas_geometries)
                     .scratch_data(scratch_data)
                     .build();
+                let blas_range_infos = blas_range_infos.as_slice();
                 unsafe {
                     rd.acceleration_structure_entry
                         .cmd_build_acceleration_structures(
                             cb,
                             slice::from_ref(&geo_info),
-                            &[&blas_range_info],
+                            slice::from_ref(&blas_range_infos),
                         )
                 };
             });
@@ -764,10 +850,7 @@ impl RenderScene {
             )
             .unwrap();
 
-        // Traverse all BLAS
-        let mut geometries = Vec::with_capacity(num_blas);
-        let mut range_infos = Vec::with_capacity(num_blas);
-        let mut max_primitive_counts = Vec::with_capacity(num_blas);
+        // Traverse all BLAS to fill the instance buffer
         for (index, blas) in self.mesh_bottom_level_accel_structs.iter().enumerate() {
             // Fill instance buffer (3x4 row-major affine transform)
             let xform = vk::TransformMatrixKHR {
@@ -798,49 +881,39 @@ impl RenderScene {
                 )
             };
             dst[index] = instance;
+        }
 
-            // Add geometry entry
-            let instance_data_device_address = vk::DeviceOrHostAddressConstKHR {
-                device_address: instance_buffer.device_address.unwrap()
-                    + (size_of::<vk::AccelerationStructureInstanceKHR>() * index) as u64,
-            };
-            let geo_data = vk::AccelerationStructureGeometryDataKHR {
+        let instance_data_device_address = vk::DeviceOrHostAddressConstKHR {
+            device_address: instance_buffer.device_address.unwrap(),
+        };
+
+        // Make geometry info (instance buffer)
+        let instances_geo = vk::AccelerationStructureGeometryKHR::builder()
+            .geometry_type(vk::GeometryTypeKHR::INSTANCES) // NOTE: only allow INSTANCES if TLAS
+            .geometry(vk::AccelerationStructureGeometryDataKHR {
                 instances: vk::AccelerationStructureGeometryInstancesDataKHR::builder()
                     .data(instance_data_device_address)
                     .array_of_pointers(false)
                     .build(),
-            };
-            let blas_geo = vk::AccelerationStructureGeometryKHR::builder()
-                .geometry_type(vk::GeometryTypeKHR::INSTANCES)
-                .geometry(geo_data)
-                .flags(vk::GeometryFlagsKHR::OPAQUE) // todo check material
-                .build();
-            geometries.push(blas_geo);
+            })
+            .flags(vk::GeometryFlagsKHR::OPAQUE) // todo check material
+            .build();
 
-            // Add (trivial) range info
-            let range_info = vk::AccelerationStructureBuildRangeInfoKHR::builder()
-                .primitive_count(1)
-                .primitive_offset(0)
-                .first_vertex(0)
-                .transform_offset(0)
-                .build();
-            range_infos.push(range_info);
-            max_primitive_counts.push(1);
-        }
-
-        // Get build size
+        // Calculate build size
         // NOTE: actual buffer addresses in geometrys are ignored
         let build_size_info = unsafe {
+            let max_primitive_count = 1;
             let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
                 .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
                 .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
-                .geometries(&geometries)
+                .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+                .geometries(slice::from_ref(&instances_geo))
                 .build();
             rd.acceleration_structure_entry
                 .get_acceleration_structure_build_sizes(
                     vk::AccelerationStructureBuildTypeKHR::DEVICE,
                     &build_info,
-                    &max_primitive_counts,
+                    &slice::from_ref(&max_primitive_count),
                 )
         };
 
@@ -873,23 +946,31 @@ impl RenderScene {
             )
             .unwrap();
 
+        // Build
         self.upload_context.immediate_submit(rd, move |cb| {
             let geo_info = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
                 .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
                 .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
                 .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
                 .dst_acceleration_structure(accel_struct.handle)
-                .geometries(&geometries)
+                .geometries(slice::from_ref(&instances_geo)) // NOTE: must be one if TLAS
                 .scratch_data(vk::DeviceOrHostAddressKHR {
                     device_address: scratch_buffer.device_address.unwrap(),
                 })
                 .build();
+            let range_info = vk::AccelerationStructureBuildRangeInfoKHR::builder()
+                .primitive_count(1)
+                .primitive_offset(0)
+                .first_vertex(0)
+                .transform_offset(0)
+                .build();
+            let range_infos = slice::from_ref(&range_info);
             unsafe {
                 rd.acceleration_structure_entry
                     .cmd_build_acceleration_structures(
                         cb,
                         slice::from_ref(&geo_info),
-                        &[&range_infos],
+                        slice::from_ref(&range_infos),
                     )
             };
         });
@@ -993,6 +1074,94 @@ impl RayTracedShadowResources {
     }
 }
 
+pub struct PathTracedLightingResources {
+    pub shader_binding_table: Buffer,
+    pub prev_pipeline_handle: Handle<Pipeline>,
+    pub raygen_region: vk::StridedDeviceAddressRegionKHR,
+    pub miss_region: vk::StridedDeviceAddressRegionKHR,
+    pub hit_region: vk::StridedDeviceAddressRegionKHR,
+}
+
+impl PathTracedLightingResources {
+    pub fn new(rd: &RenderDevice) -> Self {
+        let handle_size = rd
+            .physical_device
+            .ray_tracing_pipeline_properties
+            .shader_group_handle_size as vk::DeviceSize;
+        let group_alignment = rd
+            .physical_device
+            .ray_tracing_pipeline_properties
+            .shader_group_base_alignment as vk::DeviceSize;
+        let group_stride =
+            ((handle_size + group_alignment - 1) / group_alignment) * group_alignment;
+
+        let sbt_size = group_stride * 3;
+        let sbt = rd
+            .create_buffer(
+                sbt_size,
+                vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+            )
+            .unwrap();
+
+        let raygen_region = vk::StridedDeviceAddressRegionKHR {
+            device_address: sbt.device_address.unwrap(),
+            stride: handle_size,
+            size: handle_size,
+        };
+
+        let miss_region = vk::StridedDeviceAddressRegionKHR {
+            device_address: sbt.device_address.unwrap() + group_stride,
+            stride: handle_size,
+            size: handle_size,
+        };
+
+        let hit_region = vk::StridedDeviceAddressRegionKHR {
+            device_address: sbt.device_address.unwrap() + group_stride * 2,
+            stride: handle_size,
+            size: handle_size,
+        };
+
+        Self {
+            shader_binding_table: sbt,
+            prev_pipeline_handle: Handle::null(),
+            raygen_region,
+            miss_region,
+            hit_region,
+        }
+    }
+
+    pub fn update_shader_group_handles(
+        &mut self,
+        rd: &RenderDevice,
+        shaders: &Shaders,
+        pipeline_handle: Handle<Pipeline>,
+    ) {
+        // Likely path
+        if self.prev_pipeline_handle == pipeline_handle {
+            return;
+        }
+
+        let pipeline = match shaders.get_pipeline(pipeline_handle) {
+            Some(p) => p,
+            None => return,
+        };
+
+        let handle_data = rd.get_ray_tracing_shader_group_handles(pipeline.handle, 0, 3);
+
+        let mut filler =
+            ShaderBindingTableFiller::new(&rd.physical_device, self.shader_binding_table.data);
+        filler.write_handles(&handle_data, 0, 1);
+        filler.start_group();
+        filler.write_handles(&handle_data, 1, 1);
+        filler.start_group();
+        filler.write_handles(&handle_data, 2, 1);
+
+        self.prev_pipeline_handle = pipeline_handle;
+    }
+}
+
 pub struct RednerLoop {
     pub command_pool: vk::CommandPool,
     pub command_buffer: vk::CommandBuffer,
@@ -1005,6 +1174,7 @@ pub struct RednerLoop {
     pub render_graph_cache: render_graph::RenderGraphCache,
 
     pub raytraced_shadow: RayTracedShadowResources,
+    pub pathtraced_lighting: PathTracedLightingResources,
 }
 
 impl RednerLoop {
@@ -1021,6 +1191,7 @@ impl RednerLoop {
             command_buffer_finished_fence: rd.create_fence(true),
             render_graph_cache: render_graph::RenderGraphCache::new(rd),
             raytraced_shadow: RayTracedShadowResources::new(rd),
+            pathtraced_lighting: PathTracedLightingResources::new(rd),
         }
     }
 
@@ -1040,7 +1211,7 @@ impl RednerLoop {
         let mut hack = HackStuff {
             bindless_size: 1024,
             set_layout_override: std::collections::HashMap::new(),
-            ray_recursiion_depth: 0,
+            ray_recursiion_depth: 4,
         };
 
         // Acquire target image
@@ -1306,18 +1477,13 @@ impl RednerLoop {
                         vk::IndexType::UINT16,
                     );
                     cb.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, pipeline.handle);
-                    for mesh_params in &scene.mesh_params {
+                    for (mesh_index, mesh_params) in scene.mesh_params.iter().enumerate() {
                         // PushConstant for everything per-draw
                         let model_xform = glam::Mat4::IDENTITY; // Not used for now
+                        let mesh_index = mesh_index as u32;
                         let constants = PushConstantsBuilder::new()
-                            // model_transform
                             .push(&model_xform.to_cols_array())
-                            // vertex attributes
-                            .push(&mesh_params.positions_offset)
-                            .push(&mesh_params.texcoords_offset)
-                            .push(&mesh_params.normals_offset)
-                            .push(&mesh_params.tangents_offset)
-                            // material params
+                            .push(&mesh_index)
                             .push(&mesh_params.material_index);
                         cb.push_constants(
                             pipeline.layout,
@@ -1409,6 +1575,7 @@ impl RednerLoop {
         if let Some(raytraced_shadow) = shaders.create_raytracing_pipeline(
             ShaderDefinition::raygen("raytraced_shadow.hlsl", "raygen"),
             ShaderDefinition::miss("raytraced_shadow.hlsl", "miss"),
+            None,
             &hack,
         ) {
             self.raytraced_shadow
@@ -1457,6 +1624,45 @@ impl RednerLoop {
                     let dispatch_x = (gbuffer_size.width + 7) / 8;
                     let diapatch_y = (gbuffer_size.height + 7) / 8;
                     cb.dispatch(dispatch_x, diapatch_y, 1);
+                });
+        }
+
+        // Pathtraced Lighting
+        if let Some(pipeline) = shaders.create_raytracing_pipeline(
+            ShaderDefinition::raygen("pathtraced_lighting.hlsl", "raygen"),
+            ShaderDefinition::miss("pathtraced_lighting.hlsl", "miss"),
+            Some(ShaderDefinition::closesthit(
+                "pathtraced_lighting.hlsl",
+                "closesthit",
+            )),
+            &hack,
+        ) {
+            self.pathtraced_lighting
+                .update_shader_group_handles(&rd, &shaders, pipeline);
+            let raygen_region = self.pathtraced_lighting.raygen_region;
+            let miss_region = self.pathtraced_lighting.miss_region;
+            let hit_region = self.pathtraced_lighting.hit_region;
+
+            rg.new_pass("PathTracedLighting", RenderPassType::RayTracing)
+                .pipeline(pipeline)
+                .descritpro_set(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set)
+                .accel_struct("scene_tlas", scene_tlas)
+                .texture("gbuffer_depth", gbuffer_depth.1)
+                .texture("gbuffer_color", gbuffer_color.1)
+                .texture("skycube", skycube)
+                .rw_texture("rw_lighting", final_color)
+                .render(move |cb, shaders, _pass| {
+                    let pipeline = shaders.get_pipeline(pipeline).unwrap();
+                    cb.bind_pipeline(vk::PipelineBindPoint::RAY_TRACING_KHR, pipeline.handle);
+                    cb.trace_rays(
+                        &raygen_region,
+                        &miss_region,
+                        &hit_region,
+                        &Default::default(),
+                        gbuffer_size.width,
+                        gbuffer_size.height,
+                        1,
+                    )
                 });
         }
 

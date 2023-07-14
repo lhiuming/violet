@@ -45,7 +45,7 @@ uint4 encode_gbuffer(GBuffer gbuffer) {
     // TODO SRGB encoding?
     float3 color = gbuffer.color;
     uint3 color_8bit = uint3((color * 255.0f));
-    uint3 metallic_8bit = uint(gbuffer.metallic * 255.0f);
+    uint metallic_8bit = uint(gbuffer.metallic * 255.0f);
     enc.r = color_8bit.x
     | color_8bit.g << 8
     | color_8bit.b << 16

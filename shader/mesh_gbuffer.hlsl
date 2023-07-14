@@ -7,11 +7,7 @@
 struct PushConstants
 {
 	float4x4 model_transform;
-	// Geometry
-	uint positions_offset;
-	uint texcoords_offset;
-	uint normals_offset;
-	uint tangnets_offset;
+	uint mesh_index;
 	uint material_index;
 };
 [[vk::push_constant]]
@@ -19,22 +15,24 @@ PushConstants pc;
 
 void vs_main(uint vert_id : SV_VertexID, out float4 hpos : SV_Position, out float2 uv : TEXCOORD0, out float3 normal : TEXCOORD1, out float4 tangent : TEXCOORD2, out float2 screen_pos : TEXCOORD3, out float3 bitangent : TEXCOORD4)
 {
+	MeshParams mesh = mesh_params[pc.mesh_index];
+
 	float3 pos = float3( 
-		asfloat(vertex_buffer[pc.positions_offset + vert_id * 3 + 0]),
-		asfloat(vertex_buffer[pc.positions_offset + vert_id * 3 + 1]),
-		asfloat(vertex_buffer[pc.positions_offset + vert_id * 3 + 2]));
+		asfloat(vertex_buffer[mesh.positions_offset + vert_id * 3 + 0]),
+		asfloat(vertex_buffer[mesh.positions_offset + vert_id * 3 + 1]),
+		asfloat(vertex_buffer[mesh.positions_offset + vert_id * 3 + 2]));
 	uv = float2(
-		asfloat(vertex_buffer[pc.texcoords_offset + vert_id * 2 + 0]),
-		asfloat(vertex_buffer[pc.texcoords_offset + vert_id * 2 + 1]));
+		asfloat(vertex_buffer[mesh.texcoords_offset + vert_id * 2 + 0]),
+		asfloat(vertex_buffer[mesh.texcoords_offset + vert_id * 2 + 1]));
 	normal = float3(
-		asfloat(vertex_buffer[pc.normals_offset + vert_id * 3 + 0]),
-		asfloat(vertex_buffer[pc.normals_offset + vert_id * 3 + 1]),
-		asfloat(vertex_buffer[pc.normals_offset + vert_id * 3 + 2]));
+		asfloat(vertex_buffer[mesh.normals_offset + vert_id * 3 + 0]),
+		asfloat(vertex_buffer[mesh.normals_offset + vert_id * 3 + 1]),
+		asfloat(vertex_buffer[mesh.normals_offset + vert_id * 3 + 2]));
 	tangent = float4(
-		asfloat(vertex_buffer[pc.tangnets_offset + vert_id * 4 + 0]),
-		asfloat(vertex_buffer[pc.tangnets_offset + vert_id * 4 + 1]),
-		asfloat(vertex_buffer[pc.tangnets_offset + vert_id * 4 + 2]),
-		asfloat(vertex_buffer[pc.tangnets_offset + vert_id * 4 + 3]));
+		asfloat(vertex_buffer[mesh.tangents_offset + vert_id * 4 + 0]),
+		asfloat(vertex_buffer[mesh.tangents_offset + vert_id * 4 + 1]),
+		asfloat(vertex_buffer[mesh.tangents_offset + vert_id * 4 + 2]),
+		asfloat(vertex_buffer[mesh.tangents_offset + vert_id * 4 + 3]));
 
 	bitangent = normalize(tangent.w * cross(normal, tangent.xyz));
 

@@ -37,4 +37,17 @@ struct ViewParams
 	float3 sun_dir;
 };
 [[vk::binding(3, SCENE_DESCRIPTOR_SET_INDEX)]] ConstantBuffer<ViewParams> view_params;
-[[vk::binding(4, SCENE_DESCRIPTOR_SET_INDEX)]] SamplerState sampler_linear_clamp;
+struct MeshParams 
+{
+    uint index_offset;
+    uint index_count;
+    uint positions_offset;
+    uint texcoords_offset;
+    uint normals_offset;
+    uint tangents_offset;
+    uint material_index;
+    uint pad;
+};
+[[vk::binding(4, SCENE_DESCRIPTOR_SET_INDEX)]] StructuredBuffer<MeshParams> mesh_params;
+[[vk::binding(5, SCENE_DESCRIPTOR_SET_INDEX)]] Buffer<uint> index_buffer;
+[[vk::binding(6, SCENE_DESCRIPTOR_SET_INDEX)]] SamplerState sampler_linear_clamp;
