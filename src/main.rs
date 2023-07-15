@@ -142,6 +142,7 @@ fn main() {
             let fov = (90.0f32).to_radians(); // horizontal
 
             // Camera navigation
+            let mut moved;
             {
                 // Move (by WASD+EQ)
                 let (forward, right, up) = window.nav_dir();
@@ -150,6 +151,7 @@ fn main() {
                 camera_pos += (forward * mov) * camera_dir;
                 camera_pos += (right * mov) * camera_right;
                 camera_pos += (-up * mov) * camera_down;
+                moved = (forward != 0.0) || (right != 0.0) || (up != 0.0);
 
                 // Rotate (by mouse darg with right button pressed)
                 if let Some((beg_x, beg_y, end_x, end_y)) = window.effective_darg() {
@@ -177,6 +179,8 @@ fn main() {
                         camera_right = camera_dir.cross(up_dir).normalize();
                         camera_down = camera_dir.cross(camera_right).normalize();
                     }
+
+                    moved = true;
                 }
             }
 
@@ -203,6 +207,7 @@ fn main() {
                 view_position: camera_pos,
                 view_transform: view,
                 projection: proj,
+                moved,
             };
         }
 

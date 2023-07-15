@@ -999,6 +999,7 @@ pub struct ViewInfo {
     pub view_position: Vec3,
     pub view_transform: Mat4,
     pub projection: Mat4,
+    pub moved: bool,
 }
 
 pub struct RayTracedShadowResources {
@@ -1075,6 +1076,12 @@ impl RayTracedShadowResources {
 }
 
 pub struct PathTracedLightingResources {
+    pub accumulated_texture: Texture,
+    pub accumulated_texture_view: TextureView,
+    pub accumulated_count: u32,
+
+    pub prev_sun_dir: Vec3,
+
     pub shader_binding_table: Buffer,
     pub prev_pipeline_handle: Handle<Pipeline>,
     pub raygen_region: vk::StridedDeviceAddressRegionKHR,
@@ -1083,7 +1090,7 @@ pub struct PathTracedLightingResources {
 }
 
 impl PathTracedLightingResources {
-    pub fn new(rd: &RenderDevice) -> Self {
+    pub fn new(image_size: vk::Extent2D, rd: &RenderDevice) -> Self {
         let handle_size = rd
             .physical_device
             .ray_tracing_pipeline_properties
@@ -1123,12 +1130,31 @@ impl PathTracedLightingResources {
             size: handle_size,
         };
 
+        let accumulated_texture = rd
+            .create_texture(TextureDesc::new_2d(
+                image_size.width,
+                image_size.height,
+                vk::Format::R32G32B32A32_SFLOAT,
+                vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+            ))
+            .unwrap();
+        let accumulated_texture_view = rd
+            .create_texture_view(
+                accumulated_texture,
+                TextureViewDesc::auto(&accumulated_texture.desc),
+            )
+            .unwrap();
+
         Self {
             shader_binding_table: sbt,
             prev_pipeline_handle: Handle::null(),
             raygen_region,
             miss_region,
             hit_region,
+            prev_sun_dir: Vec3::ZERO,
+            accumulated_texture,
+            accumulated_texture_view,
+            accumulated_count: 0,
         }
     }
 
@@ -1171,6 +1197,8 @@ pub struct RednerLoop {
     pub present_ready_semaphore: vk::Semaphore,
     pub command_buffer_finished_fence: vk::Fence,
 
+    pub frame_index: u32,
+
     pub render_graph_cache: render_graph::RenderGraphCache,
 
     pub raytraced_shadow: RayTracedShadowResources,
@@ -1182,6 +1210,8 @@ impl RednerLoop {
         let command_pool = rd.create_command_pool();
         let command_buffer = rd.create_command_buffer(command_pool);
 
+        let image_size = rd.swapchain.extent;
+
         RednerLoop {
             command_pool,
             command_buffer,
@@ -1190,8 +1220,9 @@ impl RednerLoop {
             present_ready_semaphore: rd.create_semaphore(),
             command_buffer_finished_fence: rd.create_fence(true),
             render_graph_cache: render_graph::RenderGraphCache::new(rd),
+            frame_index: 0,
             raytraced_shadow: RayTracedShadowResources::new(rd),
-            pathtraced_lighting: PathTracedLightingResources::new(rd),
+            pathtraced_lighting: PathTracedLightingResources::new(image_size, rd),
         }
     }
 
@@ -1627,6 +1658,19 @@ impl RednerLoop {
                 });
         }
 
+        // Reset path tracing if camera or sun moved
+        if view_info.moved {
+            self.pathtraced_lighting.accumulated_count = 0;
+        }
+        if !self
+            .pathtraced_lighting
+            .prev_sun_dir
+            .abs_diff_eq(scene.sun_dir, 0.000001)
+        {
+            self.pathtraced_lighting.accumulated_count = 0;
+            self.pathtraced_lighting.prev_sun_dir = scene.sun_dir;
+        }
+
         // Pathtraced Lighting
         if let Some(pipeline) = shaders.create_raytracing_pipeline(
             ShaderDefinition::raygen("pathtraced_lighting.hlsl", "raygen"),
@@ -1643,6 +1687,14 @@ impl RednerLoop {
             let miss_region = self.pathtraced_lighting.miss_region;
             let hit_region = self.pathtraced_lighting.hit_region;
 
+            self.pathtraced_lighting.accumulated_count += 1;
+
+            let frame_index = self.frame_index;
+            let accumulated_count = self.pathtraced_lighting.accumulated_count;
+            let rw_accumulated =
+                rg.register_texture_view(self.pathtraced_lighting.accumulated_texture_view);
+
+            // Trace
             rg.new_pass("PathTracedLighting", RenderPassType::RayTracing)
                 .pipeline(pipeline)
                 .descritpro_set(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set)
@@ -1650,10 +1702,22 @@ impl RednerLoop {
                 .texture("gbuffer_depth", gbuffer_depth.1)
                 .texture("gbuffer_color", gbuffer_color.1)
                 .texture("skycube", skycube)
+                .rw_texture("rw_accumulated", rw_accumulated)
                 .rw_texture("rw_lighting", final_color)
                 .render(move |cb, shaders, _pass| {
                     let pipeline = shaders.get_pipeline(pipeline).unwrap();
                     cb.bind_pipeline(vk::PipelineBindPoint::RAY_TRACING_KHR, pipeline.handle);
+
+                    let pc = PushConstantsBuilder::new()
+                        .pushv(frame_index)
+                        .pushv(accumulated_count);
+                    cb.push_constants(
+                        pipeline.layout,
+                        pipeline.push_constant_ranges[0].stage_flags,
+                        0,
+                        &pc.build(),
+                    );
+
                     cb.trace_rays(
                         &raygen_region,
                         &miss_region,
@@ -1662,7 +1726,7 @@ impl RednerLoop {
                         gbuffer_size.width,
                         gbuffer_size.height,
                         1,
-                    )
+                    );
                 });
         }
 
@@ -1737,5 +1801,7 @@ impl RednerLoop {
                     .unwrap_or_else(|e| panic!("Failed to present: {:?}", e));
             }
         }
+
+        self.frame_index += 1;
     }
 }

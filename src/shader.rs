@@ -506,6 +506,8 @@ impl ShaderLoader {
         let args = [
             // output spirv
             "-spirv",
+            // Warning as Error
+            "-WX",
             // no optimization
             "-Od",
             // Debug Info
@@ -526,8 +528,8 @@ impl ShaderLoader {
         );
 
         match result {
-            Err(result) => {
-                let error_blob = result.0.get_error_buffer().ok()?;
+            Err((result, _result_hr)) => {
+                let error_blob = result.get_error_buffer().ok()?;
                 let error_string = self.library.get_blob_as_string(&error_blob);
                 println!("Error: Failed to compile shader: {}", error_string);
                 None
