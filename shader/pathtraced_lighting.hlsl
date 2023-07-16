@@ -113,10 +113,55 @@ struct Payload {
     float3 normal_ws;
     float3 geometry_normal_ws;
     float3 position_ws;
+    uint mesh_index;
+    uint triangle_index;
 };
+
+void trace_camera() {
+    uint2 buffer_size;
+    gbuffer_depth.GetDimensions(buffer_size.x, buffer_size.y);
+
+    uint2 pix = DispatchRaysIndex().xy;
+    float2 uv = (pix + 0.5f) / float2(buffer_size);
+    float2 ndc = uv * 2.0f - 1.0f;
+
+    float4 view_dir_end_h = mul(view_params.inv_view_proj, float4(ndc, 1.0f, 1.0f));
+    float3 view_dir_end = view_dir_end_h.xyz / view_dir_end_h.w;
+    float3 view_dir = normalize(view_dir_end - view_params.view_pos);
+
+    RayDesc ray;
+    ray.Origin = view_params.view_pos;
+    ray.Direction = view_dir;
+    ray.TMin = 0.0005f; // 0.5mm
+    ray.TMax = 100.0f;
+
+    Payload hit = (Payload)0;
+    TraceRay(scene_tlas,
+        RAY_FLAG_FORCE_OPAQUE, // skip anyhit
+        0xff, // uint InstanceInclusionMask,
+        0, // uint RayContributionToHitGroupIndex,
+        0, // uint MultiplierForGeometryContributionToHitGroupIndex,
+        0, // uint MissShaderIndex,
+        ray,
+        hit
+    );
+
+    float3 color = 0.0f;
+    if (!hit.missed)
+    {
+        color = hit.position_ws * .5f + .5f;
+    }
+
+    rw_lighting[pix] = float4(color, 1.0f);
+}
 
 [shader("raygeneration")]
 void raygen() {
+#if 0
+    trace_camera();
+    return;
+#endif
+
     uint2 dispatch_id = DispatchRaysIndex().xy;
     float depth = gbuffer_depth[dispatch_id.xy];
 
@@ -136,12 +181,19 @@ void raygen() {
 	float4 position_ws_h = mul(view_params.inv_view_proj, float4(screen_pos * 2.0f - 1.0f, depth + depth_error, 1.0f));
 	float3 position_ws = position_ws_h.xyz / position_ws_h.w;
 
+#if 0
+    rw_lighting[dispatch_id.xy] = float4(position_ws * .5f + .5f, 1.0f);
+    return;
+#endif
+
     float3 radiance = 0.0f;
 
     // TODO
-    float3 light_color = float3(0.7f, 0.7f, 0.6f) * PI;
+    float exposure = 5;
+    float3 light_color = float3(0.7f, 0.7f, 0.6f) * PI * exposure;
 
     // Add Direct Lighting
+#if 1
     {
         RayDesc shadow_ray;
         shadow_ray.Origin = position_ws;
@@ -169,7 +221,7 @@ void raygen() {
             radiance += nol * brdf * light_color;
         }
      }
-
+#endif
 
     uint rng_state = init_rng(dispatch_id.xy, buffer_size, pc.frame_index);
 
@@ -182,7 +234,9 @@ void raygen() {
     float3 throughput = 1.0f;
 
     // Ray tracing loop
-    const int MAX_BOUNCE = 8;
+    const int MAX_BOUNCE = 16;
+    const int MAX_BOUNCE_WITH_LIGHTING = 16;
+    float3 debug_color = 0.0f;
     for (int bounce = 0; bounce < MAX_BOUNCE; ++bounce) 
     {
         // Generate sample direction 
@@ -230,7 +284,7 @@ void raygen() {
 
         // Add Direct Lighting
         float nol_sun = dot(hit.normal_ws, view_params.sun_dir) > 0.0;
-        if (nol_sun > 0.0f)
+        if ((nol_sun > 0.0f) && (bounce < MAX_BOUNCE_WITH_LIGHTING))
         {
             RayDesc shadow_ray;
             shadow_ray.Origin = hit.position_ws;
@@ -253,7 +307,7 @@ void raygen() {
                 shadow
             );
 
-            if (shadow.missed && (bounce == 0))
+            if (shadow.missed)
             {
                 radiance += nol_sun * brdf * light_color;
             }
@@ -278,7 +332,7 @@ void raygen() {
     rw_lighting[dispatch_id.xy] = float4(avg_radiance, 1.0f);
 
 #if 0
-    rw_lighting[dispatch_id.xy] = float4(debug, 1.0f);
+    rw_lighting[dispatch_id.xy] = float4(debug_color, 1.0f);
 #endif
 }
 
@@ -313,10 +367,11 @@ float4 load_float4(uint attr_offset, uint vert_id) {
 	return asfloat(words);
 }
 
+// NOTE: bary.x is weight for vertex_1, bary.y is weight for vertex_2
 #define INTERPOLATE_MESH_ATTR(type, attr_offset, indicies, bary) \
-(load_##type(attr_offset, indicies.x) * bary.x \
-+load_##type(attr_offset, indicies.y) * bary.y \
-+load_##type(attr_offset, indicies.z) * (1.0f - bary.x - bary.y))
+(load_##type(attr_offset, indicies.x) * (1.0f - bary.x - bary.y) \
++load_##type(attr_offset, indicies.y) * bary.x \
++load_##type(attr_offset, indicies.z) * bary.y)
 
 struct Attribute
 {
@@ -329,10 +384,10 @@ void closesthit(inout Payload payload, in Attribute attr) {
     uint triangle_index = PrimitiveIndex();
 
     MeshParams mesh = mesh_params[mesh_index];
-    uint index0 = index_buffer[triangle_index * 3];
-    uint index1 = index_buffer[triangle_index * 3 + 1];
-    uint index2 = index_buffer[triangle_index * 3 + 2];
-    uint3 indicies = uint3(index0, index1, index2);
+    uint3 indicies = uint3(
+        index_buffer[mesh.index_offset + triangle_index * 3 + 0],
+        index_buffer[mesh.index_offset + triangle_index * 3 + 1],
+        index_buffer[mesh.index_offset + triangle_index * 3 + 2]);
 
     float2 uv = INTERPOLATE_MESH_ATTR(float2, mesh.texcoords_offset, indicies, attr.bary);
     float3 pos = INTERPOLATE_MESH_ATTR(float3, mesh.positions_offset, indicies, attr.bary);
@@ -349,8 +404,8 @@ void closesthit(inout Payload payload, in Attribute attr) {
 	float3 normal_ws = normalize( normal_ts.x * tangent.xyz + normal_ts.y * bitangent + normal_ts.z * normal );
 
     // Position
-    //float3 position_ws = mul(ObjectToWorld3x4(), float4(pos, 1.0f));
-    float3 position_ws = pos;
+    float3 position_ws = mul(WorldToObject3x4(), float4(pos, 1.0f));
+    //position_ws = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
 
     // Geometry normal
     float3 pos0 = load_float3(mesh.positions_offset, indicies.x);
@@ -363,6 +418,8 @@ void closesthit(inout Payload payload, in Attribute attr) {
     payload.normal_ws = normal_ws;
     payload.geometry_normal_ws = normal_geo;
     payload.position_ws = position_ws;
+    payload.mesh_index = mesh_index;
+    payload.triangle_index = triangle_index;
 }
 
 [shader("miss")]

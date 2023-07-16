@@ -1708,15 +1708,17 @@ impl RednerLoop {
                     let pipeline = shaders.get_pipeline(pipeline).unwrap();
                     cb.bind_pipeline(vk::PipelineBindPoint::RAY_TRACING_KHR, pipeline.handle);
 
-                    let pc = PushConstantsBuilder::new()
-                        .pushv(frame_index)
-                        .pushv(accumulated_count);
-                    cb.push_constants(
-                        pipeline.layout,
-                        pipeline.push_constant_ranges[0].stage_flags,
-                        0,
-                        &pc.build(),
-                    );
+                    if !pipeline.push_constant_ranges.is_empty() {
+                        let pc = PushConstantsBuilder::new()
+                            .pushv(frame_index)
+                            .pushv(accumulated_count);
+                        cb.push_constants(
+                            pipeline.layout,
+                            pipeline.push_constant_ranges[0].stage_flags,
+                            0,
+                            &pc.build(),
+                        );
+                    }
 
                     cb.trace_rays(
                         &raygen_region,
