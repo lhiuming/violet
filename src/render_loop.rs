@@ -1274,8 +1274,8 @@ impl RednerLoop {
 
             let wait_fence = |fence, msg| {
                 let fences = [fence];
-                let mut timeout_in_ns = 5 * 1000000; // 5ms
-                let timeout_max = 500 * 1000000; // 500ms
+                let mut timeout_in_ns = 100 * 1000000; // 100ms
+                let timeout_max = 5000 * 1000000; // 5s
                 loop {
                     match rd
                         .device_entry
@@ -1699,8 +1699,6 @@ impl RednerLoop {
                 .pipeline(pipeline)
                 .descritpro_set(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set)
                 .accel_struct("scene_tlas", scene_tlas)
-                .texture("gbuffer_depth", gbuffer_depth.1)
-                .texture("gbuffer_color", gbuffer_color.1)
                 .texture("skycube", skycube)
                 .rw_texture("rw_accumulated", rw_accumulated)
                 .rw_texture("rw_lighting", final_color)
