@@ -1,5 +1,6 @@
 // Scene Bindings (Set #1)
 #include "scene_bindings.hlsl"
+#include "frame_bindings.hlsl"
 #include "gbuffer.hlsl"
 
 // Per Material bindings?
@@ -38,7 +39,7 @@ void vs_main(uint vert_id : SV_VertexID, out float4 hpos : SV_Position, out floa
 
 	float4x4 model_transform = pc.model_transform;
 	float3 wpos = mul(model_transform, float4(pos, 1.0f)).xyz;
-	float4x4 view_proj = view_params.view_proj;
+	float4x4 view_proj = view_params().view_proj;
 	hpos =  mul(view_proj, float4(wpos, 1.0f));
 	screen_pos = hpos.xy / hpos.w * 0.5f + 0.5f;
 }

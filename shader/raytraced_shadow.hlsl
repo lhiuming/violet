@@ -1,4 +1,5 @@
 #include "scene_bindings.hlsl"
+#include "frame_bindings.hlsl"
 
 RaytracingAccelerationStructure scene_tlas;
 Texture2D<float> gbuffer_depth;
@@ -28,14 +29,14 @@ void raygen() {
 	// world position reconstruction from depth buffer
     float depth_error = 1.f / 16777216.f; // 24 bit unorm depth 
     float2 screen_pos = (dispatch_ray_index.xy + 0.5f) / float2(buffer_size);
-	float4 position_ws_h = mul(view_params.inv_view_proj, float4(screen_pos * 2.0f - 1.0f, depth + depth_error, 1.0f));
+	float4 position_ws_h = mul(view_params().inv_view_proj, float4(screen_pos * 2.0f - 1.0f, depth + depth_error, 1.0f));
 	float3 position_ws = position_ws_h.xyz / position_ws_h.w;
 
     Payload payload;
     payload.missed = false;
     RayDesc ray;
     ray.Origin = position_ws;
-    ray.Direction = view_params.sun_dir;
+    ray.Direction = frame_params.sun_dir.xyz;
     ray.TMin = 0.0005f; // 0.5mm
     ray.TMax = 1000.0f;
     TraceRay(scene_tlas,

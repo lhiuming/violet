@@ -1,5 +1,6 @@
 #include "gbuffer.hlsl"
 #include "scene_bindings.hlsl"
+#include "frame_bindings.hlsl"
 #include "brdf.hlsl"
 
 
@@ -56,15 +57,15 @@ void main(uint2 dispatch_thread_id: SV_DISPATCHTHREADID) {
 
 	// world position reconstruction
     float2 screen_pos = (dispatch_thread_id + 0.5f) / float2(buffer_size);
-	float4 position_ws_h = mul(view_params.inv_view_proj, float4(screen_pos * 2.0f - 1.0f, depth, 1.0f));
+	float4 position_ws_h = mul(view_params().inv_view_proj, float4(screen_pos * 2.0f - 1.0f, depth, 1.0f));
 	float3 position_ws = position_ws_h.xyz / position_ws_h.w;
 
     // Direct lighting
-	float3 view = normalize(view_params.view_pos - position_ws);
+	float3 view = normalize(view_params().view_pos - position_ws);
 	float3 diffuseColor = gbuffer.color.rgb * (1.0f - gbuffer.metallic);
 	float3 specularColor = lerp(float3(0.04f, 0.04f, 0.04f), gbuffer.color, gbuffer.metallic);
 	float3 light_inten = float3(1.2f, 1.1f, 1.0f) * PI;
-	float3 lighting = cal_lighting(view, view_params.sun_dir, gbuffer.normal, gbuffer.perceptual_roughness, diffuseColor, specularColor) * light_inten * shadow_atten;
+	float3 lighting = cal_lighting(view, frame_params.sun_dir.xyz, gbuffer.normal, gbuffer.perceptual_roughness, diffuseColor, specularColor) * light_inten * shadow_atten;
 
 #if 0
 	// IBL fake

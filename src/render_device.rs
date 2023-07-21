@@ -437,7 +437,7 @@ unsafe extern "system" fn vulkan_debug_report_callback(
     vk::FALSE
 }
 
-// Resrouces
+// Surface and Swapchain stuffs
 
 pub struct Surface {
     pub handle: vk::SurfaceKHR,
@@ -587,6 +587,43 @@ impl SwapchainEntry {
     }
     */
 }
+
+impl RenderDevice {
+    #[inline]
+    pub fn acquire_next_swapchain_image(
+        &self,
+        semaphore_to_signal: vk::Semaphore,
+        fence_to_signal: vk::Fence,
+    ) -> u32 {
+        // Validate "semaphore and fence must not both be equal to VK_NULL_HANDLE"
+        assert!(
+            (semaphore_to_signal == vk::Semaphore::null())
+                && (fence_to_signal == vk::Fence::null())
+        );
+
+        let (index, is_suboptimal) = unsafe {
+            self.swapchain_entry
+                .entry
+                .acquire_next_image(
+                    self.swapchain.handle,
+                    std::u64::MAX,
+                    semaphore_to_signal,
+                    fence_to_signal,
+                )
+                .expect("RenderDevice: failed to acquire next swapchain image")
+        };
+
+        if is_suboptimal {
+            panic!("RenderDevice: acquired surface image has unexpected properties");
+        }
+
+        index
+    }
+}
+
+/*
+ * Common Resource Types
+ */
 
 #[derive(Clone, Copy)]
 pub struct Buffer {
@@ -1034,6 +1071,10 @@ impl RenderDevice {
         }
     }
 }
+
+/*
+ * Helper and Utiliites
+ */
 
 // Helper to fill Shader Binding Table
 pub struct ShaderBindingTableFiller {

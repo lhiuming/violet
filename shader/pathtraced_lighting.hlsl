@@ -1,5 +1,6 @@
 #include "gbuffer.hlsl"
 #include "scene_bindings.hlsl"
+#include "frame_bindings.hlsl"
 #include "brdf.hlsl"
 
 /* 
@@ -11,7 +12,9 @@ Reference:
 #define MAX_BOUNCE 8
 #define MAX_BOUNCE_WITH_LIGHTING MAX_BOUNCE
 
+#define DIRECTI_LIGHTING 1
 #define PRIMARY_RAY_JITTER 1
+
 #define WHITE_FURNACE 0
 #define SPECULAR_ONLY 0
 #define DIFFUSE_ONLY 0
@@ -145,9 +148,9 @@ void raygen() {
     pix_coord += lerp(-0.5f.xx, 0.5f.xx, float2(rand(rng_state), rand(rng_state)));
     #endif
     float2 ndc = pix_coord / float2(buffer_size) * 2.0f - 1.0f;
-    float4 view_dir_end_h = mul(view_params.inv_view_proj, float4(ndc, 1.0f, 1.0f));
+    float4 view_dir_end_h = mul(view_params().inv_view_proj, float4(ndc, 1.0f, 1.0f));
     float3 view_dir_end = view_dir_end_h.xyz / view_dir_end_h.w;
-    float3 view_dir = normalize(view_dir_end - view_params.view_pos);
+    float3 view_dir = normalize(view_dir_end - view_params().view_pos);
 
     // TODO Frame Parameters
     float exposure = 5;
@@ -155,7 +158,7 @@ void raygen() {
 
     // Setup primary Ray
     RayDesc ray;
-    ray.Origin = view_params.view_pos;
+    ray.Origin = view_params().view_pos;
     ray.Direction = view_dir;
     ray.TMin = 0.0005f; // 0.5mm
     ray.TMax = 100.0f;
@@ -164,12 +167,9 @@ void raygen() {
     float3 radiance = 0.0f;
 
     // Ray tracing loop
-
     float4 debug_color = 0.0f;
     for (int bounce = 0; bounce < MAX_BOUNCE; ++bounce) 
     {
-        debug_color.r = float(bounce) / MAX_BOUNCE;
-
         // Trace
         Payload hit = (Payload)0;
         TraceRay(scene_tlas,
@@ -200,17 +200,19 @@ void raygen() {
 
         // Material attribute decode
 	    const float3 specular_color = lerp(float3(0.04f, 0.04f, 0.04f), hit.base_color, hit.metallic);
-	    const float3 diffuse_color = hit.base_color* (1.0f - hit.metallic);
+	    const float3 diffuse_color = hit.base_color * (1.0f - hit.metallic);
         const float roughness = hit.perceptual_roughness * hit.perceptual_roughness;
 
         // Add Direct Lighting
-        #if !WHITE_FURNACE
-        float nol_sun = dot(hit.normal_ws, view_params.sun_dir);
+        #if !WHITE_FURNACE && DIRECTI_LIGHTING
+        float nol_sun = dot(hit.normal_ws, frame_params.sun_dir.xyz);
         if ((nol_sun > 0.0f) && (bounce < MAX_BOUNCE_WITH_LIGHTING))
         {
+            float leviation = 1.f/32.f;
+
             RayDesc shadow_ray;
-            shadow_ray.Origin = hit.position_ws;
-            shadow_ray.Direction = view_params.sun_dir;
+            shadow_ray.Origin = hit.position_ws + hit.normal_geo_ws * leviation;
+            shadow_ray.Direction = frame_params.sun_dir.xyz;
             shadow_ray.TMin = 0.0005f; // 0.5mm
             shadow_ray.TMax = 100.0f;
 
@@ -240,7 +242,7 @@ void raygen() {
 
                 #if !DIFFUSE_ONLY
                 // Specualr
-                float LoH = max(0.0001f, dot(view_dir, normalize(view_dir + view_params.sun_dir)));
+                float LoH = max(0.0001f, dot(view_dir, normalize(view_dir + frame_params.sun_dir.xyz)));
                 float NoL = max(0.0001f, nol_sun);
                 float NoV = max(0.0001f, dot(hit.normal_ws, -ray.Direction));
                 float3 F = F_Schlick(LoH, specular_color);
@@ -249,27 +251,28 @@ void raygen() {
                 brdf += F * (V * D);
                 #endif
 
-                radiance += (throughput * nol_sun) * brdf * light_color;
+                radiance += (throughput * nol_sun) * brdf * frame_params.sun_inten.rgb;
             }
         }
         #endif
 
-
 #if 0
         // Material debug
-        debug_color.rgb = diffuse_color;
-        debug_color.rgb = roughness.rrr;
+        debug_color.rgb = specular_color;
+        debug_color.rgb = float3(hit.perceptual_roughness, hit.metallic, 0.0f);
         debug_color.a = 1.0f;
         break;
 #endif
+
+        // View direction in BRDF context
+        const float3 V = -ray.Direction;
 
         // Pick BRDF lobe (importance sampling alomgs lobes with heuristics)
         // NOTE: we just add diffse and specular components, thus we multiply 1/pdf to throughput 
         // ref: RTGII, ch14
         float prop_specular;
         {
-            float3 income_dir = -ray.Direction;
-            float NoV = max(0.0f, dot(hit.normal_ws, income_dir));
+            float NoV = max(0.0f, dot(hit.normal_ws, V));
             float f90_luminance = luminance(specular_color); // TODO mul by throughput?
             float e_spec = F_Schlick(NoV, f90_luminance.xxx).x;
             float e_diff = luminance(diffuse_color);
@@ -293,23 +296,24 @@ void raygen() {
 
         // Generate bounce sample direction, and calculate sample weight
         float3 brdf_NoL_over_pdf; // := BRDF() * NoL / pdf, also call `sample weight`
-        float3 new_dir_local;
+        float3 L_local; // bounced direction for next ray, in local space
         float2 u = float2(rand(rng_state), rand(rng_state));
         float4 rot_to_local = get_rotation_to_z_from(hit.normal_ws);
         if (brdf_is_specular) 
         {
-            float3 V_local = rotate_point(rot_to_local, ray.Direction);
+            float3 V_local = rotate_point(rot_to_local, V);
 
             // Sample a half vector (microfacet normal) from the GGX distribution of visible normals (VNDF).
-            // pdf(H) = D_visible(H) * Jacobian_refl(V, H) 
-            //        = ( G1(V) * VoH * D(H) / NoV ) * ( 1 / (4 * VoH) )
-            //        = G1(V) * D(H) / (4 * NoV)
+            // pdf_H = D_visible(H) = ( G1(V) * VoH * D(H) / NoV ) 
+            // Note: this method allow V_local.z < 0 (viewing below the surface), but such
+            // case is eliminated during hit shader (by flipping the normal).
+            // ref: https://github.com/boksajak/referencePT/blob/master/shaders/brdf.h#L727
             // [Heitz 2014 "Importance Sampling Microfacet-Based BSDFs using the Distribution of Visible Normals", section 2]
+            // TODO compare methods [Heitz 2018 "Sampling the GGX Distribution of Visible Normals"]
             float3 H_local;
-            if (roughness != 0)
+            if (roughness != 0.0f)
             {
-                // ref: https://github.com/boksajak/referencePT/blob/master/shaders/brdf.h#L727
-                // TODO check and compare other methods [Heitz 2018 "Sampling the GGX Distribution of Visible Normals"]
+                // We are not using anisotropic GGX
                 float2 alpha2d = roughness.xx;
 
                 float3 v_h = normalize(float3(alpha2d.x * V_local.x, alpha2d.y * V_local.y, V_local.z));
@@ -335,8 +339,11 @@ void raygen() {
                 H_local = float3(0.0f, 0.0f, 1.0f);
             }
 
-            float3 L_local = reflect(V_local, H_local);
-            new_dir_local = L_local;
+            // After relfect operator
+            // pdf_L = pdf_H * Jacobian_refl(V, H) 
+            //        = ( G1(V) * VoH * D(H) / NoV ) * ( 1 / (4 * VoH) )
+            //        = G1(V) * D(H) / (4 * NoV)
+            L_local = reflect(-V_local, H_local);
 
             float LoH = max(0.000001f, dot(L_local, H_local));
             float3 N_local = float3(0.0f, 0.0f, 1.0f);
@@ -358,7 +365,7 @@ void raygen() {
         else
         {
             float pdf;
-            new_dir_local = sample_hemisphere_cosine(u, pdf);
+            L_local = sample_hemisphere_cosine(u, pdf);
 
             // Original formular:
             // pdf               = NoL / PI 
@@ -368,7 +375,7 @@ void raygen() {
             //                   = diffuse_color
             brdf_NoL_over_pdf = diffuse_color;
         }
-        ray.Direction = rotate_point(invert_rotation(rot_to_local), new_dir_local);
+        ray.Direction = rotate_point(invert_rotation(rot_to_local), L_local);
         ray.Direction = normalize(ray.Direction);
 
         // Terminate poth with zero contribution
@@ -377,7 +384,7 @@ void raygen() {
             break;
         }
 
-        // Terminate invalid path
+        // Terminate invalid path (tracing down-ward due to normal mapping)
         if (dot(ray.Direction, hit.normal_geo_ws) <= 0.0f)
         {
             break;
@@ -402,7 +409,7 @@ void raygen() {
     float3 avg_radiance = accu_radiance / pc.accumulated_count;
     rw_lighting[dispatch_id.xy] = float4(avg_radiance, 1.0f);
 
-#if 1
+#if 0
     if (debug_color.a > 0.0f)
     rw_lighting[dispatch_id.xy] = debug_color;
 #endif

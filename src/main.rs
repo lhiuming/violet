@@ -15,14 +15,16 @@ use shader::Shaders;
 
 mod model;
 
+mod render_scene;
+use render_scene::RenderScene;
+
 mod render_loop;
-use render_loop::{RednerLoop, RenderScene};
+use render_loop::pbr_loop::PhysicallyBasedRenderLoop;
+use render_loop::ViewInfo;
 
 mod command_buffer;
 mod render_graph;
 mod renderdoc;
-
-use crate::render_loop::ViewInfo;
 
 // Assumming positive Z; mapping near-plane to 1, far-plane to 0 (reversed Z).
 // Never flip y (or x).
@@ -92,7 +94,7 @@ fn main() {
         );
     }
 
-    let mut render_loop = RednerLoop::new(&rd);
+    let mut render_loop = PhysicallyBasedRenderLoop::new(&rd);
 
     // Init camera
     // NOTE:

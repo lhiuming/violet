@@ -26,17 +26,6 @@ struct MaterialParams {
 };
 [[vk::binding(1, SCENE_DESCRIPTOR_SET_INDEX)]] StructuredBuffer<MaterialParams> material_params;
 [[vk::binding(2, SCENE_DESCRIPTOR_SET_INDEX)]] Texture2D bindless_textures[];
-struct ViewParams 
-{
-	float4x4 view_proj;
-	float4x4 inv_view_proj;
-	float3 view_pos;
-	float3 view_ray_top_left;
-	float3 view_ray_right_shift;
-	float3 view_ray_down_shift;
-	float3 sun_dir;
-};
-[[vk::binding(3, SCENE_DESCRIPTOR_SET_INDEX)]] ConstantBuffer<ViewParams> view_params;
 struct MeshParams 
 {
     uint index_offset;

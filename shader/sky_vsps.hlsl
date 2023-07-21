@@ -1,5 +1,6 @@
 #include "atmosphere_felix_westin.hlsl"
 #include "scene_bindings.hlsl"
+#include "frame_bindings.hlsl"
 
 TextureCube<float3> skycube;
 
@@ -10,12 +11,12 @@ void vs_main(
 ) {
 	float2 pos = float2(vert_id & 1, vert_id >> 1);
 	hpos = float4(pos * 4.0 - 1.0, 1.0, 1.0);
-	float4 position_ws_h = mul(view_params.inv_view_proj, hpos);
+	float4 position_ws_h = mul(view_params().inv_view_proj, hpos);
 	position_ws = position_ws_h.xyz / position_ws_h.w;
 }
 
 float4 ps_main(float3 position_ws : TEXCOORD0) : SV_Target0 {
-	float3 ray_start = view_params.view_pos;
+	float3 ray_start = view_params().view_pos;
 	float3 ray_dir = normalize(position_ws - ray_start);
 #if 0
 	float ray_len = 100000.0f;

@@ -120,7 +120,7 @@ impl Shaders {
         &mut self,
         vs_def: ShaderDefinition,
         ps_def: ShaderDefinition,
-        hack: &HackStuff,
+        hack: &ShadersConfig,
     ) -> Option<Handle<Pipeline>> {
         // look from cache
         // If not in cache, create and push into cache
@@ -145,7 +145,7 @@ impl Shaders {
     pub fn create_compute_pipeline(
         &mut self,
         cs_def: ShaderDefinition,
-        hack: &HackStuff,
+        hack: &ShadersConfig,
     ) -> Option<Handle<Pipeline>> {
         let key = cs_def;
 
@@ -169,7 +169,7 @@ impl Shaders {
         ray_gen_def: ShaderDefinition,
         miss_def: ShaderDefinition,
         hit_def: Option<ShaderDefinition>,
-        hack: &HackStuff,
+        hack: &ShadersConfig,
     ) -> Option<Handle<Pipeline>> {
         let key = (ray_gen_def, miss_def, hit_def);
 
@@ -378,10 +378,20 @@ impl ShaderDefinition {
     }
 }
 
-pub struct HackStuff {
+pub struct ShadersConfig {
     pub bindless_size: u32, // Used to create descriptor layout
     pub set_layout_override: HashMap<u32, vk::DescriptorSetLayout>,
     pub ray_recursiion_depth: u32,
+}
+
+impl Default for ShadersConfig {
+    fn default() -> Self {
+        Self {
+            bindless_size: 1024,
+            set_layout_override: Default::default(),
+            ray_recursiion_depth: 1,
+        }
+    }
 }
 
 pub struct CompiledShader {
@@ -555,7 +565,7 @@ fn create_merged_descriptor_set_layouts(
     stages_info: &[(vk::ShaderStageFlags, &rspirv_reflect::Reflection)],
     used_set: &mut HashMap<u32, ()>,
     property_map: &mut HashMap<String, PipelineDescriptorInfo>,
-    hack: &HackStuff,
+    hack: &ShadersConfig,
 ) -> Vec<vk::DescriptorSetLayout> {
     // NOTE: set layout is not allowed to be null (except for pipeline library?)
     let fill_empty_set = true;
@@ -726,7 +736,7 @@ pub fn create_compute_pipeline(
     device: &PipelineDevice,
     shader_def: &ShaderDefinition,
     compiled: &CompiledShader,
-    hack: &HackStuff,
+    hack: &ShadersConfig,
 ) -> Option<Pipeline> {
     let pipeline_cache = device.pipeline_cache;
     let device = &device.device;
@@ -791,7 +801,7 @@ pub fn create_raytracing_pipeline(
     raygen: &CompiledShader,
     miss: &CompiledShader,
     closest_hit: &Option<CompiledShader>,
-    hack: &HackStuff,
+    hack: &ShadersConfig,
 ) -> Option<Pipeline> {
     let mut stages_info = vec![
         (
@@ -915,7 +925,7 @@ pub fn create_graphics_pipeline(
     device: &PipelineDevice,
     vs: &CompiledShader,
     ps: &CompiledShader,
-    hack: &HackStuff,
+    hack: &ShadersConfig,
 ) -> Option<Pipeline> {
     let pipeline_cache = device.pipeline_cache;
     let device = &device.device;
