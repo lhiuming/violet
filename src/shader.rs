@@ -34,7 +34,6 @@ impl<T> Handle<T> {
         self.id
     }
 
-    #[allow(dead_code)]
     pub fn is_null(&self) -> bool {
         self.id == u16::MAX
     }
@@ -315,7 +314,6 @@ pub struct ShaderDefinition {
 }
 
 impl ShaderDefinition {
-    #[allow(dead_code)]
     pub fn new(
         virtual_path: &'static str,
         entry_point: &'static str,
@@ -1040,7 +1038,6 @@ pub fn create_graphics_pipeline(
 
 type NamedVec<'a, T> = Vec<(&'a str, T)>;
 
-#[allow(dead_code)]
 pub struct DescriptorSetWriteBuilder<'a> {
     buffer_views: NamedVec<'a, vk::BufferView>,
     buffer_infos: NamedVec<'a, vk::DescriptorBufferInfo>,
@@ -1066,7 +1063,6 @@ impl Default for DescriptorSetWriteBuilder<'_> {
     }
 }
 
-#[allow(dead_code)]
 impl<'a> DescriptorSetWriteBuilder<'a> {
     pub fn new() -> Self {
         Default::default()

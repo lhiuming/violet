@@ -589,6 +589,8 @@ impl SwapchainEntry {
 }
 
 impl RenderDevice {
+    // Wait undefinitely for next swapchain image.
+    // Use a semaphore or fence to wait until the image is ok to be modified.
     #[inline]
     pub fn acquire_next_swapchain_image(
         &self,
@@ -597,10 +599,11 @@ impl RenderDevice {
     ) -> u32 {
         // Validate "semaphore and fence must not both be equal to VK_NULL_HANDLE"
         assert!(
-            (semaphore_to_signal == vk::Semaphore::null())
-                && (fence_to_signal == vk::Fence::null())
+            (semaphore_to_signal != vk::Semaphore::null())
+                || (fence_to_signal != vk::Fence::null())
         );
 
+        let wait = std::time::Instant::now();
         let (index, is_suboptimal) = unsafe {
             self.swapchain_entry
                 .entry
@@ -612,6 +615,12 @@ impl RenderDevice {
                 )
                 .expect("RenderDevice: failed to acquire next swapchain image")
         };
+
+        // Warn if acquire next image takes too long
+        let elapsed = wait.elapsed().as_micros();
+        if elapsed > 500 {
+            println!("RenderDevice: acquire next image takes {} ms!", elapsed);
+        }
 
         if is_suboptimal {
             panic!("RenderDevice: acquired surface image has unexpected properties");
@@ -774,7 +783,6 @@ impl TextureDesc {
         }
     }
 
-    #[allow(dead_code)]
     pub fn new_2d_array(
         width: u32,
         height: u32,

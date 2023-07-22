@@ -464,7 +464,6 @@ impl Window {
         }
     }
 
-    #[allow(dead_code)]
     pub fn pushed(&self, key: char) -> bool {
         self.message_handler.borrow().pushed(key)
     }

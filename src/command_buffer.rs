@@ -1,11 +1,24 @@
 use ash::extensions::{khr, nv};
 use ash::vk::{self};
 
+use crate::render_device::RenderDevice;
+
 pub struct CommandBuffer {
     pub device: ash::Device,
     pub raytracing_pipeline: khr::RayTracingPipeline,
     pub nv_diagnostic_checkpoints: nv::DeviceDiagnosticCheckpoints,
     pub command_buffer: vk::CommandBuffer,
+}
+
+impl CommandBuffer {
+    pub fn new(rd: &RenderDevice, command_buffer: vk::CommandBuffer) -> Self {
+        Self {
+            device: rd.device_entry.clone(),
+            raytracing_pipeline: rd.raytracing_pipeline_entry.clone(),
+            nv_diagnostic_checkpoints: rd.nv_diagnostic_checkpoints_entry.clone(),
+            command_buffer,
+        }
+    }
 }
 
 pub struct StencilOps {

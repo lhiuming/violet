@@ -17,7 +17,6 @@ pub struct RGHandle<T> {
 }
 
 impl<T> RGHandle<T> {
-    #[allow(dead_code)]
     pub fn null() -> Self {
         RGHandle {
             id: usize::MAX,
@@ -32,7 +31,6 @@ impl<T> RGHandle<T> {
         }
     }
 
-    #[allow(dead_code)]
     pub fn is_null(&self) -> bool {
         self.id == usize::MAX
     }
@@ -57,7 +55,18 @@ pub enum RenderPassType {
     Present,
 }
 
-#[allow(dead_code)]
+impl RenderPassType {
+    pub fn to_bind_point(&self) -> Option<vk::PipelineBindPoint> {
+        let bind_point = match self {
+            RenderPassType::Graphics => vk::PipelineBindPoint::GRAPHICS,
+            RenderPassType::Compute => vk::PipelineBindPoint::COMPUTE,
+            RenderPassType::RayTracing => vk::PipelineBindPoint::RAY_TRACING_KHR,
+            RenderPassType::Present => return None,
+        };
+        Some(bind_point)
+    }
+}
+
 #[derive(Clone, Copy)]
 pub enum ColorLoadOp {
     Load,
@@ -121,7 +130,6 @@ impl RenderPass<'_> {
         }
     }
 
-    #[allow(dead_code)]
     pub fn get_texture(&self, name: &str) -> RGHandle<TextureView> {
         for (n, t) in &self.textures {
             if n == &name {
@@ -170,6 +178,13 @@ impl<'a, 'b> RenderPassBuilder<'a, 'b> {
     // Binding an external descriptor set
     pub fn descritpro_set(mut self, set_index: u32, set: vk::DescriptorSet) -> Self {
         self.inner().external_descritpr_sets.push((set_index, set));
+        self
+    }
+
+    pub fn descritpro_sets(mut self, sets: &[(u32, vk::DescriptorSet)]) -> Self {
+        for pair in sets {
+            self.inner().external_descritpr_sets.push(*pair)
+        }
         self
     }
 
@@ -366,8 +381,6 @@ struct VirtualTextureView {
 
 // A Render Graph to handle resource transitions automatically
 pub struct RenderGraphBuilder<'a> {
-    cache: &'a mut RenderGraphCache,
-
     passes: Vec<RenderPass<'a>>,
 
     // Array indexed by RGHandle
@@ -378,9 +391,8 @@ pub struct RenderGraphBuilder<'a> {
 
 // Interface
 impl<'a> RenderGraphBuilder<'a> {
-    pub fn new(cache: &'a mut RenderGraphCache) -> Self {
+    pub fn new() -> Self {
         Self {
-            cache,
             passes: Vec::new(),
             textures: Vec::new(),
             texture_views: Vec::new(),
@@ -471,7 +483,6 @@ impl<'a> RenderGraphBuilder<'a> {
         RGHandle::new(id)
     }
 
-    #[allow(dead_code)]
     pub fn get_texture_desc(&self, texture: RGHandle<Texture>) -> &TextureDesc {
         match &self.textures[texture.id] {
             RenderResource::Virtual(desc) => desc,
@@ -479,12 +490,10 @@ impl<'a> RenderGraphBuilder<'a> {
         }
     }
 
-    #[allow(dead_code)]
     pub fn add_pass(&mut self, pass: RenderPass<'a>) {
         self.passes.push(pass);
     }
 
-    #[allow(dead_code)]
     pub fn new_pass<'b>(&'b mut self, name: &str, ty: RenderPassType) -> RenderPassBuilder<'a, 'b> {
         //println!("Adding new pass: {}", name);
         RenderPassBuilder::new(self, name, ty)
@@ -633,14 +642,15 @@ impl RenderGraphBuilder<'_> {
         pass: &RenderPass,
         internal_set: vk::DescriptorSet,
     ) -> Option<()> {
-        let pipeline_bind_point = match pass.ty {
-            RenderPassType::Graphics => vk::PipelineBindPoint::GRAPHICS,
-            RenderPassType::Compute => vk::PipelineBindPoint::COMPUTE,
-            RenderPassType::RayTracing => vk::PipelineBindPoint::RAY_TRACING_KHR,
-            _ => {
-                return None;
-            }
-        };
+        let pipeline_bind_point = pass.ty.to_bind_point()?;
+
+        // Check for any resources
+        let has_internal_set = internal_set != vk::DescriptorSet::null();
+        let has_external_set = !pass.external_descritpr_sets.is_empty();
+        let any_resource = has_internal_set || has_external_set;
+        if !any_resource {
+            return None;
+        }
 
         let pipeline = shaders.get_pipeline(pass.pipeline);
         if pipeline.is_none() {
@@ -654,7 +664,7 @@ impl RenderGraphBuilder<'_> {
 
         // Update descriptor set
         // TODO this struct can be reused (a lot vec)
-        if internal_set != vk::DescriptorSet::null() {
+        if has_internal_set {
             let mut builder = shader::DescriptorSetWriteBuilder::new();
 
             let builder = &mut builder;
@@ -924,6 +934,7 @@ impl RenderGraphBuilder<'_> {
         rd: &RenderDevice,
         command_buffer: &CommandBuffer,
         shaders: &Shaders,
+        cache: &mut RenderGraphCache,
     ) {
         let mut exec_context = RenderGraphExecuteContext::new();
 
@@ -935,8 +946,7 @@ impl RenderGraphBuilder<'_> {
             let texture = match texture_resource {
                 // Create texture
                 RenderResource::Virtual(desc) => {
-                    let tex = self
-                        .cache
+                    let tex = cache
                         .texture_pool
                         .pop(&desc)
                         .unwrap_or_else(|| rd.create_texture(*desc).unwrap());
@@ -952,8 +962,7 @@ impl RenderGraphBuilder<'_> {
                 // Create texture view
                 RenderResource::Virtual(virtual_view) => {
                     let texture = self.get_texture(&exec_context, virtual_view.texture);
-                    let view = self
-                        .cache
+                    let view = cache
                         .texture_view_pool
                         .pop(&virtual_view.desc)
                         .unwrap_or_else(|| {
@@ -980,7 +989,7 @@ impl RenderGraphBuilder<'_> {
                         vk::DescriptorSet::null()
                     } else {
                         let set_layout = pipeline.set_layouts[pass.descriptor_set_index as usize];
-                        self.cache.allocate_dessriptor_set(rd, set_layout)
+                        cache.allocate_dessriptor_set(rd, set_layout)
                     }
                 }
                 None => {
@@ -1002,7 +1011,7 @@ impl RenderGraphBuilder<'_> {
 
         for pass_index in 0..self.passes.len() {
             // take the callback before unmutable reference
-            let render = self.passes[pass_index].render.take().unwrap();
+            let render = self.passes[pass_index].render.take();
 
             let pass = &self.passes[pass_index];
 
@@ -1018,6 +1027,17 @@ impl RenderGraphBuilder<'_> {
                 command_buffer.insert_checkpoint();
             }
 
+            // Bind pipeline (if set)
+            if let Some(pipeline) = shaders.get_pipeline(pass.pipeline) {
+                let bind_point = match pass.ty {
+                    RenderPassType::Graphics => vk::PipelineBindPoint::GRAPHICS,
+                    RenderPassType::Compute => vk::PipelineBindPoint::COMPUTE,
+                    RenderPassType::RayTracing => vk::PipelineBindPoint::RAY_TRACING_KHR,
+                    RenderPassType::Present => panic!("Present pass should not have pipeline"),
+                };
+                command_buffer.bind_pipeline(bind_point, pipeline.handle);
+            }
+
             // Bind resources
             self.bind_resources(
                 &exec_context,
@@ -1030,8 +1050,17 @@ impl RenderGraphBuilder<'_> {
             command_buffer.insert_checkpoint();
 
             // Run pass
-            render(command_buffer, &shaders, pass);
-            command_buffer.insert_checkpoint();
+            if let Some(render) = render {
+                render(command_buffer, &shaders, pass);
+                command_buffer.insert_checkpoint();
+            } else {
+                if pass.ty != RenderPassType::Present {
+                    println!(
+                        "Warning[RenderGraph]: render callback not provided by pass {}!",
+                        pass.name
+                    );
+                }
+            }
 
             // End render pass (if graphics)
             if is_graphic {
@@ -1048,12 +1077,12 @@ impl RenderGraphBuilder<'_> {
             .drain(0..exec_context.texture_views.len())
         {
             if let Some(view) = view {
-                self.cache.texture_view_pool.push(view.desc, view);
+                cache.texture_view_pool.push(view.desc, view);
             }
         }
         for texture in exec_context.textures.drain(0..exec_context.textures.len()) {
             if let Some(texture) = texture {
-                self.cache.texture_pool.push(texture.desc, texture);
+                cache.texture_pool.push(texture.desc, texture);
             }
         }
         for set in exec_context
@@ -1062,7 +1091,7 @@ impl RenderGraphBuilder<'_> {
         {
             if set != vk::DescriptorSet::null() {
                 // TODO may be need some frame buffering, because it may be still using?
-                self.cache.release_descriptor_set(rd, set);
+                cache.release_descriptor_set(rd, set);
             }
         }
     }

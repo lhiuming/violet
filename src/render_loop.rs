@@ -8,8 +8,12 @@ use crate::render_device::{Buffer, RenderDevice};
 /*
  * Modules
  */
+mod gbuffer_pass;
 pub mod pbr_loop;
 pub mod senga_loop;
+
+pub use pbr_loop::PhysicallyBasedRenderLoop;
+pub use senga_loop::SengaRenderLoop;
 
 /*
  * Common Types
@@ -175,4 +179,19 @@ impl RenderLoopDesciptorSets {
         };
         dst.copy_from_slice(std::slice::from_ref(&params));
     }
+}
+
+/*
+ * Utilites.
+ */
+
+pub fn div_round_up<T>(a: T, b: T) -> T
+where
+    T: std::ops::Add<Output = T>
+        + std::ops::Sub<Output = T>
+        + std::ops::Div<Output = T>
+        + std::convert::From<u8>
+        + Copy,
+{
+    (a + (b - T::from(1))) / b
 }

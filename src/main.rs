@@ -19,7 +19,6 @@ mod render_scene;
 use render_scene::RenderScene;
 
 mod render_loop;
-use render_loop::pbr_loop::PhysicallyBasedRenderLoop;
 use render_loop::ViewInfo;
 
 mod command_buffer;
@@ -94,7 +93,8 @@ fn main() {
         );
     }
 
-    let mut render_loop = PhysicallyBasedRenderLoop::new(&rd);
+    //let mut render_loop = render_loop::PhysicallyBasedRenderLoop::new(&rd);
+    let mut render_loop = render_loop::SengaRenderLoop::new(&rd);
 
     // Init camera
     // NOTE:

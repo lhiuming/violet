@@ -2,7 +2,7 @@ use ash::vk;
 use glam::Vec3;
 
 use crate::{
-    command_buffer::{CommandBuffer, StencilOps},
+    command_buffer::*,
     render_device::{
         Buffer, RenderDevice, ShaderBindingTableFiller, Texture, TextureDesc, TextureView,
         TextureViewDesc,
@@ -13,6 +13,8 @@ use crate::{
 };
 
 use super::{FrameParams, RenderLoopDesciptorSets, ViewInfo, FRAME_DESCRIPTOR_SET_INDEX};
+
+use super::gbuffer_pass::*;
 
 pub struct RayTracedShadowResources {
     pub shader_binding_table: Buffer,
@@ -248,10 +250,15 @@ impl PhysicallyBasedRenderLoop {
         view_info: &ViewInfo,
     ) {
         let command_buffer = self.command_buffer;
+
         let frame_descriptor_set = self.descriptor_sets.sets[0];
+        let common_sets = [
+            (SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set),
+            (FRAME_DESCRIPTOR_SET_INDEX, frame_descriptor_set),
+        ];
 
         use render_graph::*;
-        let mut rg = RenderGraphBuilder::new(&mut self.render_graph_cache);
+        let mut rg = RenderGraphBuilder::new();
 
         // Stupid shader compiling hack
         let mut hack = ShadersConfig {
@@ -413,111 +420,10 @@ impl PhysicallyBasedRenderLoop {
         );
 
         // Define GBuffer
-        let gbuffer_size = rd.swapchain.extent;
-        let gbuffer_depth;
-        let gbuffer_color;
-        let gbuffer_color_clear;
-        {
-            // helper
-            let mut create_gbuffer = |format: vk::Format| {
-                let is_depth = crate::render_device::format_has_depth(format);
-                let usage: vk::ImageUsageFlags = if is_depth {
-                    vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
-                } else {
-                    vk::ImageUsageFlags::COLOR_ATTACHMENT
-                } | vk::ImageUsageFlags::SAMPLED;
-                let texture_desc =
-                    TextureDesc::new_2d(gbuffer_size.width, gbuffer_size.height, format, usage);
-                let texture_view_desc = TextureViewDesc::auto(&texture_desc);
-                let texture = rg.create_texutre(texture_desc);
-                let view = rg.create_texture_view(texture, texture_view_desc);
-
-                (texture, view)
-            };
-
-            // define
-            gbuffer_depth = create_gbuffer(vk::Format::D24_UNORM_S8_UINT);
-            gbuffer_color = create_gbuffer(vk::Format::R32G32B32A32_UINT);
-            gbuffer_color_clear = vk::ClearColorValue {
-                uint32: [0, 0, 0, 0],
-            };
-        }
+        let gbuffer = create_gbuffer_textures(&mut rg, rd.swapchain.extent);
 
         // Draw mesh
-        let mesh_gfx_pipeline = shaders.create_gfx_pipeline(
-            ShaderDefinition::vert("mesh_gbuffer.hlsl", "vs_main"),
-            ShaderDefinition::frag("mesh_gbuffer.hlsl", "ps_main"),
-            &hack,
-        );
-        if let Some(pipeline) = mesh_gfx_pipeline {
-            let viewport_extent = rd.swapchain.extent;
-            rg.new_pass("GBuffer_Gen", RenderPassType::Graphics)
-                .pipeline(pipeline)
-                .descritpro_set(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set)
-                .descritpro_set(FRAME_DESCRIPTOR_SET_INDEX, frame_descriptor_set)
-                .color_targets(&[ColorTarget {
-                    view: gbuffer_color.1,
-                    load_op: ColorLoadOp::Clear(gbuffer_color_clear),
-                }])
-                .depth_stencil(DepthStencilTarget {
-                    view: gbuffer_depth.1,
-                    load_op: DepthLoadOp::Clear(vk::ClearDepthStencilValue {
-                        depth: 0.0,
-                        stencil: 0,
-                    }),
-                    store_op: vk::AttachmentStoreOp::STORE,
-                })
-                .render(move |cb, shaders, _pass| {
-                    // set up raster state
-                    cb.set_viewport_0(vk::Viewport {
-                        x: 0.0,
-                        y: 0.0,
-                        width: viewport_extent.width as f32,
-                        height: viewport_extent.height as f32,
-                        min_depth: 0.0,
-                        max_depth: 1.0,
-                    });
-                    cb.set_scissor_0(vk::Rect2D {
-                        offset: vk::Offset2D { x: 0, y: 0 },
-                        extent: viewport_extent,
-                    });
-                    cb.set_depth_test_enable(true);
-                    cb.set_depth_write_enable(true);
-                    cb.set_stencil_test_enable(true);
-                    let face_mask = vk::StencilFaceFlags::FRONT_AND_BACK;
-                    let stencil_ops = StencilOps::write_on_pass(vk::CompareOp::ALWAYS);
-                    cb.set_stencil_op(face_mask, stencil_ops);
-                    cb.set_stencil_write_mask(face_mask, 0x01);
-                    cb.set_stencil_reference(face_mask, 0xFF);
-
-                    let pipeline = shaders.get_pipeline(pipeline).unwrap();
-
-                    // Draw meshs
-                    cb.bind_index_buffer(
-                        scene.index_buffer.buffer.handle,
-                        0,
-                        vk::IndexType::UINT16,
-                    );
-                    cb.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, pipeline.handle);
-                    for (mesh_index, mesh_params) in scene.mesh_params.iter().enumerate() {
-                        // PushConstant for everything per-draw
-                        let model_xform = glam::Mat4::IDENTITY; // Not used for now
-                        let mesh_index = mesh_index as u32;
-                        let constants = PushConstantsBuilder::new()
-                            .push(&model_xform.to_cols_array())
-                            .push(&mesh_index)
-                            .push(&mesh_params.material_index);
-                        cb.push_constants(
-                            pipeline.layout,
-                            pipeline.push_constant_ranges[0].stage_flags, // TODO
-                            0,
-                            &constants.build(),
-                        );
-
-                        cb.draw_indexed(mesh_params.index_count, 1, mesh_params.index_offset, 0, 0);
-                    }
-                });
-        }
+        add_gbuffer_pass(&mut rg, &rd, shaders, &hack, &common_sets, scene, &gbuffer);
 
         let final_color = rg.register_texture_view(rd.swapchain.image_view[image_index as usize]);
 
@@ -531,7 +437,7 @@ impl PhysicallyBasedRenderLoop {
             let pipeline = sky_pipeline.unwrap();
 
             let stencil = rg.create_texture_view(
-                gbuffer_depth.0,
+                gbuffer.depth.0,
                 TextureViewDesc {
                     view_type: vk::ImageViewType::TYPE_2D,
                     format: vk::Format::D24_UNORM_S8_UINT,
@@ -577,8 +483,8 @@ impl PhysicallyBasedRenderLoop {
 
         let raytraced_shadow_mask = {
             let tex_desc = TextureDesc::new_2d(
-                gbuffer_size.width,
-                gbuffer_size.height,
+                gbuffer.size.width,
+                gbuffer.size.height,
                 vk::Format::R8_UNORM,
                 vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
             );
@@ -602,7 +508,7 @@ impl PhysicallyBasedRenderLoop {
                 .pipeline(raytraced_shadow)
                 .descritpro_set(FRAME_DESCRIPTOR_SET_INDEX, frame_descriptor_set)
                 .accel_struct("scene_tlas", scene_tlas)
-                .texture("gbuffer_depth", gbuffer_depth.1)
+                .texture("gbuffer_depth", gbuffer.depth.1)
                 .rw_texture("rw_shadow", raytraced_shadow_mask)
                 .render(move |cb, shaders, _pass| {
                     let pipeline = shaders.get_pipeline(raytraced_shadow).unwrap();
@@ -612,8 +518,8 @@ impl PhysicallyBasedRenderLoop {
                         &miss_sbt,
                         &vk::StridedDeviceAddressRegionKHR::default(),
                         &vk::StridedDeviceAddressRegionKHR::default(),
-                        gbuffer_size.width,
-                        gbuffer_size.height,
+                        gbuffer.size.width,
+                        gbuffer.size.height,
                         1,
                     )
                 });
@@ -629,16 +535,16 @@ impl PhysicallyBasedRenderLoop {
                 .pipeline(pipeline)
                 .descritpro_set(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set)
                 .descritpro_set(FRAME_DESCRIPTOR_SET_INDEX, frame_descriptor_set)
-                .texture("gbuffer_depth", gbuffer_depth.1)
-                .texture("gbuffer_color", gbuffer_color.1)
+                .texture("gbuffer_depth", gbuffer.depth.1)
+                .texture("gbuffer_color", gbuffer.color.1)
                 .texture("skycube", skycube)
                 .texture("shadow_mask", raytraced_shadow_mask)
                 .rw_texture("out_lighting", final_color)
                 .render(move |cb, shaders, _pass| {
                     let pipeline = shaders.get_pipeline(pipeline).unwrap();
                     cb.bind_pipeline(vk::PipelineBindPoint::COMPUTE, pipeline.handle);
-                    let dispatch_x = (gbuffer_size.width + 7) / 8;
-                    let diapatch_y = (gbuffer_size.height + 7) / 8;
+                    let dispatch_x = (gbuffer.size.width + 7) / 8;
+                    let diapatch_y = (gbuffer.size.height + 7) / 8;
                     cb.dispatch(dispatch_x, diapatch_y, 1);
                 });
         }
@@ -709,19 +615,18 @@ impl PhysicallyBasedRenderLoop {
                         &miss_region,
                         &hit_region,
                         &Default::default(),
-                        gbuffer_size.width,
-                        gbuffer_size.height,
+                        gbuffer.size.width,
+                        gbuffer.size.height,
                         1,
                     );
                 });
         }
 
-        // TODO define an extra Output node instead of hacking RenderPass node
+        // Insert output pass
         let swapchain_view_handle =
             rg.register_texture_view(rd.swapchain.image_view[image_index as usize]);
         rg.new_pass("Present", RenderPassType::Present)
-            .present_texture(swapchain_view_handle)
-            .render(|_, _, _| {});
+            .present_texture(swapchain_view_handle);
 
         // Run render graph and fianlize
         {
@@ -731,7 +636,7 @@ impl PhysicallyBasedRenderLoop {
                 nv_diagnostic_checkpoints: rd.nv_diagnostic_checkpoints_entry.clone(),
                 command_buffer,
             };
-            rg.execute(rd, &cb, &shaders);
+            rg.execute(rd, &cb, &shaders, &mut self.render_graph_cache);
         }
 
         // End command recoding
