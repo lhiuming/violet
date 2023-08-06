@@ -3,17 +3,16 @@ use std::{f32::consts::PI, slice};
 use ash::vk;
 use glam::Vec3;
 
-use crate::{
+use violet::{
     command_buffer::*,
     render_device::RenderDevice,
     render_graph::*,
+    render_loop::{
+        gbuffer_pass::{add_gbuffer_pass, create_gbuffer_textures},
+        *,
+    },
     render_scene::{RenderScene, SCENE_DESCRIPTOR_SET_INDEX},
     shader::{ShaderDefinition, Shaders, ShadersConfig},
-};
-
-use super::{
-    gbuffer_pass::{add_gbuffer_pass, create_gbuffer_textures},
-    *,
 };
 
 const MAX_RENDERING_IN_FLIGHT: u32 = 2;
@@ -33,37 +32,8 @@ pub struct SengaRenderLoop {
     next_render_index: u32,
 }
 
+// TODO move to StreamLinedResrouce.
 impl SengaRenderLoop {
-    pub fn new(rd: &RenderDevice) -> Self {
-        let command_pool = rd.create_command_pool();
-        let desciptor_sets = RenderLoopDesciptorSets::new(rd, MAX_RENDERING_IN_FLIGHT);
-
-        let mut command_buffers = Vec::new();
-        let mut command_buffer_finished_fences = Vec::new();
-        let mut present_finished_fences = Vec::new();
-        let mut present_ready_semaphores = Vec::new();
-        for _ in 0..MAX_RENDERING_IN_FLIGHT {
-            command_buffers.push(rd.create_command_buffer(command_pool));
-            command_buffer_finished_fences.push(rd.create_fence(true));
-            present_finished_fences.push(rd.create_fence(false));
-            present_ready_semaphores.push(rd.create_semaphore());
-        }
-
-        Self {
-            render_graph_cache: RenderGraphCache::new(rd),
-            shaders_config: Default::default(),
-            command_pool,
-
-            desciptor_sets,
-            command_buffers,
-            command_buffer_finished_fences,
-            present_finished_fences,
-            present_ready_semaphores,
-
-            next_render_index: 0,
-        }
-    }
-
     // Index into per-render resource arrays (command_buffer, constant_buffer slot, etc.)
     fn acquire_render_index(&mut self) -> u32 {
         let render_index = self.next_render_index;
@@ -155,10 +125,42 @@ impl SengaRenderLoop {
                 .unwrap();
         }
     }
+}
 
-    pub fn render(
+impl RenderLoop for SengaRenderLoop {
+    fn new(rd: &RenderDevice) -> Self {
+        let command_pool = rd.create_command_pool();
+        let desciptor_sets = RenderLoopDesciptorSets::new(rd, MAX_RENDERING_IN_FLIGHT);
+
+        let mut command_buffers = Vec::new();
+        let mut command_buffer_finished_fences = Vec::new();
+        let mut present_finished_fences = Vec::new();
+        let mut present_ready_semaphores = Vec::new();
+        for _ in 0..MAX_RENDERING_IN_FLIGHT {
+            command_buffers.push(rd.create_command_buffer(command_pool));
+            command_buffer_finished_fences.push(rd.create_fence(true));
+            present_finished_fences.push(rd.create_fence(false));
+            present_ready_semaphores.push(rd.create_semaphore());
+        }
+
+        Self {
+            render_graph_cache: RenderGraphCache::new(rd),
+            shaders_config: Default::default(),
+            command_pool,
+
+            desciptor_sets,
+            command_buffers,
+            command_buffer_finished_fences,
+            present_finished_fences,
+            present_ready_semaphores,
+
+            next_render_index: 0,
+        }
+    }
+
+    fn render(
         &mut self,
-        rd: &RenderDevice,
+        rd: &mut RenderDevice,
         shaders: &mut Shaders,
         scene: &RenderScene,
         view_info: &ViewInfo,
@@ -292,4 +294,8 @@ impl SengaRenderLoop {
             }
         }
     }
+}
+
+fn main() {
+    violet::app::run_with_renderloop::<SengaRenderLoop>();
 }

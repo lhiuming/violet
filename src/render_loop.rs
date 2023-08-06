@@ -8,12 +8,26 @@ use crate::render_device::{Buffer, RenderDevice};
 /*
  * Modules
  */
-mod gbuffer_pass;
-pub mod pbr_loop;
-pub mod senga_loop;
+pub mod gbuffer_pass;
 
+pub mod pbr_loop;
 pub use pbr_loop::PhysicallyBasedRenderLoop;
-pub use senga_loop::SengaRenderLoop;
+
+/*
+ * Basic Traits
+ */
+
+pub trait RenderLoop {
+    fn new(rd: &RenderDevice) -> Self;
+
+    fn render(
+        &mut self,
+        rd: &mut RenderDevice,
+        shaders: &mut crate::shader::Shaders,
+        scene: &crate::render_scene::RenderScene,
+        view_info: &ViewInfo,
+    );
+}
 
 /*
  * Common Types
@@ -68,9 +82,9 @@ impl FrameParams {
     }
 }
 
-const FRAME_DESCRIPTOR_SET_INDEX: u32 = 2;
+pub const FRAME_DESCRIPTOR_SET_INDEX: u32 = 2;
 
-const FRAMEPARAMS_BINDING_INDEX: u32 = 0;
+pub const FRAMEPARAMS_BINDING_INDEX: u32 = 0;
 
 // DescriptorSet that is allocated/updated per frame
 pub struct RenderLoopDesciptorSets {

@@ -5,11 +5,11 @@
 	"version": "0.2.0",
 	"configurations": [
 		{
-			"name": "Debug-Helmet",
+			"name": "debug-restir-Helmet",
 			"type": "cppvsdbg",
 			"request": "launch",
 			"preLaunchTask": "rust: cargo build nightly",
-			"program": "${workspaceFolder}/target/debug/violet.exe",
+			"program": "${workspaceFolder}/target/debug/restir.exe",
 			"args": [
 				"./assets/DamagedHelmet/DamagedHelmet.gltf",
 			],
@@ -19,11 +19,11 @@
 			"console": "integratedTerminal"
 		},
 		{
-			"name": "Debug-Sponza",
+			"name": "debug-restir-Sponza",
 			"type": "cppvsdbg",
 			"request": "launch",
 			"preLaunchTask": "rust: cargo build nightly",
-			"program": "${workspaceFolder}/target/debug/violet.exe",
+			"program": "${workspaceFolder}/target/debug/restir.exe",
 			"args": [
 				"./assets/Sponza/Sponza.gltf",
 			],
@@ -31,6 +31,20 @@
 			"cwd": "${workspaceFolder}",
 			"environment": [],
 			"console": "integratedTerminal"
-		}
+		},
+		{
+			"name": "debug-senga-Helmet",
+			"type": "cppvsdbg",
+			"request": "launch",
+			"preLaunchTask": "rust: cargo build nightly",
+			"program": "${workspaceFolder}/target/debug/senga.exe",
+			"args": [
+				"./assets/DamagedHelmet/DamagedHelmet.gltf",
+			],
+			"stopAtEntry": false,
+			"cwd": "${workspaceFolder}",
+			"environment": [],
+			"console": "integratedTerminal"
+		},
 	]
 }

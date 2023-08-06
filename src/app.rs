@@ -1,29 +1,17 @@
-#![feature(core_intrinsics)]
 use std::path::Path;
 use std::{env, f32::consts::PI};
 
 use glam::{Mat4, Vec3, Vec4};
 
-mod window;
-use window::Window;
-
-mod render_device;
-use render_device::RenderDevice;
-
-mod shader;
-use shader::Shaders;
-
-mod model;
-
-mod render_scene;
-use render_scene::RenderScene;
-
-mod render_loop;
-use render_loop::ViewInfo;
-
-mod command_buffer;
-mod render_graph;
-mod renderdoc;
+use crate::{
+    model,
+    render_device::RenderDevice,
+    render_loop::{RenderLoop, ViewInfo},
+    render_scene::RenderScene,
+    renderdoc,
+    shader::Shaders,
+    window::Window,
+};
 
 // Assumming positive Z; mapping near-plane to 1, far-plane to 0 (reversed Z).
 // Never flip y (or x).
@@ -56,7 +44,10 @@ fn perspective_projection(
     ])
 }
 
-fn main() {
+pub fn run_with_renderloop<T>()
+where
+    T: RenderLoop,
+{
     let args: Vec<String> = env::args().collect();
 
     println!("Hello, rusty world!");
@@ -93,8 +84,8 @@ fn main() {
         );
     }
 
-    //let mut render_loop = render_loop::PhysicallyBasedRenderLoop::new(&rd);
-    let mut render_loop = render_loop::SengaRenderLoop::new(&rd);
+    // Create render loop
+    let mut render_loop = T::new(&rd);
 
     // Init camera
     // NOTE:

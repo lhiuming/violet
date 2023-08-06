@@ -14,7 +14,7 @@ use crate::{
 
 use super::{FrameParams, RenderLoopDesciptorSets, ViewInfo, FRAME_DESCRIPTOR_SET_INDEX};
 
-use super::gbuffer_pass::*;
+use super::{gbuffer_pass::*, RenderLoop};
 
 pub struct RayTracedShadowResources {
     pub shader_binding_table: Buffer,
@@ -220,9 +220,8 @@ pub struct PhysicallyBasedRenderLoop {
     pub pathtraced_lighting: PathTracedLightingResources,
 }
 
-// TODO multiple in-fly frames
-impl PhysicallyBasedRenderLoop {
-    pub fn new(rd: &RenderDevice) -> PhysicallyBasedRenderLoop {
+impl RenderLoop for PhysicallyBasedRenderLoop {
+    fn new(rd: &RenderDevice) -> PhysicallyBasedRenderLoop {
         let command_pool = rd.create_command_pool();
         let command_buffer = rd.create_command_buffer(command_pool);
         let descriptor_sets = RenderLoopDesciptorSets::new(rd, 1);
@@ -242,7 +241,7 @@ impl PhysicallyBasedRenderLoop {
         }
     }
 
-    pub fn render(
+    fn render(
         &mut self,
         rd: &mut RenderDevice,
         shaders: &mut Shaders,

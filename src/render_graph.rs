@@ -490,6 +490,13 @@ impl<'a> RenderGraphBuilder<'a> {
         }
     }
 
+    pub fn get_texture_desc_from_view(&self, texture_view: RGHandle<TextureView>) -> &TextureDesc {
+        match &self.texture_views[texture_view.id] {
+            RenderResource::Virtual(virtual_view) => self.get_texture_desc(virtual_view.texture),
+            RenderResource::External(texture_view) => &texture_view.texture.desc,
+        }
+    }
+
     pub fn add_pass(&mut self, pass: RenderPass<'a>) {
         self.passes.push(pass);
     }
@@ -523,20 +530,6 @@ impl RenderGraphBuilder<'_> {
         match resource {
             RenderResource::Virtual(_) => ctx.texture_views[handle.id].unwrap(),
             RenderResource::External(view) => *view,
-        }
-    }
-
-    fn get_texture_desc_from_view(&self, handle: RGHandle<TextureView>) -> TextureDesc {
-        let view = &self.texture_views[handle.id];
-        match view {
-            RenderResource::Virtual(virtual_view) => {
-                let texture = &self.textures[virtual_view.texture.id];
-                match texture {
-                    RenderResource::Virtual(desc) => *desc,
-                    RenderResource::External(texture) => texture.desc,
-                }
-            }
-            RenderResource::External(view) => view.texture.desc,
         }
     }
 
