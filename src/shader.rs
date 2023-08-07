@@ -1042,7 +1042,7 @@ pub struct DescriptorSetWriteBuilder<'a> {
     buffer_views: NamedVec<'a, vk::BufferView>,
     buffer_infos: NamedVec<'a, vk::DescriptorBufferInfo>,
     image_infos: NamedVec<'a, vk::DescriptorImageInfo>,
-    samplers: NamedVec<'a, vk::Sampler>,
+    //samplers: NamedVec<'a, vk::Sampler>,
     accel_structs: NamedVec<'a, vk::AccelerationStructureKHR>,
 
     write_accel_strusts: Vec<vk::WriteDescriptorSetAccelerationStructureKHR>,
@@ -1055,7 +1055,7 @@ impl Default for DescriptorSetWriteBuilder<'_> {
             buffer_views: Default::default(),
             buffer_infos: Default::default(),
             image_infos: Default::default(),
-            samplers: Default::default(),
+            //samplers: Default::default(),
             accel_structs: Default::default(),
             write_accel_strusts: Default::default(),
             writes: Default::default(),

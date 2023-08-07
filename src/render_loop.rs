@@ -195,6 +195,205 @@ impl RenderLoopDesciptorSets {
     }
 }
 
+pub const MAX_FRAMES_ON_THE_FLY: u32 = 2;
+
+// Common resources to help render loop to support multi on-the-fly frames.
+pub struct StreamLinedFrameResource {
+    //command_pool: vk::CommandPool, // TODO destroy it
+
+    // Per-render resource that is accessed by render index.
+    desciptor_sets: RenderLoopDesciptorSets,
+    command_buffers: Vec<vk::CommandBuffer>,
+    command_buffer_finished_fences: Vec<vk::Fence>,
+    present_finished_fences: Vec<vk::Fence>,
+    present_ready_semaphores: Vec<vk::Semaphore>,
+
+    // Index to access per-frame resources
+    render_index: u32,
+}
+
+impl StreamLinedFrameResource {
+    pub fn new(rd: &RenderDevice) -> Self {
+        let command_pool = rd.create_command_pool();
+        let desciptor_sets = RenderLoopDesciptorSets::new(rd, MAX_FRAMES_ON_THE_FLY);
+
+        let mut command_buffers = Vec::new();
+        let mut command_buffer_finished_fences = Vec::new();
+        let mut present_finished_fences = Vec::new();
+        let mut present_ready_semaphores = Vec::new();
+        for _ in 0..MAX_FRAMES_ON_THE_FLY {
+            command_buffers.push(rd.create_command_buffer(command_pool));
+            command_buffer_finished_fences.push(rd.create_fence(true));
+            present_finished_fences.push(rd.create_fence(false));
+            present_ready_semaphores.push(rd.create_semaphore());
+        }
+
+        Self {
+            //command_pool,
+            desciptor_sets,
+            command_buffers,
+            command_buffer_finished_fences,
+            present_finished_fences,
+            present_ready_semaphores,
+
+            render_index: 0,
+        }
+    }
+
+    // Index into per-render resource arrays (command_buffer, constant_buffer slot, etc.)
+    pub fn advance_render_index(&mut self) -> u32 {
+        self.render_index = (self.render_index + 1) % (MAX_FRAMES_ON_THE_FLY);
+        self.render_index
+    }
+
+    pub fn get_frame_desciptor_set(&self) -> vk::DescriptorSet {
+        self.desciptor_sets.sets[self.render_index as usize]
+    }
+
+    pub fn get_set_layout(&self) -> vk::DescriptorSetLayout {
+        self.desciptor_sets.set_layout
+    }
+
+    pub fn acquire_next_swapchain_image(&self, rd: &RenderDevice) -> u32 {
+        // temporary fence for this image
+        let swapchain_ready_fence = self.present_finished_fences[self.render_index as usize];
+        rd.acquire_next_swapchain_image(vk::Semaphore::null(), swapchain_ready_fence)
+    }
+
+    // Wait for command buffer finished and reset it for recording.
+    pub fn wait_and_reset_command_buffer(&self, rd: &RenderDevice) -> vk::CommandBuffer {
+        // Fence to make sure previous submit command buffer is finished
+        let fence = self.command_buffer_finished_fences[self.render_index as usize];
+
+        // Wait for the oldest command buffer finished
+        let timeout = 5000 * 1000_000; // 5s
+        let wait_begin = std::time::Instant::now();
+        match unsafe {
+            rd.device_entry
+                .wait_for_fences(slice::from_ref(&fence), true, timeout)
+        } {
+            Ok(_) => {
+                let elapsed_ms = wait_begin.elapsed().as_micros() as f32 / 1000.0;
+                let warning_ms = 33.3;
+                if elapsed_ms > warning_ms {
+                    println!(
+                        "Vulkan: Wait oldest command buffer finished in {}ms",
+                        elapsed_ms
+                    );
+                }
+            }
+            Err(err) => match err {
+                vk::Result::TIMEOUT => {
+                    println!(
+                        "Vulkan: Failed to wait oldest command buffer finished in {}ms",
+                        timeout / 1000_000
+                    );
+                }
+                _ => {
+                    println!(
+                        "Vulkan: Wait oldest command buffer finished error: {:?}",
+                        err
+                    );
+                }
+            },
+        }
+
+        // Reset after use
+        let command_buffer = self.command_buffers[self.render_index as usize];
+        unsafe {
+            rd.device_entry
+                .reset_fences(slice::from_ref(&fence))
+                .unwrap();
+            rd.device_entry
+                .reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())
+                .unwrap();
+        }
+
+        command_buffer
+    }
+
+    pub fn update_frame_params(&mut self, params: FrameParams) {
+        self.desciptor_sets
+            .update_frame_params(self.render_index, params);
+    }
+
+    fn wait_and_reset_fence(rd: &RenderDevice, fence: vk::Fence) {
+        // Wait for the oldest image present finished
+        let timeout = 5000 * 1000_000; // 5s
+        let wait_begin = std::time::Instant::now();
+        match unsafe {
+            rd.device_entry
+                .wait_for_fences(slice::from_ref(&fence), true, timeout)
+        } {
+            Ok(_) => {
+                let elapsed_ms = wait_begin.elapsed().as_micros() as f32 / 1000.0;
+                let warning_ms = 33.3;
+                if elapsed_ms > warning_ms {
+                    println!("Vulkan: Wait oldest present finished in {}ms", elapsed_ms);
+                }
+            }
+            Err(err) => match err {
+                vk::Result::TIMEOUT => {
+                    println!(
+                        "Vulkan: Failed to wait oldest present finished in {}ms",
+                        timeout / 1000_000
+                    );
+                }
+                _ => {
+                    println!("Vulkan: Wait oldest present finished error: {:?}", err);
+                }
+            },
+        }
+
+        // Reset after use
+        unsafe {
+            rd.device_entry
+                .reset_fences(slice::from_ref(&fence))
+                .unwrap();
+        }
+    }
+
+    pub fn wait_and_submit_and_present(&self, rd: &RenderDevice, image_index: u32) {
+        // Wait for swapchain image ready (before submit the GPU works modifying the image)
+        {
+            // the same temporary fence in acquire_next_swapchain_image
+            let swapchain_ready_fence = self.present_finished_fences[self.render_index as usize];
+            Self::wait_and_reset_fence(rd, swapchain_ready_fence);
+        }
+
+        // Submit the command buffer
+        let present_ready = self.present_ready_semaphores[self.render_index as usize];
+        {
+            let command_buffer = self.command_buffers[self.render_index as usize];
+            let submit_info = vk::SubmitInfo::builder()
+                .command_buffers(slice::from_ref(&command_buffer))
+                .signal_semaphores(slice::from_ref(&present_ready))
+                .build();
+            let cb_finish_fence = self.command_buffer_finished_fences[self.render_index as usize];
+            unsafe {
+                rd.device_entry
+                    .queue_submit(rd.gfx_queue, slice::from_ref(&submit_info), cb_finish_fence)
+                    .unwrap();
+            }
+        }
+
+        // Present
+        {
+            let present_info = vk::PresentInfoKHR::builder()
+                .wait_semaphores(slice::from_ref(&present_ready))
+                .swapchains(slice::from_ref(&rd.swapchain.handle))
+                .image_indices(slice::from_ref(&image_index))
+                .build();
+            unsafe {
+                rd.swapchain_entry
+                    .entry
+                    .queue_present(rd.gfx_queue, &present_info)
+                    .unwrap();
+            }
+        }
+    }
+}
+
 /*
  * Utilites.
  */
