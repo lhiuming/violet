@@ -47,11 +47,62 @@ impl<T> Clone for RGHandle<T> {
 
 impl<T> Copy for RGHandle<T> {}
 
+impl<T> PartialEq for RGHandle<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.id == other.id
+    }
+}
+
+impl<T> Eq for RGHandle<T> {}
+
+impl<T> Hash for RGHandle<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.id.hash(state);
+    }
+}
+
+pub struct RGTemporal<T> {
+    id: usize,
+    _phantom: PhantomData<T>,
+}
+
+impl<T> RGTemporal<T> {
+    pub fn null() -> Self {
+        RGTemporal {
+            id: usize::MAX,
+            _phantom: PhantomData::default(),
+        }
+    }
+
+    fn new(id: usize) -> Self {
+        RGTemporal {
+            id,
+            _phantom: PhantomData::default(),
+        }
+    }
+
+    pub fn is_null(&self) -> bool {
+        self.id == usize::MAX
+    }
+}
+
+impl<T> Clone for RGTemporal<T> {
+    fn clone(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            _phantom: PhantomData::default(),
+        }
+    }
+}
+
+impl<T> Copy for RGTemporal<T> {}
+
 #[derive(PartialEq, Eq)]
 pub enum RenderPassType {
     Graphics,
     Compute,
     RayTracing,
+    Copy,
     Present,
 }
 
@@ -61,6 +112,7 @@ impl RenderPassType {
             RenderPassType::Graphics => vk::PipelineBindPoint::GRAPHICS,
             RenderPassType::Compute => vk::PipelineBindPoint::COMPUTE,
             RenderPassType::RayTracing => vk::PipelineBindPoint::RAY_TRACING_KHR,
+            RenderPassType::Copy => return None,
             RenderPassType::Present => return None,
         };
         Some(bind_point)
@@ -108,6 +160,8 @@ pub struct RenderPass<'a> {
     color_targets: Vec<ColorTarget>,
     depth_stencil: Option<DepthStencilTarget>,
     rw_textures: Vec<(&'a str, RGHandle<TextureView>)>,
+    copy_src: Option<RGHandle<TextureView>>,
+    copy_dst: Option<RGHandle<TextureView>>,
     present_texture: Option<RGHandle<TextureView>>,
     render: Option<Box<dyn 'a + FnOnce(&CommandBuffer, &Shaders, &RenderPass)>>,
 }
@@ -125,6 +179,8 @@ impl RenderPass<'_> {
             color_targets: Vec::new(),
             depth_stencil: None,
             rw_textures: Vec::new(),
+            copy_src: None,
+            copy_dst: None,
             present_texture: None,
             render: None,
         }
@@ -227,6 +283,16 @@ impl<'a, 'b> RenderPassBuilder<'a, 'b> {
         self
     }
 
+    pub fn copy_src(mut self, texture: RGHandle<TextureView>) -> Self {
+        self.inner().copy_src = Some(texture);
+        self
+    }
+
+    pub fn copy_dst(mut self, texture: RGHandle<TextureView>) -> Self {
+        self.inner().copy_dst = Some(texture);
+        self
+    }
+
     pub fn present_texture(mut self, texture: RGHandle<TextureView>) -> Self {
         self.inner().present_texture = Some(texture);
         self
@@ -290,9 +356,13 @@ pub struct RenderGraphCache {
     // buffered VK objects
     free_vk_descriptor_sets: Vec<vk::DescriptorSet>,
 
+    // Temporal Resources
+    temporal_textures: HashMap<usize, Texture>,
+    next_temporal_id: usize,
+
     // Resource pool
     texture_pool: ResPool<TextureDesc, Texture>,
-    texture_view_pool: ResPool<TextureViewDesc, TextureView>,
+    texture_view_pool: ResPool<(Texture, TextureViewDesc), TextureView>,
 }
 
 impl RenderGraphCache {
@@ -308,6 +378,8 @@ impl RenderGraphCache {
         Self {
             vk_descriptor_pool,
             free_vk_descriptor_sets: Vec::new(),
+            temporal_textures: HashMap::new(),
+            next_temporal_id: 0,
             texture_pool: ResPool::new(),
             texture_view_pool: ResPool::new(),
         }
@@ -370,18 +442,21 @@ impl RenderGraphExecuteContext {
 }
 
 enum RenderResource<V, E> {
-    Virtual(V),
+    Virtual(V),      // a.k.a. Transient Resources
+    Temporal(usize), // Index to the cache
     External(E),
 }
 
 struct VirtualTextureView {
     pub texture: RGHandle<Texture>,
-    pub desc: TextureViewDesc,
+    pub desc: Option<TextureViewDesc>, // if none, use ::auto::(texture::desc)
 }
 
 // A Render Graph to handle resource transitions automatically
 pub struct RenderGraphBuilder<'a> {
     passes: Vec<RenderPass<'a>>,
+
+    transient_to_temporal_textures: HashMap<RGHandle<Texture>, RGTemporal<Texture>>,
 
     // Array indexed by RGHandle
     textures: Vec<RenderResource<TextureDesc, Texture>>,
@@ -394,6 +469,9 @@ impl<'a> RenderGraphBuilder<'a> {
     pub fn new() -> Self {
         Self {
             passes: Vec::new(),
+
+            transient_to_temporal_textures: HashMap::new(),
+
             textures: Vec::new(),
             texture_views: Vec::new(),
             accel_structs: Vec::new(),
@@ -409,7 +487,7 @@ impl<'a> RenderGraphBuilder<'a> {
     pub fn create_texture_view(
         &mut self,
         texture: RGHandle<Texture>,
-        desc: TextureViewDesc,
+        desc: Option<TextureViewDesc>,
     ) -> RGHandle<TextureView> {
         let id = self.texture_views.len();
         self.texture_views
@@ -483,9 +561,59 @@ impl<'a> RenderGraphBuilder<'a> {
         RGHandle::new(id)
     }
 
+    // Convert a transient resource to a temporal one (content is kept through frames)
+    pub fn convert_to_temporal(
+        &mut self,
+        cache: &mut RenderGraphCache,
+        handle: RGHandle<Texture>,
+    ) -> RGTemporal<Texture> {
+        assert!(match self.textures[handle.id] {
+            RenderResource::Virtual(_) => true,
+            _ => false,
+        });
+
+        let temporal_id = cache.next_temporal_id;
+        cache.next_temporal_id += 1;
+        let temporal_handle = RGTemporal::<Texture>::new(temporal_id);
+
+        self.transient_to_temporal_textures
+            .insert(handle, temporal_handle);
+
+        RGTemporal::<Texture>::new(temporal_id)
+    }
+
+    // Convert a temporal resource to a transient one (content is discarded after last usage in this frame)
+    pub fn convert_to_transient(
+        &mut self,
+        temporal_handle: RGTemporal<Texture>,
+    ) -> RGHandle<Texture> {
+        // Check if already registered
+        // TOOD make this routine part of self.textures
+        for handle_id in 0..self.textures.len() {
+            let texture_resource = &self.textures[handle_id];
+            if let RenderResource::Temporal(temporal_id) = texture_resource {
+                if *temporal_id == temporal_handle.id {
+                    return RGHandle::new(handle_id);
+                }
+            }
+        }
+
+        // Register the texture
+        let id = self.textures.len();
+        self.textures
+            .push(RenderResource::Temporal(temporal_handle.id));
+        let handle = RGHandle::new(id);
+
+        // Cehck sanity
+        assert!(!self.transient_to_temporal_textures.contains_key(&handle));
+
+        handle
+    }
+
     pub fn get_texture_desc(&self, texture: RGHandle<Texture>) -> &TextureDesc {
         match &self.textures[texture.id] {
             RenderResource::Virtual(desc) => desc,
+            RenderResource::Temporal(_) => todo!("Temporal resources are in cache"),
             RenderResource::External(texture) => &texture.desc,
         }
     }
@@ -493,6 +621,7 @@ impl<'a> RenderGraphBuilder<'a> {
     pub fn get_texture_desc_from_view(&self, texture_view: RGHandle<TextureView>) -> &TextureDesc {
         match &self.texture_views[texture_view.id] {
             RenderResource::Virtual(virtual_view) => self.get_texture_desc(virtual_view.texture),
+            RenderResource::Temporal(_) => panic!("Temporal resources are in cache"),
             RenderResource::External(texture_view) => &texture_view.texture.desc,
         }
     }
@@ -515,6 +644,7 @@ impl RenderGraphBuilder<'_> {
         let resource = &self.textures[handle.id];
         match resource {
             RenderResource::Virtual(_) => ctx.textures[handle.id].unwrap(),
+            RenderResource::Temporal(_) => ctx.textures[handle.id].unwrap(),
             RenderResource::External(texture) => *texture,
         }
     }
@@ -529,6 +659,7 @@ impl RenderGraphBuilder<'_> {
         let resource = &self.texture_views[handle.id];
         match resource {
             RenderResource::Virtual(_) => ctx.texture_views[handle.id].unwrap(),
+            RenderResource::Temporal(_) => ctx.texture_views[handle.id].unwrap(),
             RenderResource::External(view) => *view,
         }
     }
@@ -538,6 +669,7 @@ impl RenderGraphBuilder<'_> {
         let accel_struct = &self.accel_structs[handle.id];
         match accel_struct {
             RenderResource::Virtual(_) => unimplemented!(),
+            RenderResource::Temporal(_) => unimplemented!(),
             RenderResource::External(accel_struct) => *accel_struct,
         }
     }
@@ -585,15 +717,7 @@ impl RenderGraphBuilder<'_> {
 
             let mut builder = vk::RenderingAttachmentInfoKHR::builder()
                 .image_view(image_view)
-                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .clear_value(vk::ClearValue {
-                    depth_stencil: vk::ClearDepthStencilValue {
-                        depth: 0.0,
-                        stencil: 0,
-                    },
-                });
+                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
 
             builder = match target.load_op {
                 DepthLoadOp::Load => builder.load_op(vk::AttachmentLoadOp::LOAD),
@@ -740,185 +864,134 @@ impl RenderGraphBuilder<'_> {
         pass_index: u32,
     ) {
         // helper
-        let get_last_mutating_pass =
-            |tex_view: TextureView, end_pass_index: u32| -> Option<(u32, vk::ImageLayout)> {
-                for pass_index in (0..end_pass_index).rev() {
-                    let pass = &self.passes[pass_index as usize];
-                    // Check all mutating view
-                    for rt in &pass.color_targets {
-                        let rt_view = self.get_texture_view(ctx, rt.view);
-                        if (rt_view.texture == tex_view.texture)
-                            && (rt_view.desc.aspect == tex_view.desc.aspect)
-                        {
-                            return Some((pass_index, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL));
-                        }
-                    }
-                    for rw in &pass.rw_textures {
-                        let rw_view = self.get_texture_view(ctx, rw.1);
-                        if (rw_view.texture == tex_view.texture)
-                            && (rw_view.desc.aspect == tex_view.desc.aspect)
-                        {
-                            return Some((pass_index, vk::ImageLayout::GENERAL));
-                        }
+        let map_stage_mask = |pass: &RenderPass<'_>| match pass.ty {
+            RenderPassType::Graphics => vk::PipelineStageFlags::ALL_GRAPHICS, // TODO fragment access? vertex access? color output?
+            RenderPassType::Compute => vk::PipelineStageFlags::COMPUTE_SHADER,
+            RenderPassType::RayTracing => vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
+            RenderPassType::Copy => vk::PipelineStageFlags::TRANSFER,
+            RenderPassType::Present => vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+        };
+
+        let get_last_access = |image: vk::Image,
+                               aspect: vk::ImageAspectFlags,
+                               end_pass_index: u32|
+         -> Option<(u32, vk::ImageLayout)> {
+            for pass_index in (0..end_pass_index).rev() {
+                let pass = &self.passes[pass_index as usize];
+                // Check all mutating view
+                for rt in &pass.color_targets {
+                    let rt_view = self.get_texture_view(ctx, rt.view);
+                    if (rt_view.texture.image == image) && (rt_view.desc.aspect == aspect) {
+                        return Some((pass_index, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL));
                     }
                 }
-                None
-            };
-
-        // helper
-        let get_first_read_pass = |tex_view: TextureView, pass_range: std::ops::Range<u32>| {
-            for pass_index in pass_range {
-                let pass = &self.passes[pass_index as usize];
-                for (_name, srv) in &pass.textures {
-                    let read_view = self.get_texture_view(ctx, *srv);
-                    if (read_view.texture == tex_view.texture)
-                        && (read_view.desc.aspect == tex_view.desc.aspect)
-                    {
-                        return Some(pass_index);
+                if let Some(rt) = pass.depth_stencil {
+                    let rt_view = self.get_texture_view(ctx, rt.view);
+                    if (rt_view.texture.image == image) && (rt_view.desc.aspect == aspect) {
+                        return Some((
+                            pass_index,
+                            vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                        ));
+                    }
+                }
+                for rw in &pass.rw_textures {
+                    let rw_view = self.get_texture_view(ctx, rw.1);
+                    if (rw_view.texture.image == image) && (rw_view.desc.aspect == aspect) {
+                        return Some((pass_index, vk::ImageLayout::GENERAL));
+                    }
+                }
+                if let Some(copy_dst) = pass.copy_dst {
+                    let dst = self.get_texture_view(ctx, copy_dst);
+                    if (dst.texture.image == image) && (dst.desc.aspect == aspect) {
+                        return Some((pass_index, vk::ImageLayout::TRANSFER_DST_OPTIMAL));
+                    }
+                }
+                // Check all sampling view
+                for tex_view in &pass.textures {
+                    let tex_view = self.get_texture_view(ctx, tex_view.1);
+                    if (tex_view.texture.image == image) && (tex_view.desc.aspect == aspect) {
+                        return Some((pass_index, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL));
+                    }
+                }
+                if let Some(copy_src) = pass.copy_src {
+                    let src = self.get_texture_view(ctx, copy_src);
+                    if (src.texture.image == image) && (src.desc.aspect == aspect) {
+                        return Some((pass_index, vk::ImageLayout::TRANSFER_SRC_OPTIMAL));
                     }
                 }
             }
             None
         };
 
-        // helper
-        let map_stage_mask = |pass: &RenderPass<'_>| match pass.ty {
-            RenderPassType::Graphics => vk::PipelineStageFlags::ALL_GRAPHICS, // TODO fragment access? vertex access? color output?
-            RenderPassType::Compute => vk::PipelineStageFlags::COMPUTE_SHADER,
-            RenderPassType::RayTracing => vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
-            RenderPassType::Present => vk::PipelineStageFlags::BOTTOM_OF_PIPE,
-        };
-
         let pass = &self.passes[pass_index as usize];
 
-        // Check read-only textures
-        for (_name, handle) in &pass.textures {
-            let view = self.get_texture_view(ctx, *handle);
-            let texture = view.texture;
-
-            if let Some((mutating_pass_index, old_layout)) =
-                get_last_mutating_pass(view, pass_index)
-            {
-                if let Some(first_read_index) =
-                    get_first_read_pass(view, mutating_pass_index..pass_index)
+        let transition_to =
+            |image: vk::Image, range: vk::ImageSubresourceRange, new_layout: vk::ImageLayout| {
+                if let Some((last_pass_index, last_layout)) =
+                    get_last_access(image, vk::ImageAspectFlags::COLOR, pass_index)
                 {
-                    // If already transitioned, skip
-                    if first_read_index < pass_index {
-                        continue;
+                    if last_layout != new_layout {
+                        command_buffer.transition_image_layout(
+                            image,
+                            map_stage_mask(&self.passes[last_pass_index as usize]),
+                            map_stage_mask(pass),
+                            last_layout,
+                            new_layout,
+                            range,
+                        )
                     }
-                }
-
-                let dependent_pass = &self.passes[mutating_pass_index as usize];
-                let src_stage_mask = map_stage_mask(dependent_pass);
-                let dst_stage_mask = map_stage_mask(pass);
-                let new_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
-
-                /*
-                println!(
-                    "RenderGraph::{}: Transition for {}, {:?} -> {:?}",
-                    pass.name, name, old_layout, new_layout
-                );
-                */
-
-                command_buffer.transition_image_layout(
-                    texture.image,
-                    src_stage_mask,
-                    dst_stage_mask,
-                    old_layout,
-                    new_layout,
-                    view.desc.make_subresource_range(),
-                )
-            } else {
-                command_buffer.transition_image_layout(
-                    texture.image,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    map_stage_mask(pass),
-                    vk::ImageLayout::UNDEFINED,
-                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    view.desc.make_subresource_range(),
-                );
-            }
-        }
-
-        let transition_for_mutates =
-            |handle: RGHandle<TextureView>, _name: &str, new_layout: vk::ImageLayout| {
-                let view = self.get_texture_view(ctx, handle);
-                let texture = view.texture;
-
-                if let Some((mutating_pass_index, mutates_layout)) =
-                    get_last_mutating_pass(view, pass_index)
-                {
-                    let src_stage_mask: vk::PipelineStageFlags;
-                    let old_layout: vk::ImageLayout;
-                    // If last access is a Read
-                    if let Some(last_read_index) =
-                        get_first_read_pass(view, pass_index..mutating_pass_index)
-                    {
-                        let last_read_pass = &self.passes[last_read_index as usize];
-                        src_stage_mask = map_stage_mask(last_read_pass);
-                        old_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
-                    } else {
-                        // Else, last acces is a mutate
-                        let dependent_pass = &self.passes[mutating_pass_index as usize];
-                        src_stage_mask = map_stage_mask(dependent_pass);
-                        old_layout = mutates_layout;
-                    }
-
-                    let dst_stage_mask = map_stage_mask(pass);
-
-                    /*
-                    println!(
-                        "RenderGraph::{}: Transition for {}: {:?} -> {:?}",
-                        pass.name, name, old_layout, new_layout
-                    );
-                    */
-
-                    command_buffer.transition_image_layout(
-                        texture.image,
-                        src_stage_mask,
-                        dst_stage_mask,
-                        old_layout,
-                        new_layout,
-                        view.desc.make_subresource_range(),
-                    )
                 } else {
+                    // TODO support temporal resource
                     command_buffer.transition_image_layout(
-                        texture.image,
+                        image,
                         vk::PipelineStageFlags::TOP_OF_PIPE,
                         map_stage_mask(pass),
                         vk::ImageLayout::UNDEFINED,
                         new_layout,
-                        view.desc.make_subresource_range(),
+                        range,
                     )
-                }
+                };
             };
 
-        // Check read-write textures
-        for (name, handle) in &pass.rw_textures {
-            transition_for_mutates(*handle, name, vk::ImageLayout::GENERAL);
-        }
-
-        // Check color targets textures
-        for (rt_index, rt) in pass.color_targets.iter().enumerate() {
-            transition_for_mutates(
-                rt.view,
-                &format!("color_target_{}", rt_index),
-                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+        let transition_view_to = |handle: RGHandle<TextureView>, layout: vk::ImageLayout| {
+            let view = self.get_texture_view(ctx, handle);
+            transition_to(
+                view.texture.image,
+                view.desc.make_subresource_range(),
+                layout,
             );
+        };
+
+        for (_name, handle) in &pass.textures {
+            transition_view_to(*handle, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
         }
 
-        // Check denpth stencil
+        for (_name, handle) in &pass.rw_textures {
+            transition_view_to(*handle, vk::ImageLayout::GENERAL);
+        }
+
+        for (_rt_index, rt) in pass.color_targets.iter().enumerate() {
+            transition_view_to(rt.view, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+        }
+
         if let Some(ds) = pass.depth_stencil {
-            transition_for_mutates(
+            transition_view_to(
                 ds.view,
-                "depth_stencil",
                 vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL, // TODO finer grain for depth-stencil access
             );
         }
 
+        if let Some(copy_src) = pass.copy_src {
+            transition_view_to(copy_src, vk::ImageLayout::TRANSFER_SRC_OPTIMAL);
+        }
+
+        if let Some(copy_dst) = pass.copy_dst {
+            transition_view_to(copy_dst, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+        }
+
         // Special: check present, transition after last access
         if let Some(present_tex) = pass.present_texture {
-            transition_for_mutates(present_tex, "present", vk::ImageLayout::PRESENT_SRC_KHR);
+            transition_view_to(present_tex, vk::ImageLayout::PRESENT_SRC_KHR);
         }
     }
 
@@ -945,6 +1018,10 @@ impl RenderGraphBuilder<'_> {
                         .unwrap_or_else(|| rd.create_texture(*desc).unwrap());
                     Some(tex)
                 }
+                RenderResource::Temporal(temporal_id) => {
+                    let tex = cache.temporal_textures.remove(temporal_id).unwrap();
+                    Some(tex)
+                }
                 RenderResource::External(_) => None,
             };
             exec_context.textures.push(texture);
@@ -955,14 +1032,16 @@ impl RenderGraphBuilder<'_> {
                 // Create texture view
                 RenderResource::Virtual(virtual_view) => {
                     let texture = self.get_texture(&exec_context, virtual_view.texture);
+                    let view_desc = virtual_view
+                        .desc
+                        .unwrap_or_else(|| TextureViewDesc::auto(&texture.desc));
                     let view = cache
                         .texture_view_pool
-                        .pop(&virtual_view.desc)
-                        .unwrap_or_else(|| {
-                            rd.create_texture_view(texture, virtual_view.desc).unwrap()
-                        });
+                        .pop(&(texture, view_desc))
+                        .unwrap_or_else(|| rd.create_texture_view(texture, view_desc).unwrap());
                     Some(view)
                 }
+                RenderResource::Temporal(_) => panic!("No temporal texture view"),
                 RenderResource::External(_) => None,
             };
             exec_context.texture_views.push(view);
@@ -986,11 +1065,8 @@ impl RenderGraphBuilder<'_> {
                     }
                 }
                 None => {
-                    if pass.ty != RenderPassType::Present {
-                        println!(
-                        "Warning[RenderGraph]: pipeline not provided by pass {}; temporal descriptor set is not created.",
-                        pass.name
-                    );
+                    if (pass.ty != RenderPassType::Present) && (pass.ty != RenderPassType::Copy) {
+                        println!("Warning[RenderGraph]: pipeline not provided by pass {}; temporal descriptor set is not created.", pass.name);
                     }
                     vk::DescriptorSet::null()
                 }
@@ -1026,6 +1102,7 @@ impl RenderGraphBuilder<'_> {
                     RenderPassType::Graphics => vk::PipelineBindPoint::GRAPHICS,
                     RenderPassType::Compute => vk::PipelineBindPoint::COMPUTE,
                     RenderPassType::RayTracing => vk::PipelineBindPoint::RAY_TRACING_KHR,
+                    RenderPassType::Copy => panic!("Copy pass should not have pipeline"),
                     RenderPassType::Present => panic!("Present pass should not have pipeline"),
                 };
                 command_buffer.bind_pipeline(bind_point, pipeline.handle);
@@ -1047,11 +1124,33 @@ impl RenderGraphBuilder<'_> {
                 render(command_buffer, &shaders, pass);
                 command_buffer.insert_checkpoint();
             } else {
-                if pass.ty != RenderPassType::Present {
-                    println!(
+                match pass.ty {
+                    RenderPassType::Present => {}
+                    RenderPassType::Copy => {
+                        let src = self.get_texture_view(&exec_context, pass.copy_src.unwrap());
+                        let dst = self.get_texture_view(&exec_context, pass.copy_dst.unwrap());
+                        let region = vk::ImageCopy {
+                            src_subresource: src.desc.make_subresrouce_layer(),
+                            src_offset: vk::Offset3D::default(),
+                            dst_subresource: dst.desc.make_subresrouce_layer(),
+                            dst_offset: vk::Offset3D::default(),
+                            extent: dst.texture.desc.size_3d(),
+                        };
+                        unsafe {
+                            command_buffer.device.cmd_copy_image(
+                                command_buffer.command_buffer,
+                                src.texture.image,
+                                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                                dst.texture.image,
+                                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                                std::slice::from_ref(&region),
+                            );
+                        }
+                    }
+                    _ => println!(
                         "Warning[RenderGraph]: render callback not provided by pass {}!",
                         pass.name
-                    );
+                    ),
                 }
             }
 
@@ -1064,13 +1163,22 @@ impl RenderGraphBuilder<'_> {
 
         command_buffer.insert_checkpoint();
 
+        // Process all textures converted to temporals
+        for (handle, temporal_handle) in &self.transient_to_temporal_textures {
+            let tex = exec_context.textures[handle.id].take().unwrap();
+            cache.temporal_textures.insert(temporal_handle.id, tex);
+        }
+        self.transient_to_temporal_textures.clear();
+
         // Pool back all resource objects
         for view in exec_context
             .texture_views
             .drain(0..exec_context.texture_views.len())
         {
             if let Some(view) = view {
-                cache.texture_view_pool.push(view.desc, view);
+                cache
+                    .texture_view_pool
+                    .push((view.texture, view.desc), view);
             }
         }
         for texture in exec_context.textures.drain(0..exec_context.textures.len()) {

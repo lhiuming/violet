@@ -312,7 +312,7 @@ impl StreamLinedFrameResource {
         command_buffer
     }
 
-    pub fn update_frame_params(&mut self, params: FrameParams) {
+    pub fn update_frame_params(&self, params: FrameParams) {
         self.desciptor_sets
             .update_frame_params(self.render_index, params);
     }

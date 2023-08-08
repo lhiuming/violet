@@ -397,11 +397,13 @@ pub struct CompiledShader {
     pub program: PipelineProgram,
 }
 
-struct IncludeHandler {}
+struct IncludeHandler {
+    include_root: PathBuf,
+}
 
 impl hassle_rs::DxcIncludeHandler for IncludeHandler {
     fn load_source(&self, filename: String) -> Option<String> {
-        let path = PathBuf::new().join("./shader").join(filename);
+        let path = self.include_root.join(filename);
         match std::fs::File::open(path) {
             Ok(mut f) => {
                 let mut content = String::new();
@@ -476,9 +478,15 @@ impl ShaderLoader {
 
         // Compile the shader
         let file_name_os = path.file_name().unwrap();
+        let file_dir = path.parent().unwrap().to_owned();
         let file_name = file_name_os.to_str().unwrap();
-        let compiled_binary =
-            self.compile_hlsl(file_name, &text, &shader_def.entry_point, shader_def.stage)?;
+        let compiled_binary = self.compile_hlsl(
+            file_name,
+            &text,
+            &shader_def.entry_point,
+            shader_def.stage,
+            file_dir,
+        )?;
 
         let program = match create_pipeline_program(device, &compiled_binary, &shader_def) {
             Some(program) => program,
@@ -494,6 +502,7 @@ impl ShaderLoader {
         shader_text: &str,
         entry_point: &str,
         stage: ShaderStage,
+        source_dir: PathBuf,
     ) -> Option<Vec<u8>> {
         let blob = self
             .library
@@ -531,7 +540,9 @@ impl ShaderLoader {
             entry_point,
             target_profile,
             &args,
-            Some(Box::new(IncludeHandler {})),
+            Some(Box::new(IncludeHandler {
+                include_root: source_dir,
+            })),
             &[],
         );
 

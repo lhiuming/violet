@@ -43,6 +43,21 @@ impl PhysicalDevice {
     }
 }
 
+// Convinient accessors
+impl PhysicalDevice {
+    #[inline]
+    pub fn shader_group_handle_size(&self) -> u32 {
+        self.ray_tracing_pipeline_properties
+            .shader_group_handle_size
+    }
+
+    #[inline]
+    pub fn shader_group_base_alignment(&self) -> u32 {
+        self.ray_tracing_pipeline_properties
+            .shader_group_base_alignment
+    }
+}
+
 pub struct RenderDevice {
     pub entry: ash::Entry,
     pub instance: ash::Instance,
@@ -500,9 +515,9 @@ impl SwapchainEntry {
     fn create(&self, device: &ash::Device, surface: &Surface, extent: &vk::Extent2D) -> Swapchain {
         let mut ret = Swapchain::default();
         ret.extent = *extent;
+        //let image_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::STORAGE // compute post processing
 
-        let image_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::STORAGE // compute post processing
-        ;
+        let image_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST;
 
         // Create swapchain object
         let create_info = {
@@ -812,21 +827,33 @@ impl TextureDesc {
             height: self.height,
         }
     }
+
+    pub fn size_3d(&self) -> vk::Extent3D {
+        vk::Extent3D {
+            width: self.width,
+            height: self.height,
+            depth: self.layer_count,
+        }
+    }
 }
 
 // Mini struct for a texture
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub struct Texture {
     pub desc: TextureDesc,
     pub image: vk::Image,
     pub memory: vk::DeviceMemory,
 }
 
+/*
 impl PartialEq for Texture {
     fn eq(&self, other: &Self) -> bool {
         self.image == other.image
     }
 }
+
+impl Eq for Texture {}
+ */
 
 // Mini struct for a texture view
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
@@ -900,6 +927,23 @@ impl TextureViewDesc {
             level_count: self.level_count,
             base_array_layer: self.base_array_layer,
             layer_count: self.layer_count,
+        }
+    }
+
+    pub fn make_subresrouce_layer(&self) -> vk::ImageSubresourceLayers {
+        vk::ImageSubresourceLayers {
+            aspect_mask: self.aspect,
+            mip_level: self.base_mip_level,
+            base_array_layer: self.base_array_layer,
+            layer_count: self.layer_count,
+        }
+    }
+
+    pub fn extent3d(&self) -> vk::Extent3D {
+        vk::Extent3D {
+            width: 0,
+            height: 0,
+            depth: 1,
         }
     }
 }

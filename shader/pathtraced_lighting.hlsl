@@ -2,6 +2,8 @@
 #include "scene_bindings.hlsl"
 #include "frame_bindings.hlsl"
 #include "brdf.hlsl"
+#include "rand.hlsl"
+#include "sampling.hlsl"
 
 /* 
 This is a reference path tracer, not optimized for performance.
@@ -32,86 +34,6 @@ struct PushConstants
 [[vk::push_constant]]
 PushConstants pc;
 
-
-// ----------------
-// PNG for sampling
-
-// from: Ray Tracing Gems II, Chapter 14
-uint jenkins_hash(uint x) {
-    x += x << 10;
-    x ^= x >> 6;
-    x += x << 3;
-    x ^= x >> 11;
-    x += x << 15;
-    return x;
-}
-
-// from: Ray Tracing Gems II, Chapter 14
-uint init_rng(uint2 pixel_coords, uint2 resolution, uint frame) {
-    uint rng_state = dot(pixel_coords, uint2(1, resolution.x)) ^ jenkins_hash(frame);
-    return jenkins_hash(rng_state);
-}
-
-float uint_to_float(uint x) {
-    return asfloat(0x3f800000 | (x >> 9)) - 1.0f;
-}
-
-uint xorshift(inout uint x /* rng state */) {
-    x ^= x << 13;
-    x ^= x >> 17;
-    x ^= x << 5;
-    return x;
-}
-
-float rand(inout uint rng_state) {
-    return uint_to_float(xorshift(rng_state));
-}
-
-// -------------
-// BRDF sampling
-
-// modified: https://github.com/boksajak/referencePT/blob/master/shaders/brdf.h
-float3 sample_hemisphere_cosine(float2 u, out float pdf)
-{
-    float sin_theta = sqrt(u.x);
-    float cos_theta = sqrt(1.0f - u.x); 
-
-    pdf = cos_theta * ONE_OVER_PI;
-
-    float phi = TWO_PI * u.y;
-    float sin_phi, cos_phi;
-    sincos(phi, sin_phi, cos_phi);
-
-    return float3(
-        sin_theta * cos_phi,
-        sin_theta * sin_phi,
-        cos_theta
-    );
-}
-
-// ----------
-// Quaternion
-
-// modified: https://github.com/boksajak/referencePT/blob/master/shaders/brdf.h
-float4 get_rotation_to_z_from(float3 v) {
-    if (v.z < -0.99999f)
-        return float4(1.0f, 0.0f, 0.0f, 0.0f);
-    return normalize(float4(v.y, -v.x, 0.0f, 1.0f + v.z));
-}
-
-// modified: https://github.com/boksajak/referencePT/blob/master/shaders/brdf.h
-float4 invert_rotation(float4 q)
-{
-    return float4(-q.xyz, q.w);
-}
-
-// modified: https://github.com/boksajak/referencePT/blob/master/shaders/brdf.h
-float3 rotate_point(float4 q, float3 v) {
-    float3 axis = q.xyz;
-	return 2.0f * dot(axis, v) * axis + (q.w * q.w - dot(axis, axis)) * v + 2.0f * q.w * cross(axis, v);
-}
-
-
 // Miscs
 float luminance(float3 color) {
     return dot(color, float3(0.2126f, 0.7152f, 0.0722f));
@@ -140,12 +62,12 @@ void raygen() {
     uint2 buffer_size;
     rw_accumulated.GetDimensions(buffer_size.x, buffer_size.y);
 
-    uint rng_state = init_rng(dispatch_id.xy, buffer_size, pc.frame_index);
+    uint rng_state = lcg_init(dispatch_id.xy, buffer_size, pc.frame_index);
 
     // Primary ray direction
     float2 pix_coord = float2(dispatch_id) + 0.5f;
     #if PRIMARY_RAY_JITTER
-    pix_coord += lerp(-0.5f.xx, 0.5f.xx, float2(rand(rng_state), rand(rng_state)));
+    pix_coord += lerp(-0.5f.xx, 0.5f.xx, float2(lcg_rand(rng_state), lcg_rand(rng_state)));
     #endif
     float2 ndc = pix_coord / float2(buffer_size) * 2.0f - 1.0f;
     float4 view_dir_end_h = mul(view_params().inv_view_proj, float4(ndc, 1.0f, 1.0f));
@@ -286,7 +208,7 @@ void raygen() {
             prop_specular = 0.0f;
 #endif
         }
-        bool brdf_is_specular = rand(rng_state) < prop_specular;
+        bool brdf_is_specular = lcg_rand(rng_state) < prop_specular;
         if (brdf_is_specular)
         {
             throughput /= prop_specular;
@@ -297,7 +219,7 @@ void raygen() {
         // Generate bounce sample direction, and calculate sample weight
         float3 brdf_NoL_over_pdf; // := BRDF() * NoL / pdf, also call `sample weight`
         float3 L_local; // bounced direction for next ray, in local space
-        float2 u = float2(rand(rng_state), rand(rng_state));
+        float2 u = float2(lcg_rand(rng_state), lcg_rand(rng_state));
         float4 rot_to_local = get_rotation_to_z_from(hit.normal_ws);
         if (brdf_is_specular) 
         {

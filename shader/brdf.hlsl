@@ -1,8 +1,5 @@
 #pragma once
-
-#define PI 3.14159265359
-#define TWO_PI (2.0f * PI)
-#define ONE_OVER_PI (1.0f / PI)
+#include "constants.hlsl"
 
 // Fresnel with f90
 // https://google.github.io/filament/Filament.md.html#materialsystem/specularbrdf

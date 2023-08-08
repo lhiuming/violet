@@ -379,12 +379,12 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
             });
             let array_uav = rg.create_texture_view(
                 skycube_texture,
-                TextureViewDesc {
+                Some(TextureViewDesc {
                     view_type: vk::ImageViewType::TYPE_2D_ARRAY,
                     format: vk::Format::B10G11R11_UFLOAT_PACK32,
                     aspect: vk::ImageAspectFlags::COLOR,
                     ..Default::default()
-                },
+                }),
             );
 
             rg.new_pass("Sky IBL gen", RenderPassType::Compute)
@@ -410,12 +410,12 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
 
         let skycube = rg.create_texture_view(
             skycube_texture,
-            TextureViewDesc {
+            Some(TextureViewDesc {
                 view_type: vk::ImageViewType::CUBE,
                 format: vk::Format::B10G11R11_UFLOAT_PACK32,
                 aspect: vk::ImageAspectFlags::COLOR,
                 ..Default::default()
-            },
+            }),
         );
 
         // Define GBuffer
@@ -437,12 +437,12 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
 
             let stencil = rg.create_texture_view(
                 gbuffer.depth.0,
-                TextureViewDesc {
+                Some(TextureViewDesc {
                     view_type: vk::ImageViewType::TYPE_2D,
                     format: vk::Format::D24_UNORM_S8_UINT,
                     aspect: vk::ImageAspectFlags::STENCIL,
                     ..Default::default()
-                },
+                }),
             );
 
             rg.new_pass("Sky", RenderPassType::Graphics)
@@ -488,7 +488,7 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
                 vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
             );
             let rt_shadow_tex = rg.create_texutre(tex_desc);
-            rg.create_texture_view(rt_shadow_tex, TextureViewDesc::auto(&tex_desc))
+            rg.create_texture_view(rt_shadow_tex, None)
         };
 
         // Ray Traced Shadow

@@ -2,7 +2,7 @@ use ash::vk;
 
 use crate::{
     command_buffer::StencilOps,
-    render_device::{RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc},
+    render_device::{RenderDevice, Texture, TextureDesc, TextureView},
     render_graph::*,
     render_scene::RenderScene,
     shader::{PushConstantsBuilder, ShaderDefinition, Shaders, ShadersConfig},
@@ -26,10 +26,9 @@ pub fn create_gbuffer_textures(rg: &mut RenderGraphBuilder, size: vk::Extent2D) 
         } else {
             vk::ImageUsageFlags::COLOR_ATTACHMENT
         } | vk::ImageUsageFlags::SAMPLED;
-        let texture_desc = TextureDesc::new_2d(size.width, size.height, format, usage);
-        let texture_view_desc = TextureViewDesc::auto(&texture_desc);
-        let texture = rg.create_texutre(texture_desc);
-        let view = rg.create_texture_view(texture, texture_view_desc);
+        let desc = TextureDesc::new_2d(size.width, size.height, format, usage);
+        let texture = rg.create_texutre(desc);
+        let view = rg.create_texture_view(texture, None);
 
         (texture, view)
     };
