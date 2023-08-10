@@ -5,7 +5,8 @@ use glam::Vec3;
 use violet::{
     command_buffer::{CommandBuffer, StencilOps},
     render_device::{
-        Buffer, RenderDevice, ShaderBindingTableFiller, Texture, TextureDesc, TextureViewDesc,
+        Buffer, BufferDesc, RenderDevice, ShaderBindingTableFiller, Texture, TextureDesc,
+        TextureViewDesc,
     },
     render_graph::*,
     render_loop::gbuffer_pass::*,
@@ -22,17 +23,20 @@ struct SampleGenPass {
     raygen_region: vk::StridedDeviceAddressRegionKHR,
     miss_region: vk::StridedDeviceAddressRegionKHR,
     hit_region: vk::StridedDeviceAddressRegionKHR,
+
+    prev_reservoir_temporal_buffer: RGTemporal<Buffer>,
 }
 
 impl SampleGenPass {
     fn new(rd: &RenderDevice) -> Self {
         let sbt = rd
-            .create_buffer(
-                256,
-                vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR
+            .create_buffer(BufferDesc {
+                size: 256,
+                usage: vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR
                     | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            )
+                memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+            })
             .unwrap();
 
         let handle_size = rd.physical_device.shader_group_handle_size() as u64;
@@ -64,6 +68,7 @@ impl SampleGenPass {
             raygen_region,
             miss_region,
             hit_region,
+            prev_reservoir_temporal_buffer: RGTemporal::null(),
         }
     }
 
@@ -271,7 +276,11 @@ impl RenderLoop for RestirRenderLoop {
 
         let scene_tlas = rg.register_accel_struct(scene.scene_top_level_accel_struct.unwrap());
 
-        // Pass: sample generation
+        let main_len = main_size.width * main_size.height;
+        let restir_temporal_buffer =
+            rg.create_buffer(BufferDesc::compute(main_len as u64 * 24 * 4));
+
+        // Pass: sample generation (and temporal reusing)
         if let Some(pipeline) = shaders.create_raytracing_pipeline(
             ShaderDefinition::raygen("restir/sample_gen.hlsl", "raygen"),
             ShaderDefinition::miss("restir/sample_gen.hlsl", "miss"),
@@ -289,6 +298,16 @@ impl RenderLoop for RestirRenderLoop {
             let miss_sbt = self.sample_gen.miss_region;
             let hit_sbt = self.sample_gen.hit_region;
 
+            let use_prev_frame: u32;
+            let prev_reservoir_temporal_buffer =
+                if self.sample_gen.prev_reservoir_temporal_buffer.is_null() {
+                    use_prev_frame = 0;
+                    restir_temporal_buffer // dummy
+                } else {
+                    use_prev_frame = 1;
+                    rg.convert_to_transient(self.sample_gen.prev_reservoir_temporal_buffer)
+                };
+
             rg.new_pass("Sample_Gen", RenderPassType::RayTracing)
                 .pipeline(pipeline)
                 .descritpro_sets(&common_sets)
@@ -296,12 +315,19 @@ impl RenderLoop for RestirRenderLoop {
                 .texture("gbuffer_depth", gbuffer.depth.1)
                 .texture("gbuffer_color", gbuffer.color.1)
                 .texture("skycube", skycube)
+                .buffer(
+                    "prev_reservoir_temporal_buffer",
+                    prev_reservoir_temporal_buffer,
+                )
+                .buffer("rw_reservoir_temporal_buffer", restir_temporal_buffer)
                 .rw_texture("rw_debug_color", scene_color.1)
                 .render(move |cb, shaders, _| {
                     let pipeline = shaders.get_pipeline(pipeline).unwrap();
                     cb.bind_pipeline(vk::PipelineBindPoint::RAY_TRACING_KHR, pipeline.handle);
 
-                    let pc = PushConstantsBuilder::new().pushv(frame_index);
+                    let pc = PushConstantsBuilder::new()
+                        .pushv(frame_index)
+                        .pushv(use_prev_frame);
                     cb.push_constants(
                         pipeline.layout,
                         pipeline.push_constant_ranges[0].stage_flags,
@@ -319,6 +345,9 @@ impl RenderLoop for RestirRenderLoop {
                         1,
                     );
                 });
+
+            self.sample_gen.prev_reservoir_temporal_buffer =
+                rg.convert_to_temporal(&mut self.render_graph_cache, restir_temporal_buffer);
         }
 
         let post_taa_color = {

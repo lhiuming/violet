@@ -4,8 +4,8 @@ use glam::Vec3;
 use crate::{
     command_buffer::*,
     render_device::{
-        Buffer, RenderDevice, ShaderBindingTableFiller, Texture, TextureDesc, TextureView,
-        TextureViewDesc,
+        Buffer, BufferDesc, RenderDevice, ShaderBindingTableFiller, Texture, TextureDesc,
+        TextureView, TextureViewDesc,
     },
     render_graph,
     render_scene::*,
@@ -27,12 +27,13 @@ impl RayTracedShadowResources {
     pub fn new(rd: &RenderDevice) -> RayTracedShadowResources {
         let sbt_size = 256; // should be big engough
         let sbt = rd
-            .create_buffer(
-                sbt_size,
-                vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR
+            .create_buffer(BufferDesc {
+                size: sbt_size,
+                usage: vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR
                     | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            )
+                memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+            })
             .unwrap();
 
         let handle_size = rd
@@ -118,12 +119,13 @@ impl PathTracedLightingResources {
 
         let sbt_size = group_stride * 3;
         let sbt = rd
-            .create_buffer(
-                sbt_size,
-                vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR
+            .create_buffer(BufferDesc {
+                size: sbt_size,
+                usage: vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR
                     | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            )
+                memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+            })
             .unwrap();
 
         let raygen_region = vk::StridedDeviceAddressRegionKHR {

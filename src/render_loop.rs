@@ -3,7 +3,7 @@ use std::{mem::size_of, slice};
 use ash::vk;
 use glam::{Mat4, Vec3, Vec4, Vec4Swizzles};
 
-use crate::render_device::{Buffer, RenderDevice};
+use crate::render_device::{Buffer, BufferDesc, RenderDevice};
 
 /*
  * Modules
@@ -132,11 +132,12 @@ impl RenderLoopDesciptorSets {
         let frame_params_stride =
             (size_of::<FrameParams>() as u32 + frame_params_align_mask) & !frame_params_align_mask;
         let frame_params_cb = rd
-            .create_buffer(
-                (frame_params_stride * max_sets) as u64,
-                vk::BufferUsageFlags::UNIFORM_BUFFER,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            )
+            .create_buffer(BufferDesc {
+                size: (frame_params_stride * max_sets) as u64,
+                usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+                memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+            })
             .unwrap();
 
         // Create descriptor sets

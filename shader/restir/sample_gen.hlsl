@@ -5,21 +5,30 @@
 #include "../sampling.hlsl"
 #include "../scene_bindings.hlsl"
 
+#include "reservoir.hlsl"
+
 RaytracingAccelerationStructure scene_tlas;
 Texture2D<float> gbuffer_depth;
 Texture2D<uint4> gbuffer_color;
 TextureCube<float4> skycube;
-RWTexture2D<float4> rw_sample_buffer;
+//RWTexture2D<uint4> rw_reservoir_temporal_buffer;
+StructuredBuffer<Reservoir> prev_reservoir_temporal_buffer;
+RWStructuredBuffer<Reservoir> rw_reservoir_temporal_buffer;
 RWTexture2D<float4> rw_debug_color;
 
 struct PushConstants
 {
     uint frame_index;
+    uint use_prev_frame;
 //    uint accumulated_count;
 };
 [[vk::push_constant]]
 PushConstants pc;
 
+// utils
+float luminance(float3 rgb) {
+    return dot(rgb, float3(0.2126f, 0.7152f, 0.0722f));
+}
 
 struct PayloadSecondary {
     bool missed;
@@ -61,6 +70,8 @@ void raygen() {
     
     uint rng_state = lcg_init(dispatch_id.xy, buffer_size, pc.frame_index);
 
+    // Generate Sample Point
+
     // uniform hemisphere sampling
     // TODO blue noise
     float3 sample_dir;
@@ -89,6 +100,8 @@ void raygen() {
             payload // inout payload_t Payload
         );
 
+    // Compute Radiance for the sample point
+
     float3 radiance = 0.0f;
     bool recursive = false;
     if (recursive) {
@@ -96,15 +109,72 @@ void raygen() {
     } else {
         if (payload.missed) {
             radiance = skycube.SampleLevel(sampler_linear_clamp, ray.Direction, 0.0f).rgb;
+
+            // Construct a hit point at skybox if miss
+            payload.position_ws = position_ws + ray.Direction * ray.TMax;
+            payload.normal_ws = -ray.Direction;
         }
         else 
         {
             // TODO radiance cache
-            radiance = payload.base_color * 0.5f;
+            radiance = 0.5f;
         }
     }
 
-    rw_debug_color[dispatch_id] = float4(radiance, 1.0f);
+    const RestirSample new_sample = make_restir_sample(
+        position_ws,
+        gbuffer.normal,
+        payload.position_ws,
+        payload.normal_ws,
+        radiance
+    );
+
+    // Reservoir Temporal Resampling
+    uint buffer_index = buffer_size.x * dispatch_id.y + dispatch_id.x;
+
+    Reservoir reservoir;
+    float target_pdf = luminance(radiance);
+    float w = target_pdf * TWO_PI; // source_pdf = 1 / TWO_PI;
+    if (pc.use_prev_frame)
+    {
+        // read reservoir from prev frame
+        // TODO reproject
+        reservoir = prev_reservoir_temporal_buffer[buffer_index];
+
+        // Bound the temporal information to avoid stale sample
+        if (1)
+        {
+            const uint M_MAX = 20; // [Benedikt 2020]
+            reservoir.M = min(reservoir.M, M_MAX);
+        }
+
+        float prev_target_pdf = luminance(reservoir.z.hit_radiance);
+        float w_sum = reservoir.W * prev_target_pdf * float(reservoir.M);
+
+        // update reservoir with new sample
+        w_sum += w;
+        reservoir.M += 1;
+        float chance = w / w_sum;
+        if (lcg_rand(rng_state) < chance) {
+            reservoir.z = new_sample;
+        }
+        float updated_target_pdf= luminance(reservoir.z.hit_radiance); 
+        reservoir.W = w_sum / ( updated_target_pdf * reservoir.M );
+        reservoir.M = reservoir.M;
+    } 
+    else 
+    {
+        reservoir = init_reservoir(new_sample, target_pdf, w);
+    }
+
+    // store updated reservoir
+    rw_reservoir_temporal_buffer[buffer_index] = reservoir;
+
+    float3 selected_dir = normalize(reservoir.z.hit_pos - position_ws);
+    float NoL = saturate(dot(gbuffer.normal, selected_dir));
+    float3 brdf = gbuffer.color / PI;
+    float3 RIS_estimator = reservoir.z.hit_radiance * brdf * NoL * reservoir.W ;
+    rw_debug_color[dispatch_id] = float4(RIS_estimator, 1.0f);
 }
 
 // ----------------

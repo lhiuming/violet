@@ -7,7 +7,8 @@ use ash::vk;
 
 use crate::command_buffer::CommandBuffer;
 use crate::render_device::{
-    AccelerationStructure, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
+    AccelerationStructure, Buffer, BufferDesc, RenderDevice, Texture, TextureDesc, TextureView,
+    TextureViewDesc,
 };
 use crate::shader::{self, Handle, Pipeline, Shaders};
 
@@ -156,6 +157,8 @@ pub struct RenderPass<'a> {
     external_descritpr_sets: Vec<(u32, vk::DescriptorSet)>,
     descriptor_set_index: u32,
     textures: Vec<(&'a str, RGHandle<TextureView>)>,
+    buffers: Vec<(&'a str, RGHandle<Buffer>)>,
+    rw_buffers: Vec<(&'a str, RGHandle<Buffer>)>,
     accel_structs: Vec<(&'a str, RGHandle<AccelerationStructure>)>,
     color_targets: Vec<ColorTarget>,
     depth_stencil: Option<DepthStencilTarget>,
@@ -175,6 +178,8 @@ impl RenderPass<'_> {
             external_descritpr_sets: Vec::new(),
             descriptor_set_index: 0,
             textures: Vec::new(),
+            buffers: Vec::new(),
+            rw_buffers: Vec::new(),
             accel_structs: Vec::new(),
             color_targets: Vec::new(),
             depth_stencil: None,
@@ -273,6 +278,16 @@ impl<'a, 'b> RenderPassBuilder<'a, 'b> {
         self
     }
 
+    pub fn buffer(mut self, name: &'a str, buffer: RGHandle<Buffer>) -> Self {
+        self.inner().buffers.push((name, buffer));
+        self
+    }
+
+    pub fn rw_buffer(mut self, name: &'a str, buffer: RGHandle<Buffer>) -> Self {
+        self.inner().rw_buffers.push((name, buffer));
+        self
+    }
+
     // Binding acceleration structure to per-pass descriptor set
     pub fn accel_struct(
         mut self,
@@ -358,11 +373,13 @@ pub struct RenderGraphCache {
 
     // Temporal Resources
     temporal_textures: HashMap<usize, Texture>,
+    temporal_buffers: HashMap<usize, Buffer>,
     next_temporal_id: usize,
 
     // Resource pool
     texture_pool: ResPool<TextureDesc, Texture>,
     texture_view_pool: ResPool<(Texture, TextureViewDesc), TextureView>,
+    buffer_pool: ResPool<BufferDesc, Buffer>,
 }
 
 impl RenderGraphCache {
@@ -379,9 +396,11 @@ impl RenderGraphCache {
             vk_descriptor_pool,
             free_vk_descriptor_sets: Vec::new(),
             temporal_textures: HashMap::new(),
+            temporal_buffers: HashMap::new(),
             next_temporal_id: 0,
             texture_pool: ResPool::new(),
             texture_view_pool: ResPool::new(),
+            buffer_pool: ResPool::new(),
         }
     }
 
@@ -426,6 +445,7 @@ struct RenderGraphExecuteContext {
     // Created Resources
     pub textures: Vec<Option<Texture>>,          // by handle::id
     pub texture_views: Vec<Option<TextureView>>, // by handle::id
+    pub buffers: Vec<Option<Buffer>>,            // by handle::id
 
     // Per-pass descriptor set
     pub descriptor_sets: Vec<vk::DescriptorSet>, // by pass index
@@ -436,6 +456,7 @@ impl RenderGraphExecuteContext {
         Self {
             textures: Vec::new(),
             texture_views: Vec::new(),
+            buffers: Vec::new(),
             descriptor_sets: Vec::new(),
         }
     }
@@ -452,16 +473,88 @@ struct VirtualTextureView {
     pub desc: Option<TextureViewDesc>, // if none, use ::auto::(texture::desc)
 }
 
+pub enum ResTypeEnum {
+    Texture,
+    Buffer,
+}
+
+pub trait ResType {
+    fn get_enum() -> ResTypeEnum;
+}
+
+impl ResType for Texture {
+    fn get_enum() -> ResTypeEnum {
+        ResTypeEnum::Texture
+    }
+}
+
+impl ResType for Buffer {
+    fn get_enum() -> ResTypeEnum {
+        ResTypeEnum::Buffer
+    }
+}
+
 // A Render Graph to handle resource transitions automatically
 pub struct RenderGraphBuilder<'a> {
     passes: Vec<RenderPass<'a>>,
 
     transient_to_temporal_textures: HashMap<RGHandle<Texture>, RGTemporal<Texture>>,
+    transient_to_temporal_buffers: HashMap<RGHandle<Buffer>, RGTemporal<Buffer>>,
 
     // Array indexed by RGHandle
     textures: Vec<RenderResource<TextureDesc, Texture>>,
     texture_views: Vec<RenderResource<VirtualTextureView, TextureView>>,
+    buffers: Vec<RenderResource<BufferDesc, Buffer>>,
     accel_structs: Vec<RenderResource<(), AccelerationStructure>>,
+}
+
+// Private stuff
+impl<'a> RenderGraphBuilder<'a> {
+    fn is_virtual<T>(&self, handle: RGHandle<T>) -> bool
+    where
+        T: ResType,
+    {
+        match T::get_enum() {
+            ResTypeEnum::Texture => match self.textures.get(handle.id) {
+                Some(RenderResource::Virtual(_)) => true,
+                _ => false,
+            },
+            ResTypeEnum::Buffer => match self.buffers.get(handle.id) {
+                Some(RenderResource::Virtual(_)) => true,
+                _ => false,
+            },
+        }
+    }
+
+    fn find_converted_temporal<T>(&self, temporal_handle: RGTemporal<T>) -> Option<RGHandle<T>>
+    where
+        T: ResType,
+    {
+        let temporal_id = temporal_handle.id;
+
+        match T::get_enum() {
+            ResTypeEnum::Texture => {
+                for i in 0..self.textures.len() {
+                    if let RenderResource::Temporal(id) = &self.textures[i] {
+                        if *id == temporal_id {
+                            return Some(RGHandle::new(i));
+                        }
+                    }
+                }
+            }
+            ResTypeEnum::Buffer => {
+                for i in 0..self.buffers.len() {
+                    if let RenderResource::Temporal(id) = &self.buffers[i] {
+                        if *id == temporal_id {
+                            return Some(RGHandle::new(i));
+                        }
+                    }
+                }
+            }
+        };
+
+        None
+    }
 }
 
 // Interface
@@ -471,9 +564,11 @@ impl<'a> RenderGraphBuilder<'a> {
             passes: Vec::new(),
 
             transient_to_temporal_textures: HashMap::new(),
+            transient_to_temporal_buffers: HashMap::new(),
 
             textures: Vec::new(),
             texture_views: Vec::new(),
+            buffers: Vec::new(),
             accel_structs: Vec::new(),
         }
     }
@@ -537,6 +632,12 @@ impl<'a> RenderGraphBuilder<'a> {
         RGHandle::new(id)
     }
 
+    pub fn create_buffer(&mut self, desc: BufferDesc) -> RGHandle<Buffer> {
+        let id = self.buffers.len();
+        self.buffers.push(RenderResource::Virtual(desc));
+        RGHandle::new(id)
+    }
+
     pub fn register_accel_struct(
         &mut self,
         accel_struct: AccelerationStructure,
@@ -562,52 +663,69 @@ impl<'a> RenderGraphBuilder<'a> {
     }
 
     // Convert a transient resource to a temporal one (content is kept through frames)
-    pub fn convert_to_temporal(
+    pub fn convert_to_temporal<T>(
         &mut self,
         cache: &mut RenderGraphCache,
-        handle: RGHandle<Texture>,
-    ) -> RGTemporal<Texture> {
-        assert!(match self.textures[handle.id] {
-            RenderResource::Virtual(_) => true,
-            _ => false,
-        });
+        handle: RGHandle<T>,
+    ) -> RGTemporal<T>
+    where
+        T: ResType,
+    {
+        // Validate
+        assert!(self.is_virtual(handle));
 
+        // all type using same temporal id scope... :)
         let temporal_id = cache.next_temporal_id;
         cache.next_temporal_id += 1;
-        let temporal_handle = RGTemporal::<Texture>::new(temporal_id);
 
-        self.transient_to_temporal_textures
-            .insert(handle, temporal_handle);
-
-        RGTemporal::<Texture>::new(temporal_id)
-    }
-
-    // Convert a temporal resource to a transient one (content is discarded after last usage in this frame)
-    pub fn convert_to_transient(
-        &mut self,
-        temporal_handle: RGTemporal<Texture>,
-    ) -> RGHandle<Texture> {
-        // Check if already registered
-        // TOOD make this routine part of self.textures
-        for handle_id in 0..self.textures.len() {
-            let texture_resource = &self.textures[handle_id];
-            if let RenderResource::Temporal(temporal_id) = texture_resource {
-                if *temporal_id == temporal_handle.id {
-                    return RGHandle::new(handle_id);
-                }
+        // record for later caching
+        match T::get_enum() {
+            ResTypeEnum::Texture => {
+                self.transient_to_temporal_textures
+                    .insert(RGHandle::new(handle.id), RGTemporal::new(temporal_id));
+            }
+            ResTypeEnum::Buffer => {
+                self.transient_to_temporal_buffers
+                    .insert(RGHandle::new(handle.id), RGTemporal::new(temporal_id));
             }
         }
 
+        RGTemporal::<T>::new(temporal_id)
+    }
+
+    // Convert a temporal resource to a transient one (content is discarded after last usage in this frame)
+    pub fn convert_to_transient<T>(&mut self, temporal_handle: RGTemporal<T>) -> RGHandle<T>
+    where
+        T: ResType,
+    {
+        // Check if already registered
+        if let Some(handle) = self.find_converted_temporal(temporal_handle) {
+            return handle;
+        }
+
         // Register the texture
-        let id = self.textures.len();
-        self.textures
-            .push(RenderResource::Temporal(temporal_handle.id));
-        let handle = RGHandle::new(id);
+        let id = match T::get_enum() {
+            ResTypeEnum::Texture => {
+                let id = self.textures.len();
+                self.textures
+                    .push(RenderResource::Temporal(temporal_handle.id));
+                assert!(!self
+                    .transient_to_temporal_textures
+                    .contains_key(&RGHandle::new(id)));
+                id
+            }
+            ResTypeEnum::Buffer => {
+                let id = self.buffers.len();
+                self.buffers
+                    .push(RenderResource::Temporal(temporal_handle.id));
+                assert!(!self
+                    .transient_to_temporal_buffers
+                    .contains_key(&RGHandle::new(id)));
+                id
+            }
+        };
 
-        // Cehck sanity
-        assert!(!self.transient_to_temporal_textures.contains_key(&handle));
-
-        handle
+        RGHandle::new(id)
     }
 
     pub fn get_texture_desc(&self, texture: RGHandle<Texture>) -> &TextureDesc {
@@ -661,6 +779,15 @@ impl RenderGraphBuilder<'_> {
             RenderResource::Virtual(_) => ctx.texture_views[handle.id].unwrap(),
             RenderResource::Temporal(_) => ctx.texture_views[handle.id].unwrap(),
             RenderResource::External(view) => *view,
+        }
+    }
+
+    #[inline]
+    fn get_buffer(&self, ctx: &RenderGraphExecuteContext, handle: RGHandle<Buffer>) -> Buffer {
+        match &self.buffers[handle.id] {
+            RenderResource::Virtual(_) => ctx.buffers[handle.id].unwrap(),
+            RenderResource::Temporal(_) => ctx.buffers[handle.id].unwrap(),
+            RenderResource::External(buffer) => *buffer,
         }
     }
 
@@ -784,7 +911,7 @@ impl RenderGraphBuilder<'_> {
         if has_internal_set {
             let mut builder = shader::DescriptorSetWriteBuilder::new();
 
-            let builder = &mut builder;
+            let builder: &mut shader::DescriptorSetWriteBuilder<'_> = &mut builder;
             for (name, handle) in &pass.textures {
                 let view = self.get_texture_view(ctx, *handle);
                 builder.image(
@@ -796,6 +923,14 @@ impl RenderGraphBuilder<'_> {
             for (name, handle) in &pass.rw_textures {
                 let view = self.get_texture_view(ctx, *handle);
                 builder.image(name, view.image_view, vk::ImageLayout::GENERAL);
+            }
+            for (name, handle) in &pass.buffers {
+                let buffer = self.get_buffer(ctx, *handle);
+                builder.buffer(name, buffer.handle);
+            }
+            for (name, handle) in &pass.rw_buffers {
+                let buffer = self.get_buffer(ctx, *handle);
+                builder.buffer(name, buffer.handle);
             }
             for (name, handle) in &pass.accel_structs {
                 let accel_struct = self.get_accel_struct(*handle);
@@ -1046,6 +1181,24 @@ impl RenderGraphBuilder<'_> {
             };
             exec_context.texture_views.push(view);
         }
+        for i in 0..self.buffers.len() {
+            let res = &self.buffers[i];
+            let buffer = match res {
+                RenderResource::Virtual(desc) => {
+                    let buf = cache
+                        .buffer_pool
+                        .pop(&desc)
+                        .unwrap_or_else(|| rd.create_buffer(*desc).unwrap());
+                    Some(buf)
+                }
+                RenderResource::Temporal(temporal_id) => {
+                    let buf = cache.temporal_buffers.remove(temporal_id).unwrap();
+                    Some(buf)
+                }
+                RenderResource::External(_) => None,
+            };
+            exec_context.buffers.push(buffer);
+        }
         // Create (temp) descriptor set for each pass
         for pass in &self.passes {
             let pipeline = shaders.get_pipeline(pass.pipeline);
@@ -1169,6 +1322,10 @@ impl RenderGraphBuilder<'_> {
             cache.temporal_textures.insert(temporal_handle.id, tex);
         }
         self.transient_to_temporal_textures.clear();
+        for (handle, temporal_handle) in &self.transient_to_temporal_buffers {
+            let buf = exec_context.buffers[handle.id].take().unwrap();
+            cache.temporal_buffers.insert(temporal_handle.id, buf);
+        }
 
         // Pool back all resource objects
         for view in exec_context
@@ -1184,6 +1341,11 @@ impl RenderGraphBuilder<'_> {
         for texture in exec_context.textures.drain(0..exec_context.textures.len()) {
             if let Some(texture) = texture {
                 cache.texture_pool.push(texture.desc, texture);
+            }
+        }
+        for buffer in exec_context.buffers.drain(0..exec_context.buffers.len()) {
+            if let Some(buffer) = buffer {
+                cache.buffer_pool.push(buffer.desc, buffer);
             }
         }
         for set in exec_context

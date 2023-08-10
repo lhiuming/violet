@@ -7,7 +7,7 @@ use glam::Vec3;
 use crate::{
     model::Model,
     render_device::{
-        AccelerationStructure, Buffer, RenderDevice, Texture, TextureDesc, TextureView,
+        AccelerationStructure, Buffer, BufferDesc, RenderDevice, Texture, TextureDesc, TextureView,
         TextureViewDesc,
     },
 };
@@ -27,7 +27,7 @@ impl AllocBuffer {
     }
 
     pub fn alloc<'a, T>(&mut self, count: u32) -> (&'a mut [T], u32) {
-        assert!((size_of::<T>() as u32 * count) <= (self.buffer.size as u32 - self.next_pos));
+        assert!((size_of::<T>() as u32 * count) <= (self.buffer.desc.size as u32 - self.next_pos));
         let pos = self.next_pos;
         let size = size_of::<T>() as u32 * count;
         self.next_pos += (size + 3) & !3; // always aligned to 4 bytes
@@ -187,24 +187,26 @@ impl RenderScene {
         let accel_strut_usafe = vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
             | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR;
         let index_buffer = AllocBuffer::new(
-            rd.create_buffer(
-                ib_size,
-                vk::BufferUsageFlags::INDEX_BUFFER
+            rd.create_buffer(BufferDesc {
+                size: ib_size,
+                usage: vk::BufferUsageFlags::INDEX_BUFFER
                     | vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER
                     | accel_strut_usafe,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT, // TODO staing buffer
-            )
+                memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT, // TODO staing buffer
+            })
             .unwrap(),
         );
         let index_buffer_view = rd
             .create_buffer_view(index_buffer.buffer.handle, vk::Format::R16_UINT)
             .unwrap();
         let vertex_buffer = AllocBuffer::new(
-            rd.create_buffer(
-                vb_size,
-                vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER | accel_strut_usafe,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT, // TODO staging buffer
-            )
+            rd.create_buffer(BufferDesc {
+                size: vb_size,
+                usage: vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER | accel_strut_usafe,
+                memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT, // TODO staging buffer
+            })
             .unwrap(),
         );
         let vertex_buffer_view = rd
@@ -214,21 +216,23 @@ impl RenderScene {
         // Material Parameters buffer
         let material_param_size = std::mem::size_of::<MaterialParams>() as vk::DeviceSize;
         let material_param_buffer = rd
-            .create_buffer(
-                material_param_size * 1024,
-                vk::BufferUsageFlags::STORAGE_BUFFER,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT, // TODO staging buffer
-            )
+            .create_buffer(BufferDesc {
+                size: material_param_size * 1024,
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+                memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT, // TODO staging buffer
+            })
             .unwrap();
 
         // Mesh Paramters buffer
         let mesh_param_size = std::mem::size_of::<MeshParams>() as vk::DeviceSize;
         let mesh_param_buffer = rd
-            .create_buffer(
-                mesh_param_size * 1024,
-                vk::BufferUsageFlags::STORAGE_BUFFER,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            )
+            .create_buffer(BufferDesc {
+                size: mesh_param_size * 1024,
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+                memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+            })
             .unwrap();
 
         // Shared samplers
@@ -430,11 +434,12 @@ impl RenderScene {
 
             // Create staging buffer
             let staging_buffer = rd
-                .create_buffer(
-                    texel_count as u64 * 4,
-                    vk::BufferUsageFlags::TRANSFER_SRC,
-                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-                )
+                .create_buffer(BufferDesc {
+                    size: texel_count as u64 * 4,
+                    usage: vk::BufferUsageFlags::TRANSFER_SRC,
+                    memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
+                        | vk::MemoryPropertyFlags::HOST_COHERENT,
+                })
                 .unwrap();
 
             // Read to staging buffer
@@ -750,12 +755,12 @@ impl RenderScene {
 
             // Create buffer
             let buffer = rd
-                .create_buffer(
-                    build_size_info.acceleration_structure_size,
-                    vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
+                .create_buffer(BufferDesc {
+                    size: build_size_info.acceleration_structure_size,
+                    usage: vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
                         | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-                    vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                )
+                    memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                })
                 .unwrap();
 
             // Create AS
@@ -770,12 +775,12 @@ impl RenderScene {
 
             // Create Scratch buffer
             let scratch_buffer = rd
-                .create_buffer(
-                    build_size_info.build_scratch_size,
-                    vk::BufferUsageFlags::STORAGE_BUFFER
+                .create_buffer(BufferDesc {
+                    size: build_size_info.build_scratch_size,
+                    usage: vk::BufferUsageFlags::STORAGE_BUFFER
                         | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-                    vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                )
+                    memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                })
                 .unwrap();
 
             upload_context.immediate_submit(rd, move |cb| {
@@ -810,12 +815,13 @@ impl RenderScene {
         // Create instance buffer
         let num_blas = self.mesh_bottom_level_accel_structs.len();
         let instance_buffer = rd
-            .create_buffer(
-                (size_of::<vk::AccelerationStructureInstanceKHR>() * num_blas) as u64,
-                vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+            .create_buffer(BufferDesc {
+                size: (size_of::<vk::AccelerationStructureInstanceKHR>() * num_blas) as u64,
+                usage: vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
                     | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            )
+                memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+            })
             .unwrap();
 
         // Traverse all BLAS to fill the instance buffer
@@ -845,7 +851,7 @@ impl RenderScene {
             let dst = unsafe {
                 std::slice::from_raw_parts_mut::<vk::AccelerationStructureInstanceKHR>(
                     instance_buffer.data as _,
-                    instance_buffer.size as usize,
+                    instance_buffer.desc.size as usize,
                 )
             };
             dst[index] = instance;
@@ -887,12 +893,12 @@ impl RenderScene {
 
         // Create buffer
         let buffer = rd
-            .create_buffer(
-                build_size_info.acceleration_structure_size,
-                vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
+            .create_buffer(BufferDesc {
+                size: build_size_info.acceleration_structure_size,
+                usage: vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
                     | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            )
+                memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            })
             .unwrap();
 
         // Create AS
@@ -907,11 +913,12 @@ impl RenderScene {
 
         // Create Scratch buffer
         let scratch_buffer = rd
-            .create_buffer(
-                build_size_info.build_scratch_size,
-                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            )
+            .create_buffer(BufferDesc {
+                size: build_size_info.build_scratch_size,
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            })
             .unwrap();
 
         // Build

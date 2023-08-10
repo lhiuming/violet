@@ -649,32 +649,55 @@ impl RenderDevice {
  * Common Resource Types
  */
 
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+pub struct BufferDesc {
+    pub size: u64,
+    pub usage: vk::BufferUsageFlags,
+    pub memory_property: vk::MemoryPropertyFlags,
+}
+
+impl BufferDesc {
+    // Read/Write in GPU
+    pub fn compute(size: u64) -> Self {
+        Self {
+            size,
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+            memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 pub struct Buffer {
+    pub desc: BufferDesc,
     pub handle: vk::Buffer,
     pub memory: vk::DeviceMemory,
-    pub size: u64,
     pub data: *mut u8, // TODO make optional
     pub device_address: Option<vk::DeviceAddress>,
 }
 
 impl RenderDevice {
-    pub fn create_buffer(
-        &self,
-        size: u64,
-        usage: vk::BufferUsageFlags,
-        memory_property: vk::MemoryPropertyFlags,
-    ) -> Option<Buffer> {
+    pub fn create_buffer(&self, desc: BufferDesc) -> Option<Buffer> {
         let device = &self.device_entry;
 
         // Create the vk buffer object
         // TODO drop buffer if later stage failed
         let buffer = {
-            let create_info = vk::BufferCreateInfo::builder().size(size).usage(usage);
-            unsafe { device.create_buffer(&create_info, None) }.ok()?
+            let create_info = vk::BufferCreateInfo::builder()
+                .size(desc.size)
+                .usage(desc.usage);
+            match unsafe { device.create_buffer(&create_info, None) } {
+                Ok(buffer) => buffer,
+                Err(err) => {
+                    println!("RenderDevice: (Vulkan) failed to create buffer: {:?}", err);
+                    return None;
+                }
+            }
         };
 
-        let has_device_address = usage.contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
+        let has_device_address = desc
+            .usage
+            .contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
 
         // Allocate memory for ths buffer
         // TODO drop device_memory if later stage failed
@@ -689,7 +712,7 @@ impl RenderDevice {
             */
             let memory_type_index = self
                 .physical_device
-                .pick_memory_type_index(mem_req.memory_type_bits, memory_property)
+                .pick_memory_type_index(mem_req.memory_type_bits, desc.memory_property)
                 .unwrap();
 
             let mut flags = vk::MemoryAllocateFlags::default();
@@ -703,12 +726,24 @@ impl RenderDevice {
                 .allocation_size(mem_req.size)
                 .memory_type_index(memory_type_index)
                 .push_next(&mut flag_info);
-            unsafe { device.allocate_memory(&create_info, None) }.ok()?
+            match unsafe { device.allocate_memory(&create_info, None) } {
+                Ok(mem) => mem,
+                Err(err) => {
+                    println!("RenderDevice: (Vulkan) failed to bind buffer: {:?}", err);
+                    return None;
+                }
+            }
         };
 
         // Bind
         let offset: vk::DeviceSize = 0;
-        unsafe { device.bind_buffer_memory(buffer, memory, offset) }.ok()?;
+        match unsafe { device.bind_buffer_memory(buffer, memory, offset) } {
+            Ok(_) => {}
+            Err(err) => {
+                println!("RenderDevice: (Vulkan) failed to bind buffer: {:?}", err);
+                return None;
+            }
+        }
 
         // Get address (for later use, e.g. ray tracing)
         let device_address = if has_device_address {
@@ -722,18 +757,20 @@ impl RenderDevice {
 
         // Map (staging buffer) persistently
         // TODO unmap if later stage failed
-        let is_mappable = memory_property.contains(vk::MemoryPropertyFlags::HOST_VISIBLE);
+        let is_mappable = desc
+            .memory_property
+            .contains(vk::MemoryPropertyFlags::HOST_VISIBLE);
         let data = if is_mappable {
             let map_flags = vk::MemoryMapFlags::default(); // dummy parameter
-            unsafe { device.map_memory(memory, offset, size, map_flags) }.unwrap() as *mut u8
+            unsafe { device.map_memory(memory, offset, desc.size, map_flags) }.unwrap() as *mut u8
         } else {
             std::ptr::null_mut::<u8>()
         };
 
         Some(Buffer {
+            desc,
             handle: buffer,
             memory,
-            size,
             data,
             device_address,
         })
@@ -1071,7 +1108,7 @@ impl RenderDevice {
         size: u64,
         ty: vk::AccelerationStructureTypeKHR,
     ) -> Option<AccelerationStructure> {
-        assert!(buffer.size >= (offset + size));
+        assert!(buffer.desc.size >= (offset + size));
         assert!(offset & 0xff == 0); // required by spec
         let create_info: vk::AccelerationStructureCreateInfoKHRBuilder<'_> =
             vk::AccelerationStructureCreateInfoKHR::builder()
