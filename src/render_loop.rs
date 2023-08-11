@@ -33,6 +33,7 @@ pub trait RenderLoop {
  * Common Types
  */
 
+#[derive(Clone, Copy)]
 pub struct ViewInfo {
     pub view_position: Vec3,
     pub view_transform: Mat4,
@@ -50,12 +51,19 @@ pub struct FrameParams {
     pub view_ray_right_shift: Vec4,
     pub view_ray_down_shift: Vec4,
 
+    pub prev_view_proj: Mat4,
+
     pub sun_dir: Vec4,
     pub sun_inten: Vec4,
 }
 
 impl FrameParams {
-    pub fn make(view_info: &ViewInfo, sun_dir: &Vec3, sun_inten: &Vec3) -> Self {
+    pub fn make(
+        view_info: &ViewInfo,
+        prev_view_info: Option<&ViewInfo>,
+        sun_dir: &Vec3,
+        sun_inten: &Vec3,
+    ) -> Self {
         // From row major float4x4 to column major Mat4
         let view_proj = view_info.projection * view_info.view_transform;
         let inv_proj = view_proj.inverse();
@@ -69,6 +77,12 @@ impl FrameParams {
         let view_ray_left = ndc_to_ray(Vec4::new(-1.0, 0.0, 1.0, 1.0));
         let view_ray_up = ndc_to_ray(Vec4::new(0.0, -1.0, 1.0, 1.0));
         let view_ray_down = ndc_to_ray(Vec4::new(0.0, 1.0, 1.0, 1.0));
+
+        let prev_view_proj = match prev_view_info {
+            Some(view_info) => view_info.projection * view_info.view_transform,
+            None => view_proj,
+        };
+
         Self {
             view_proj: view_proj,
             inv_view_proj: view_proj.inverse(),
@@ -76,6 +90,7 @@ impl FrameParams {
             view_ray_top_left: view_ray_top_left.extend(0.0),
             view_ray_right_shift: (view_ray_right - view_ray_left).extend(0.0),
             view_ray_down_shift: (view_ray_down - view_ray_up).extend(0.0),
+            prev_view_proj,
             sun_dir: sun_dir.extend(0.0),
             sun_inten: sun_inten.extend(0.0),
         }

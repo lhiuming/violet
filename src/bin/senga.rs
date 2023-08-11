@@ -104,6 +104,7 @@ impl RenderLoop for SengaRenderLoop {
         let sun_inten = Vec3::new(0.7, 0.7, 0.6) * PI * exposure;
         self.stream_lined.update_frame_params(FrameParams::make(
             &view_info,
+            None,
             &scene.sun_dir,
             &sun_inten,
         ));

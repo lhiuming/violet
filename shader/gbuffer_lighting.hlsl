@@ -28,7 +28,7 @@ float3 cal_lighting(float3 v /*view*/, float3 l /*light*/, float3 n /*normal*/, 
 
     float D = D_GGX(NoH, roughness);
     float3 F = F_Schlick(LoH, specularColor);
-    float V = V_SmithGGXCorrelated(NoV, NoL, roughness);
+    float V = vis_smith_G2_height_correlated_GGX(NoV, NoL, roughness);
 
     // specular BRDF
     float3 Fr = (D * V) * F;

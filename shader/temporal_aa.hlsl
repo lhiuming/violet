@@ -8,5 +8,6 @@ void main(uint2 dispatch_id : SV_DispatchThreadID) {
     float3 src = source[dispatch_id];
     float3 hsty = history[dispatch_id];
     float3 blended = lerp(hsty, src, 1.0 / 8);
+
     rw_target[dispatch_id] = float4(blended, 1.0f);
 }

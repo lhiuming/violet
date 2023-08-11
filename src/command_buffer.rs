@@ -108,10 +108,10 @@ impl CommandBuffer {
 
     pub fn trace_rays(
         &self,
-        raygen_shader_binding_tables: &vk::StridedDeviceAddressRegionKHR,
-        miss_shader_binding_tables: &vk::StridedDeviceAddressRegionKHR,
-        hit_shader_binding_tables: &vk::StridedDeviceAddressRegionKHR,
-        callable_shader_binding_tables: &vk::StridedDeviceAddressRegionKHR,
+        raygen_sbt: &vk::StridedDeviceAddressRegionKHR,
+        miss_sbt: &vk::StridedDeviceAddressRegionKHR,
+        hit_sbt: &vk::StridedDeviceAddressRegionKHR,
+        callable_sbt: &vk::StridedDeviceAddressRegionKHR,
         width: u32,
         height: u32,
         depth: u32,
@@ -119,10 +119,10 @@ impl CommandBuffer {
         unsafe {
             self.raytracing_pipeline.cmd_trace_rays(
                 self.command_buffer,
-                raygen_shader_binding_tables,
-                miss_shader_binding_tables,
-                hit_shader_binding_tables,
-                callable_shader_binding_tables,
+                raygen_sbt,
+                miss_sbt,
+                hit_sbt,
+                callable_sbt,
                 width,
                 height,
                 depth,

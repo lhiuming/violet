@@ -29,14 +29,6 @@ float D_GGX(float NoH, float roughness) {
 }
 
 // https://google.github.io/filament/Filament.md.html#materialsystem/specularbrdf
-float V_SmithGGXCorrelated(float NoV, float NoL, float roughness) {
-    float a2 = roughness * roughness;
-    float GGXV = NoL * sqrt(NoV * NoV * (1.0 - a2) + a2);
-    float GGXL = NoV * sqrt(NoL * NoL * (1.0 - a2) + a2);
-    return 0.5 / (GGXV + GGXL);
-}
-
-// https://google.github.io/filament/Filament.md.html#materialsystem/specularbrdf
 float Fd_Lambert() {
     return 1.0 / PI;
 }
@@ -138,4 +130,31 @@ float smith_G2_over_G1_height_correlated_GGX(float NoL, float NoV, float roughne
     float k_L = sqrt( (-r2 * NoL + NoL) * NoL + r2 ) / NoL;
     return (1.0f + k_V) / (k_V + k_L);
 #endif
+}
+
+// Combined BRDF evaluation
+float3 eval_GGX_Lambertian(float3 v, float3 l, float3 n, float perceptual_roughness, float3 diffuse_rho, float3 specular_f0) {
+	float3 h = normalize(v + l);
+
+    float NoV = abs(dot(n, v)) + 1e-5;
+    float NoL = clamp(dot(n, l), 0.0, 1.0);
+    float NoH = clamp(dot(n, h), 0.0, 1.0);
+    float LoH = clamp(dot(l, h), 0.0, 1.0);
+
+    // perceptually linear roughness to roughness
+	// Clamp for cheap specular aliasing under punctual light
+	perceptual_roughness = max(perceptual_roughness, 0.045f);
+    float roughness = perceptual_roughness * perceptual_roughness;
+
+    float D = D_GGX(NoH, roughness);
+    float3 F = F_Schlick(LoH, specular_f0);
+    float V = vis_smith_G2_height_correlated_GGX(NoV, NoL, roughness);
+
+    // specular BRDF
+    float3 Fr = (D * V) * F;
+
+    // diffuse BRDF
+    float3 Fd = diffuse_rho * Fd_Lambert();
+
+	return Fd + Fr;
 }

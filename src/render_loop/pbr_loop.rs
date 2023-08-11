@@ -349,7 +349,7 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
             let exposure = 5.0;
             let sun_inten = Vec3::new(0.7, 0.7, 0.6) * std::f32::consts::PI * exposure;
 
-            let params = FrameParams::make(view_info, &scene.sun_dir, &sun_inten);
+            let params = FrameParams::make(view_info, None, &scene.sun_dir, &sun_inten);
             self.descriptor_sets.update_frame_params(0, params);
         }
 
@@ -366,11 +366,11 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
 
         // Update sky IBL cube
         let skycube_size = 64u32;
-        let mut skycube_texture = RGHandle::null();
+        let mut skycube_texture = None;
         let skycube_gen = shaders
             .create_compute_pipeline(ShaderDefinition::compute("sky_cube.hlsl", "main"), &hack);
         if let Some(pipeline) = skycube_gen {
-            skycube_texture = rg.create_texutre(TextureDesc {
+            skycube_texture = Some(rg.create_texutre(TextureDesc {
                 width: skycube_size,
                 height: skycube_size,
                 layer_count: 6,
@@ -378,9 +378,9 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
                 usage: vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
                 flags: vk::ImageCreateFlags::CUBE_COMPATIBLE, // required for viewed as cube
                 ..Default::default()
-            });
+            }));
             let array_uav = rg.create_texture_view(
-                skycube_texture,
+                skycube_texture.unwrap(),
                 Some(TextureViewDesc {
                     view_type: vk::ImageViewType::TYPE_2D_ARRAY,
                     format: vk::Format::B10G11R11_UFLOAT_PACK32,
@@ -411,7 +411,7 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
         }
 
         let skycube = rg.create_texture_view(
-            skycube_texture,
+            skycube_texture.unwrap(),
             Some(TextureViewDesc {
                 view_type: vk::ImageViewType::CUBE,
                 format: vk::Format::B10G11R11_UFLOAT_PACK32,

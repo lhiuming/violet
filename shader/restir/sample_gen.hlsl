@@ -11,15 +11,16 @@ RaytracingAccelerationStructure scene_tlas;
 Texture2D<float> gbuffer_depth;
 Texture2D<uint4> gbuffer_color;
 TextureCube<float4> skycube;
-//RWTexture2D<uint4> rw_reservoir_temporal_buffer;
+Texture2D<float3> prev_color;
+Texture2D<float> prev_depth;
 StructuredBuffer<Reservoir> prev_reservoir_temporal_buffer;
 RWStructuredBuffer<Reservoir> rw_reservoir_temporal_buffer;
-RWTexture2D<float4> rw_debug_color;
+RWTexture2D<float3> rw_debug_color;
 
 struct PushConstants
 {
     uint frame_index;
-    uint use_prev_frame;
+    uint has_prev_frame;
 //    uint accumulated_count;
 };
 [[vk::push_constant]]
@@ -102,23 +103,39 @@ void raygen() {
 
     // Compute Radiance for the sample point
 
+    float3 debug_color = 0.0f;
+
     float3 radiance = 0.0f;
     bool recursive = false;
-    if (recursive) {
-        // TODO recursive tracing for smooth glossy reflection
-    } else {
-        if (payload.missed) {
-            radiance = skycube.SampleLevel(sampler_linear_clamp, ray.Direction, 0.0f).rgb;
+    if (payload.missed) {
+        radiance = skycube.SampleLevel(sampler_linear_clamp, ray.Direction, 0.0f).rgb;
 
-            // Construct a hit point at skybox if miss
-            payload.position_ws = position_ws + ray.Direction * ray.TMax;
-            payload.normal_ws = -ray.Direction;
+        // Construct a hit point at skybox if miss
+        payload.position_ws = position_ws + ray.Direction * ray.TMax;
+        payload.normal_ws = -ray.Direction;
+    }
+    else 
+    {
+        radiance = 0.0f;
+
+        // try to read from prev frame color
+        // TODO reprojection and stuff
+        if (pc.has_prev_frame) {
+            float4 prev_hpos = mul(frame_params.prev_view_proj, float4(payload.position_ws, 1.0f));
+            float reproj_depth = prev_hpos.z / prev_hpos.w;
+	        float2 prev_screen_uv = prev_hpos.xy / prev_hpos.w * 0.5f + 0.5f;
+            uint2 prev_pixel_pos = uint2(prev_screen_uv * buffer_size);
+            if (all(prev_pixel_pos < buffer_size))
+            {
+                float prev_depth_value = prev_depth[prev_pixel_pos];
+                float DEPTH_TOLERANCE = 0.005f;
+                if (abs(reproj_depth - prev_depth_value) < DEPTH_TOLERANCE) {
+                    radiance = prev_color[prev_pixel_pos].rgb;
+                }
+            }
         }
-        else 
-        {
-            // TODO radiance cache
-            radiance = 0.5f;
-        }
+
+        // TODO radiance cache
     }
 
     const RestirSample new_sample = make_restir_sample(
@@ -135,7 +152,7 @@ void raygen() {
     Reservoir reservoir;
     float target_pdf = luminance(radiance);
     float w = target_pdf * TWO_PI; // source_pdf = 1 / TWO_PI;
-    if (pc.use_prev_frame)
+    if (pc.has_prev_frame)
     {
         // read reservoir from prev frame
         // TODO reproject
@@ -144,7 +161,8 @@ void raygen() {
         // Bound the temporal information to avoid stale sample
         if (1)
         {
-            const uint M_MAX = 20; // [Benedikt 2020]
+            //const uint M_MAX = 20; // [Benedikt 2020]
+            const uint M_MAX = 50; // [Benedikt 2020]
             reservoir.M = min(reservoir.M, M_MAX);
         }
 
@@ -172,9 +190,9 @@ void raygen() {
 
     float3 selected_dir = normalize(reservoir.z.hit_pos - position_ws);
     float NoL = saturate(dot(gbuffer.normal, selected_dir));
-    float3 brdf = gbuffer.color / PI;
-    float3 RIS_estimator = reservoir.z.hit_radiance * brdf * NoL * reservoir.W ;
-    rw_debug_color[dispatch_id] = float4(RIS_estimator, 1.0f);
+    float brdf = ONE_OVER_PI;
+    float3 RIS_estimator_diffuse = reservoir.z.hit_radiance * brdf * NoL * reservoir.W ;
+    rw_debug_color[dispatch_id] = RIS_estimator_diffuse;
 }
 
 // ----------------

@@ -18,22 +18,11 @@ pub struct RGHandle<T> {
 }
 
 impl<T> RGHandle<T> {
-    pub fn null() -> Self {
-        RGHandle {
-            id: usize::MAX,
-            _phantom: PhantomData::default(),
-        }
-    }
-
     fn new(id: usize) -> Self {
         RGHandle {
             id,
             _phantom: PhantomData::default(),
         }
-    }
-
-    pub fn is_null(&self) -> bool {
-        self.id == usize::MAX
     }
 }
 
@@ -68,22 +57,11 @@ pub struct RGTemporal<T> {
 }
 
 impl<T> RGTemporal<T> {
-    pub fn null() -> Self {
-        RGTemporal {
-            id: usize::MAX,
-            _phantom: PhantomData::default(),
-        }
-    }
-
     fn new(id: usize) -> Self {
         RGTemporal {
             id,
             _phantom: PhantomData::default(),
         }
-    }
-
-    pub fn is_null(&self) -> bool {
-        self.id == usize::MAX
     }
 }
 
@@ -635,6 +613,23 @@ impl<'a> RenderGraphBuilder<'a> {
     pub fn create_buffer(&mut self, desc: BufferDesc) -> RGHandle<Buffer> {
         let id = self.buffers.len();
         self.buffers.push(RenderResource::Virtual(desc));
+        RGHandle::new(id)
+    }
+
+    pub fn register_buffer(&mut self, buffer: Buffer) -> RGHandle<Buffer> {
+        // Check if already registered
+        for handle_id in 0..self.buffers.len() {
+            let res = &self.buffers[handle_id];
+            if let RenderResource::External(prev_buf) = res {
+                if *prev_buf == buffer {
+                    return RGHandle::new(handle_id);
+                }
+            }
+        }
+
+        // Register the buffer
+        let id = self.buffers.len();
+        self.buffers.push(RenderResource::External(buffer));
         RGHandle::new(id)
     }
 

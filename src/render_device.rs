@@ -517,7 +517,7 @@ impl SwapchainEntry {
         ret.extent = *extent;
         //let image_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::STORAGE // compute post processing
 
-        let image_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_DST;
+        let image_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::STORAGE;
 
         // Create swapchain object
         let create_info = {
@@ -665,9 +665,20 @@ impl BufferDesc {
             memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
         }
     }
+
+    // Write (typically once) in CPU, read in GPU
+    pub fn shader_binding_table(size: u64) -> Self {
+        Self {
+            size,
+            usage: vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR
+                | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+            memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
+                | vk::MemoryPropertyFlags::HOST_COHERENT, // TODO no need to coherent?
+        }
+    }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub struct Buffer {
     pub desc: BufferDesc,
     pub handle: vk::Buffer,
