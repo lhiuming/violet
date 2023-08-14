@@ -308,12 +308,17 @@ impl RenderLoop for RestirRenderLoop {
 
         let scene_tlas = rg.register_accel_struct(scene.scene_top_level_accel_struct.unwrap());
 
+        let has_prev_frame;
         let prev_color = match self.taa.prev_color {
             Some(tex) => {
+                has_prev_frame = 1;
                 let tex = rg.convert_to_transient(tex);
                 rg.create_texture_view(tex, None)
             }
-            None => rg.register_texture_view(self.default_res.dummy_texture.1),
+            None => {
+                has_prev_frame = 0;
+                rg.register_texture_view(self.default_res.dummy_texture.1)
+            }
         };
         let prev_depth = match self.taa.prev_depth {
             Some(tex) => {
@@ -523,7 +528,7 @@ impl RenderLoop for RestirRenderLoop {
         }
 
         // Pass: Final Lighting (Combine)
-        // TODO pixel shadow to utilize the stencil shader
+        // TODO pixel shader to utilize the stencil buffer
         {
             let pipeline = shaders
                 .create_compute_pipeline(
@@ -553,10 +558,9 @@ impl RenderLoop for RestirRenderLoop {
             let desc = TextureDesc::new_2d(
                 main_size.width,
                 main_size.height,
-                rd.swapchain.image[0].desc.format,
+                vk::Format::B10G11R11_UFLOAT_PACK32,
                 vk::ImageUsageFlags::STORAGE // compute TAA
-                    | vk::ImageUsageFlags::SAMPLED // history
-                    | vk::ImageUsageFlags::TRANSFER_SRC, // copy to swapchain
+                    | vk::ImageUsageFlags::SAMPLED, // history and post
             );
             let texture = rg.create_texutre(desc);
             let view = rg.create_texture_view(texture, None);
@@ -572,7 +576,17 @@ impl RenderLoop for RestirRenderLoop {
                 .texture("source", scene_color.1)
                 .texture("history", prev_color)
                 .rw_texture("rw_target", post_taa_color.1)
-                .render(move |cb, _, _| {
+                .render(move |cb, shaders, _| {
+                    let pipeline = shaders.get_pipeline(pipeline).unwrap();
+
+                    let pc = PushConstantsBuilder::new().push(&has_prev_frame);
+                    cb.push_constants(
+                        pipeline.layout,
+                        vk::ShaderStageFlags::COMPUTE,
+                        0,
+                        &pc.build(),
+                    );
+
                     let group_count_x = div_round_up(main_size.width, 8);
                     let group_count_y = div_round_up(main_size.height, 4);
                     cb.dispatch(group_count_x, group_count_y, 1);
@@ -595,7 +609,7 @@ impl RenderLoop for RestirRenderLoop {
         {
             let pipeline = shaders
                 .create_compute_pipeline(
-                    ShaderDefinition::compute("restir/post_processing.hlsl", "main"),
+                    ShaderDefinition::compute("post_processing.hlsl", "main"),
                     &shader_config,
                 )
                 .unwrap();

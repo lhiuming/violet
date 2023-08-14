@@ -133,7 +133,7 @@ void raygen() {
                     radiance = prev_color[prev_pixel_pos].rgb;
                 }
             }
-        }
+        } 
 
         // TODO radiance cache
     }
@@ -161,8 +161,7 @@ void raygen() {
         // Bound the temporal information to avoid stale sample
         if (1)
         {
-            //const uint M_MAX = 20; // [Benedikt 2020]
-            const uint M_MAX = 50; // [Benedikt 2020]
+            const uint M_MAX = 20; // [Benedikt 2020]
             reservoir.M = min(reservoir.M, M_MAX);
         }
 

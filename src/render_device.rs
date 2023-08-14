@@ -310,12 +310,10 @@ impl RenderDevice {
             .unwrap();
             assert!(formats.len() > 0);
             // Debug
-            /*
             println!("Vulkan surface supported formats:");
             for format in formats.iter() {
                 println!("\t{:?}: {:?}", format.format, format.color_space);
             }
-            */
             Surface {
                 handle: vk_surface,
                 format: formats[0],
