@@ -1235,7 +1235,7 @@ impl PushConstantsBuilder {
         Self { data: Vec::new() }
     }
 
-    pub fn push<T>(mut self, value: &T) -> Self
+    pub fn push_inplace<T>(&mut self, value: &T)
     where
         T: Copy,
     {
@@ -1245,14 +1245,14 @@ impl PushConstantsBuilder {
         self.data[offset..offset + size].copy_from_slice(unsafe {
             std::slice::from_raw_parts(value as *const T as *const u8, size)
         });
-        self
     }
 
-    pub fn pushv<T>(self, value: T) -> Self
+    pub fn push<T>(mut self, value: &T) -> Self
     where
         T: Copy,
     {
-        self.push(&value)
+        self.push_inplace(value);
+        self
     }
 
     pub fn build(&self) -> &[u8] {

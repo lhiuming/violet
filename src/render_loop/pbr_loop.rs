@@ -392,20 +392,9 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
             rg.new_pass("Sky IBL gen", RenderPassType::Compute)
                 .pipeline(pipeline)
                 .rw_texture("rw_cube_texture", array_uav)
-                .render(move |cb, shaders, _pass| {
-                    let pipeline = shaders.get_pipeline(pipeline).unwrap();
-
-                    let pc = PushConstantsBuilder::new()
-                        .pushv(skycube_size as f32)
-                        .push(&scene.sun_dir);
-                    cb.push_constants(
-                        pipeline.layout,
-                        vk::ShaderStageFlags::COMPUTE,
-                        0,
-                        &pc.build(),
-                    );
-
-                    cb.bind_pipeline(vk::PipelineBindPoint::COMPUTE, pipeline.handle);
+                .push_constant(&(skycube_size as f32))
+                .push_constant(&scene.sun_dir)
+                .render(move |cb, _, _| {
                     cb.dispatch(skycube_size / 8, skycube_size / 4, 6);
                 });
         }
@@ -601,8 +590,8 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
 
                     if !pipeline.push_constant_ranges.is_empty() {
                         let pc = PushConstantsBuilder::new()
-                            .pushv(frame_index)
-                            .pushv(accumulated_count);
+                            .push(&frame_index)
+                            .push(&accumulated_count);
                         cb.push_constants(
                             pipeline.layout,
                             pipeline.push_constant_ranges[0].stage_flags,

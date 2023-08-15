@@ -20,18 +20,26 @@ RestirSample make_restir_sample(float3 pixel_pos, float3 pixel_normal, float3 hi
 }
 
 // Mapping the ReSTIR GI paper
+// w_sum, a.k.a sample's accumulated relative weight (:= Sum{ (target_pdf(z_j) / source_pdf(z_j) }), should be reconstructed by:
+//   w_sum := W * taget_pdf(z) * M
 struct Reservoir {
     RestirSample z; // the sample
-    //float w_sum; // sample's relative weight (accumulated) := Sum{ (target_pdf(z_j) / source_pdf(z_j) }; can be reconstruct by W * taget_pdf(z) * M
     uint M; // sample count
     float W; // RIS weight := rcp(target_pdf(z) * M) * Sum{ (target_pdf(z_j) / source_pdf(z_j) }
 };
 
-Reservoir init_reservoir(RestirSample z, float target_pdf, float w) {
+Reservoir null_reservoir() {
+    Reservoir r;
+    r.z = (RestirSample)0;
+    r.M = 0;
+    r.W = 0.0f;
+    return r;
+}
+
+Reservoir init_reservoir(RestirSample z, uint M, float W) {
     Reservoir r;
     r.z = z;
-    //r.w_sum = w;
-    r.M = 1;
-    r.W = w / target_pdf;
+    r.M = M;
+    r.W = W;
     return r;
 }

@@ -4,6 +4,7 @@
 #include "../rand.hlsl"
 #include "../sampling.hlsl"
 #include "../scene_bindings.hlsl"
+#include "../util.hlsl"
 
 #include "reservoir.hlsl"
 
@@ -15,7 +16,7 @@ Texture2D<float3> prev_color;
 Texture2D<float> prev_depth;
 StructuredBuffer<Reservoir> prev_reservoir_temporal_buffer;
 RWStructuredBuffer<Reservoir> rw_reservoir_temporal_buffer;
-RWTexture2D<float3> rw_debug_color;
+RWTexture2D<float4> rw_debug_texture;
 
 struct PushConstants
 {
@@ -25,11 +26,6 @@ struct PushConstants
 };
 [[vk::push_constant]]
 PushConstants pc;
-
-// utils
-float luminance(float3 rgb) {
-    return dot(rgb, float3(0.2126f, 0.7152f, 0.0722f));
-}
 
 struct PayloadSecondary {
     bool missed;
@@ -49,19 +45,19 @@ void raygen() {
     uint2 dispatch_id = DispatchRaysIndex().xy;
     float depth = gbuffer_depth[dispatch_id.xy];
 
+    uint2 buffer_size;
+    gbuffer_depth.GetDimensions(buffer_size.x, buffer_size.y);
+
     // early out if no geometry
-    if (depth == 0.0f)
+    if (has_no_geometry_via_depth(depth))
     {
-#if 0
-        // Output empty sample
-#endif
+        // Set null reservoir to avoid stale sample during temporal accumulation
+        uint buffer_index = buffer_size.x * dispatch_id.y + dispatch_id.x;
+        rw_reservoir_temporal_buffer[buffer_index] = null_reservoir();
         return;
     }
 
     GBuffer gbuffer = decode_gbuffer(gbuffer_color[dispatch_id.xy]);
-
-    uint2 buffer_size;
-    gbuffer_depth.GetDimensions(buffer_size.x, buffer_size.y);
 
 	// world position reconstruction from depth buffer
     float depth_error = 1.f / 16777216.f; // 24 bit unorm depth 
@@ -116,7 +112,7 @@ void raygen() {
     }
     else 
     {
-        radiance = 0.0f;
+        radiance = 0.0;
 
         // try to read from prev frame color
         // TODO reprojection and stuff
@@ -150,8 +146,8 @@ void raygen() {
     uint buffer_index = buffer_size.x * dispatch_id.y + dispatch_id.x;
 
     Reservoir reservoir;
-    float target_pdf = luminance(radiance);
-    float w = target_pdf * TWO_PI; // source_pdf = 1 / TWO_PI;
+    float new_target_pdf = luminance(new_sample.hit_radiance);
+    float new_w = new_target_pdf * TWO_PI; // source_pdf = 1 / TWO_PI;
     if (pc.has_prev_frame)
     {
         // read reservoir from prev frame
@@ -161,37 +157,52 @@ void raygen() {
         // Bound the temporal information to avoid stale sample
         if (1)
         {
-            const uint M_MAX = 20; // [Benedikt 2020]
+            //const uint M_MAX = 20; // [Benedikt 2020]
+            const uint M_MAX = 30; // [Ouyang 2021]
             reservoir.M = min(reservoir.M, M_MAX);
         }
 
-        float prev_target_pdf = luminance(reservoir.z.hit_radiance);
-        float w_sum = reservoir.W * prev_target_pdf * float(reservoir.M);
+        float reservoir_target_pdf = luminance(reservoir.z.hit_radiance);
+        float w_sum = reservoir.W * reservoir_target_pdf * float(reservoir.M);
 
         // update reservoir with new sample
-        w_sum += w;
+        w_sum += new_w;
         reservoir.M += 1;
-        float chance = w / w_sum;
+        float chance = new_w / w_sum;
         if (lcg_rand(rng_state) < chance) {
             reservoir.z = new_sample;
+            reservoir_target_pdf = new_target_pdf;
         }
-        float updated_target_pdf= luminance(reservoir.z.hit_radiance); 
-        reservoir.W = w_sum / ( updated_target_pdf * reservoir.M );
-        reservoir.M = reservoir.M;
+
+        // update the W
+        if (reservoir_target_pdf > 0.0) // avoid deviding zero
+        {
+            reservoir.W = w_sum / ( reservoir_target_pdf * float(reservoir.M) );
+        }
+        else 
+        {
+            // if reservoir_target_pdf is 0, it may not come from new_target_pdf (chance will be 0 or NaN in that case), therefore previously target_pdf (and w_sum) must be 0. Then new_target_pdf must be 0 too (otherwise chance is 1).
+            reservoir.W = 1.0f / float(reservoir.M);
+        }
     } 
     else 
     {
-        reservoir = init_reservoir(new_sample, target_pdf, w);
+        // New reservoir 
+        uint M = 1;
+        uint W = TWO_PI;  // := w / (target_pdf * M); 
+        reservoir = init_reservoir(new_sample, M, W);
     }
 
     // store updated reservoir
     rw_reservoir_temporal_buffer[buffer_index] = reservoir;
 
+#if 0
     float3 selected_dir = normalize(reservoir.z.hit_pos - position_ws);
     float NoL = saturate(dot(gbuffer.normal, selected_dir));
     float brdf = ONE_OVER_PI;
     float3 RIS_estimator_diffuse = reservoir.z.hit_radiance * brdf * NoL * reservoir.W ;
-    rw_debug_color[dispatch_id] = RIS_estimator_diffuse;
+    rw_debug_texture[dispatch_id] = float4(RIS_estimator_diffuse, 1.0f);
+#endif
 }
 
 // ----------------

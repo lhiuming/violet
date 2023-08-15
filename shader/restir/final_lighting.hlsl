@@ -12,14 +12,14 @@ void main(uint2 dispatch_id : SV_DispatchThreadID) {
     uint4 gbuffer_enc = gbuffer_color[dispatch_id];
     GBuffer gbuffer = decode_gbuffer(gbuffer_enc);
 
-    uint2 buffer_size;
-    gbuffer_color.GetDimensions(buffer_size.x, buffer_size.y);
-
-    if (gbuffer.shading_path == 0)
+    if (has_no_geometry(gbuffer))
     {
         // Written by skybox shader
         return;
     }
+
+    uint2 buffer_size;
+    gbuffer_color.GetDimensions(buffer_size.x, buffer_size.y);
 
     // Direct lighting
     float direct_atten = shadow_mask_buffer[dispatch_id];

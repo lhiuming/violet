@@ -25,5 +25,12 @@ void main(uint2 dispatch_id : SV_DispatchThreadID) {
         blended = src;
     }
 
+#if 0
+    // NaN Stopping
+    if (any(isnan(blended))) {
+        blended = float3(0.9, 0.1, 0.9) * 2;
+    }
+#endif
+
     rw_target[dispatch_id] = blended;
 }

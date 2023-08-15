@@ -88,6 +88,10 @@ GBuffer decode_gbuffer(uint4 enc) {
 
 // Material interpretation
 
+bool has_no_geometry(GBuffer gbuffer) {
+    return gbuffer.shading_path == 0;
+}
+
 // Diffuse color
 float3 get_diffuse_rho(GBuffer gbuffer) {
     return gbuffer.color.rgb * (1.0f - gbuffer.metallic);

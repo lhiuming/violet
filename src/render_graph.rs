@@ -10,7 +10,7 @@ use crate::render_device::{
     AccelerationStructure, Buffer, BufferDesc, RenderDevice, Texture, TextureDesc, TextureView,
     TextureViewDesc,
 };
-use crate::shader::{self, Handle, Pipeline, Shaders};
+use crate::shader::{self, Handle, Pipeline, PushConstantsBuilder, Shaders};
 
 pub struct RGHandle<T> {
     id: usize,
@@ -141,6 +141,7 @@ pub struct RenderPass<'a> {
     color_targets: Vec<ColorTarget>,
     depth_stencil: Option<DepthStencilTarget>,
     rw_textures: Vec<(&'a str, RGHandle<TextureView>)>,
+    push_constants: PushConstantsBuilder,
     copy_src: Option<RGHandle<TextureView>>,
     copy_dst: Option<RGHandle<TextureView>>,
     present_texture: Option<RGHandle<TextureView>>,
@@ -162,6 +163,7 @@ impl RenderPass<'_> {
             color_targets: Vec::new(),
             depth_stencil: None,
             rw_textures: Vec::new(),
+            push_constants: PushConstantsBuilder::new(),
             copy_src: None,
             copy_dst: None,
             present_texture: None,
@@ -283,6 +285,14 @@ impl<'a, 'b> RenderPassBuilder<'a, 'b> {
 
     pub fn copy_dst(mut self, texture: RGHandle<TextureView>) -> Self {
         self.inner().copy_dst = Some(texture);
+        self
+    }
+
+    pub fn push_constant<T>(mut self, value: &T) -> Self
+    where
+        T: Copy,
+    {
+        self.inner().push_constants.push_inplace::<T>(value);
         self
     }
 
@@ -1123,6 +1133,74 @@ impl RenderGraphBuilder<'_> {
         if let Some(present_tex) = pass.present_texture {
             transition_view_to(present_tex, vk::ImageLayout::PRESENT_SRC_KHR);
         }
+
+        // Buffers
+
+        let get_last_access =
+            |vk_buffer: vk::Buffer, end_pass_index: u32| -> Option<(u32, vk::AccessFlags)> {
+                for pass_index in (0..end_pass_index).rev() {
+                    let pass = &self.passes[pass_index as usize];
+
+                    // Check all mutating
+                    for (_name, handle) in &pass.rw_buffers {
+                        let buffer = self.get_buffer(ctx, *handle);
+                        if buffer.handle == vk_buffer {
+                            return Some((pass_index, vk::AccessFlags::SHADER_WRITE));
+                        }
+                    }
+
+                    // Check all sampling
+                    for (_name, handle) in &pass.buffers {
+                        let buffer = self.get_buffer(ctx, *handle);
+                        if buffer.handle == vk_buffer {
+                            return Some((pass_index, vk::AccessFlags::SHADER_READ));
+                        }
+                    }
+                }
+                None
+            };
+
+        let transition_to = |vk_buffer: vk::Buffer, dst_access_mask: vk::AccessFlags| {
+            if let Some((last_pass_index, src_access_mask)) = get_last_access(vk_buffer, pass_index)
+            {
+                if dst_access_mask != src_access_mask {
+                    let barrier = vk::BufferMemoryBarrier::builder()
+                        .src_access_mask(src_access_mask)
+                        .dst_access_mask(dst_access_mask)
+                        //.src_queue_family_index(0) // ?
+                        //.dst_queue_family_index(0) // ?
+                        .buffer(vk_buffer)
+                        .offset(0)
+                        .size(vk::WHOLE_SIZE);
+
+                    command_buffer.pipeline_barrier(
+                        map_stage_mask(&self.passes[last_pass_index as usize]),
+                        map_stage_mask(pass),
+                        vk::DependencyFlags::empty(), // TODO do it properly
+                        &[],
+                        std::slice::from_ref(&barrier),
+                        &[],
+                    );
+                }
+            } else {
+                // Nothing to sync
+                // TODO support temporal resource
+            };
+        };
+
+        for (_name, handle) in &pass.buffers {
+            transition_to(
+                self.get_buffer(ctx, *handle).handle,
+                vk::AccessFlags::SHADER_READ,
+            );
+        }
+
+        for (_name, handle) in &pass.rw_buffers {
+            transition_to(
+                self.get_buffer(ctx, *handle).handle,
+                vk::AccessFlags::SHADER_WRITE,
+            );
+        }
     }
 
     pub fn execute(
@@ -1266,6 +1344,33 @@ impl RenderGraphBuilder<'_> {
                 exec_context.descriptor_sets[pass_index],
             );
             command_buffer.insert_checkpoint();
+
+            // Push Constant (if pushed)
+            let pc_data = pass.push_constants.build();
+            if let Some(pipeline) = shaders.get_pipeline(pass.pipeline) {
+                if (pc_data.len() > 0) && (pipeline.push_constant_ranges.len() > 0) {
+                    let range = pipeline.push_constant_ranges[0];
+                    command_buffer.push_constants(pipeline.layout, range.stage_flags, 0, pc_data);
+                } else if pc_data.len() > 0 {
+                    println!(
+                        "Warning[RenderGraph]: push constant is not used by pass {}",
+                        pass.name
+                    );
+                } else if pipeline.push_constant_ranges.len() > 0 {
+                    // It is okay the render pass set push constant range them self in custom callback
+                    /*
+                    println!(
+                        "Warning[RenderGraph]: push constant is not provided for pass {}",
+                        pass.name
+                    );
+                    */
+                }
+            } else if pc_data.len() > 0 {
+                println!(
+                    "Warning[RenderGraph]: pipeline is not provided for pass {}",
+                    pass.name
+                );
+            }
 
             // Run pass
             if let Some(render) = render {

@@ -11,7 +11,7 @@ use violet::{
     render_graph::*,
     render_loop::gbuffer_pass::*,
     render_loop::{
-        div_round_up, FrameParams, RenderLoop, StreamLinedFrameResource, ViewInfo,
+        div_round_up, rg_util, FrameParams, RenderLoop, StreamLinedFrameResource, ViewInfo,
         FRAME_DESCRIPTOR_SET_INDEX,
     },
     render_scene::{RenderScene, SCENE_DESCRIPTOR_SET_INDEX},
@@ -241,6 +241,19 @@ impl RenderLoop for RestirRenderLoop {
 
         let mut rg = RenderGraphBuilder::new();
 
+        // a reused debug texture
+        /*
+        let debug_texture = rg_util::create_texture_and_view(
+            &mut rg,
+            TextureDesc::new_2d(
+                main_size.width,
+                main_size.height,
+                vk::Format::R16G16B16A16_SFLOAT,
+                vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+            ),
+        );
+        */
+
         // Create GBuffer
         let gbuffer = create_gbuffer_textures(&mut rg, main_size);
 
@@ -280,20 +293,9 @@ impl RenderLoop for RestirRenderLoop {
             rg.new_pass("SkyCubeGen", RenderPassType::Compute)
                 .pipeline(pipeline)
                 .rw_texture("rw_cube_texture", uav)
-                .render(move |cb, shaders, _| {
-                    let pipeline = shaders.get_pipeline(pipeline).unwrap();
-
-                    let pc = PushConstantsBuilder::new()
-                        .pushv(width as f32)
-                        .push(&scene.sun_dir);
-                    cb.push_constants(
-                        pipeline.layout,
-                        vk::ShaderStageFlags::COMPUTE,
-                        0,
-                        &pc.build(),
-                    );
-
-                    cb.bind_pipeline(vk::PipelineBindPoint::COMPUTE, pipeline.handle);
+                .push_constant(&(width as f32))
+                .push_constant(&scene.sun_dir)
+                .render(move |cb, _, _| {
                     cb.dispatch(width / 8, width / 4, 6);
                 });
 
@@ -344,7 +346,7 @@ impl RenderLoop for RestirRenderLoop {
 
         // Pass: sample generation (and temporal reusing)
         let main_len = main_size.width * main_size.height;
-        let restir_temporal_buffer =
+        let reservoir_temporal_buffer =
             rg.create_buffer(BufferDesc::compute(main_len as u64 * 24 * 4));
         if let Some(pipeline) = shaders.create_raytracing_pipeline(
             ShaderDefinition::raygen("restir/sample_gen.hlsl", "raygen"),
@@ -373,7 +375,7 @@ impl RenderLoop for RestirRenderLoop {
                     rg.register_buffer(self.default_res.dummy_buffer)
                 };
 
-            rg.new_pass("Sample_Gen", RenderPassType::RayTracing)
+            rg.new_pass("Sample Gen", RenderPassType::RayTracing)
                 .pipeline(pipeline)
                 .descritpro_sets(&common_sets)
                 .accel_struct("scene_tlas", scene_tlas)
@@ -386,22 +388,11 @@ impl RenderLoop for RestirRenderLoop {
                     "prev_reservoir_temporal_buffer",
                     prev_reservoir_temporal_buffer,
                 )
-                .buffer("rw_reservoir_temporal_buffer", restir_temporal_buffer)
-                .rw_texture("rw_debug_color", indirect_diffuse.1)
-                .render(move |cb, shaders, _| {
-                    let pipeline = shaders.get_pipeline(pipeline).unwrap();
-                    cb.bind_pipeline(vk::PipelineBindPoint::RAY_TRACING_KHR, pipeline.handle);
-
-                    let pc = PushConstantsBuilder::new()
-                        .pushv(frame_index)
-                        .pushv(use_prev_frame);
-                    cb.push_constants(
-                        pipeline.layout,
-                        pipeline.push_constant_ranges[0].stage_flags,
-                        0,
-                        pc.build(),
-                    );
-
+                .rw_buffer("rw_reservoir_temporal_buffer", reservoir_temporal_buffer)
+                //.rw_texture("rw_debug_texture", debug_texture.1)
+                .push_constant(&frame_index)
+                .push_constant(&use_prev_frame)
+                .render(move |cb, _, _| {
                     cb.trace_rays(
                         &raygen_sbt,
                         &miss_sbt,
@@ -414,10 +405,37 @@ impl RenderLoop for RestirRenderLoop {
                 });
 
             let temporal =
-                rg.convert_to_temporal(&mut self.render_graph_cache, restir_temporal_buffer);
+                rg.convert_to_temporal(&mut self.render_graph_cache, reservoir_temporal_buffer);
             self.sample_gen
                 .prev_reservoir_temporal_buffer
                 .replace(temporal);
+        }
+
+        // Pass: Spatial Resampling
+        {
+            let pipeline = shaders
+                .create_compute_pipeline(
+                    ShaderDefinition::compute("restir/spatial_resampling.hlsl", "main"),
+                    &shader_config,
+                )
+                .unwrap();
+
+            rg.new_pass("Spatial Resampling", RenderPassType::Compute)
+                .pipeline(pipeline)
+                .descritpro_set(FRAME_DESCRIPTOR_SET_INDEX, frame_descriptor_set)
+                .texture("gbuffer_depth", gbuffer.depth.1)
+                .texture("gbuffer_color", gbuffer.color.1)
+                .buffer("reservoir_temporal_buffer", reservoir_temporal_buffer)
+                .rw_texture("rw_lighting_texture", indirect_diffuse.1)
+                //.rw_texture("rw_debug_texture", debug_texture.1)
+                .push_constant(&self.frame_index)
+                .render(|cb, _, _| {
+                    cb.dispatch(
+                        div_round_up(main_size.width, 8),
+                        div_round_up(main_size.height, 4),
+                        1,
+                    );
+                });
         }
 
         // Pass: Raytraced Shadow
