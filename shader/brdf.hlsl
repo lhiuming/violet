@@ -142,8 +142,6 @@ float3 eval_GGX_Lambertian(float3 v, float3 l, float3 n, float perceptual_roughn
     float LoH = clamp(dot(l, h), 0.0, 1.0);
 
     // perceptually linear roughness to roughness
-	// Clamp for cheap specular aliasing under punctual light
-	perceptual_roughness = max(perceptual_roughness, 0.045f);
     float roughness = perceptual_roughness * perceptual_roughness;
 
     float D = D_GGX(NoH, roughness);

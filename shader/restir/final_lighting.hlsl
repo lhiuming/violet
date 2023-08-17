@@ -26,8 +26,18 @@ void main(uint2 dispatch_id : SV_DispatchThreadID) {
     float3 view_dir = -cs_view_ray_direction(dispatch_id, buffer_size, 0.0f.xx);
     float3 diffuse_rho = get_diffuse_rho(gbuffer);
     float3 specular_f0 = get_specular_f0(gbuffer);
+	// Clamp for cheap specular aliasing under punctual light (Frostbite)
+    // ref: https://google.github.io/filament/Filament.html
+    // TODO may be disk lighting
+    float perceptual_roughness = max(gbuffer.perceptual_roughness, 0.045f);
+    if (1)
+    {
+        // Clamp roughness harder to supress firefly due to multi bounce
+        // Guess: specular aliasing is os bad because we are not even doing mipmapping :(
+        perceptual_roughness = max(gbuffer.perceptual_roughness, 0.35f);
+    }
     float NoL = saturate(dot(gbuffer.normal, frame_params.sun_dir.xyz));
-    float3 directi_lighting = eval_GGX_Lambertian(view_dir, frame_params.sun_dir.xyz, gbuffer.normal, gbuffer.perceptual_roughness, diffuse_rho, specular_f0) * (NoL * direct_atten) * frame_params.sun_inten.rgb;
+    float3 directi_lighting = eval_GGX_Lambertian(view_dir, frame_params.sun_dir.xyz, gbuffer.normal, perceptual_roughness, diffuse_rho, specular_f0) * (NoL * direct_atten) * frame_params.sun_inten.rgb;
 
     // Indirect lighting
     float3 indirect_diffuse = indirect_diffuse_buffer[dispatch_id];

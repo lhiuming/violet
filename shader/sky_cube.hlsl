@@ -1,9 +1,9 @@
 #include "atmosphere_felix_westin.hlsl"
+#include "frame_bindings.hlsl"
 
 struct PushConstants
 {
     float cube_width; 
-    float3 sun_dir;
 };
 [[vk::push_constant]]
 PushConstants pc;
@@ -34,10 +34,10 @@ void main(uint2 dispatch_thread_id: SV_DISPATCHTHREADID, uint3 group_id: SV_GROU
 	float3 ray_dir = dir;
 	float ray_len = 100000.0f;
 
-    // TODO input sum light data
-	float3 light_dir = pc.sun_dir;
-	float3 light_color = float3(0.7f, 0.7f, 0.6f) * 2;
+	float3 light_dir = frame_params.sun_dir.xyz;
+	float3 light_color = frame_params.sun_inten.rgb;
 
+    // TODO store transmittance in cube for latter lighting calculation?
 	float3 _transmittance;
 	float3 color = IntegrateScattering(ray_start, ray_dir, ray_len, light_dir, light_color, _transmittance);
 

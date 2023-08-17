@@ -1,5 +1,3 @@
-use std::f32::consts::PI;
-
 use ash::vk;
 use glam::Vec3;
 use violet::{
@@ -292,9 +290,9 @@ impl RenderLoop for RestirRenderLoop {
 
             rg.new_pass("SkyCubeGen", RenderPassType::Compute)
                 .pipeline(pipeline)
+                .descritpro_set(FRAME_DESCRIPTOR_SET_INDEX, frame_descriptor_set)
                 .rw_texture("rw_cube_texture", uav)
                 .push_constant(&(width as f32))
-                .push_constant(&scene.sun_dir)
                 .render(move |cb, _, _| {
                     cb.dispatch(width / 8, width / 4, 6);
                 });
@@ -653,8 +651,8 @@ impl RenderLoop for RestirRenderLoop {
         let command_buffer = self.stream_lined.wait_and_reset_command_buffer(rd);
 
         // Update frame CB (before submit)
-        let exposure = 5.0f32;
-        let sun_inten = Vec3::new(0.7, 0.7, 0.6) * PI * exposure;
+        let exposure = 20.0;
+        let sun_inten = Vec3::new(1.0, 1.0, 0.85) * exposure;
         self.stream_lined.update_frame_params(FrameParams::make(
             &view_info,
             self.taa.prev_view_info.as_ref(),

@@ -20,11 +20,12 @@
 // WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 // lhiuming: modified planet center position to work with violet coordinate system (z up). Originally using unity world space (y up).
+// lhiuming: also nuke the hard coded EXPOSURE; we will do it in sun light multiplier.
 
 #ifndef ATMOSPHERE_INCLUDED
 #define ATMOSPHERE_INCLUDED
 
-#define VIOLET_COORDINATE_SYSTEM 1
+#define VIOLET_MODIFICATION 1
 
 // -------------------------------------
 // Defines
@@ -32,7 +33,7 @@
 #define PI                  3.14159265359
 #define INFINITY            1.0 / 0.0
 #define PLANET_RADIUS       6371000
-#if VIOLET_COORDINATE_SYSTEM
+#if VIOLET_MODIFICATION 
 #define PLANET_CENTER       float3(0, 0, -PLANET_RADIUS)
 #else
 #define PLANET_CENTER       float3(0, -PLANET_RADIUS, 0)
@@ -49,7 +50,11 @@
 #define C_OZONE             (float3(0.650,  1.881,  0.085) * 1e-6)
 
 #define ATMOSPHERE_DENSITY  1
+#if VIOLET_MODIFICATION
+#define EXPOSURE            1
+#else
 #define EXPOSURE            20
+#endif
 
 // -------------------------------------
 // Math

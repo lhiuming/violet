@@ -346,8 +346,8 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
         // Update GPU ViewParams const buffer
         {
             // TODO
-            let exposure = 5.0;
-            let sun_inten = Vec3::new(0.7, 0.7, 0.6) * std::f32::consts::PI * exposure;
+            let exposure = 20.0;
+            let sun_inten = Vec3::new(1.0, 1.0, 0.85) * exposure;
 
             let params = FrameParams::make(view_info, None, &scene.sun_dir, &sun_inten);
             self.descriptor_sets.update_frame_params(0, params);
@@ -391,9 +391,9 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
 
             rg.new_pass("Sky IBL gen", RenderPassType::Compute)
                 .pipeline(pipeline)
+                .descritpro_set(FRAME_DESCRIPTOR_SET_INDEX, frame_descriptor_set)
                 .rw_texture("rw_cube_texture", array_uav)
                 .push_constant(&(skycube_size as f32))
-                .push_constant(&scene.sun_dir)
                 .render(move |cb, _, _| {
                     cb.dispatch(skycube_size / 8, skycube_size / 4, 6);
                 });

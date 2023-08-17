@@ -40,7 +40,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID) {
         w_sum = reservoir.W * target_pdf * reservoir.M;
     }
 
-    float radius = 16; // px
+    float radius = 32; // px
     uint rng_state = lcg_init(dispatch_id, buffer_size, pc.frame_index);
     for (uint i = 0; i < MAX_ITERATION; i++) {
         // Uniform sampling in a disk
@@ -79,6 +79,12 @@ void main(uint2 dispatch_id: SV_DispatchThreadID) {
 
         // Merge reservoir (sample reuse)
         {
+            if (0) {
+                // How can M ever exceed 500? (M is clamped to 30+1 in temporal, and up to 10 merged reservoir after spatial)
+                uint M_MAX = 500; // [Ouyang 2021]
+                r_neighbor.M = min(r_neighbor.M, M_MAX);
+            }
+
             float w_sum_neighbor = r_neighbor.W * target_pdf_neighbor * r_neighbor.M;
             w_sum += w_sum_neighbor;
             float chance = w_sum_neighbor / w_sum;

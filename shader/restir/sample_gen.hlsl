@@ -115,16 +115,21 @@ void raygen() {
         radiance = 0.0;
 
         // try to read from prev frame color
-        // TODO reprojection and stuff
+        // TODO rejection and stuff
         if (pc.has_prev_frame) {
             float4 prev_hpos = mul(frame_params.prev_view_proj, float4(payload.position_ws, 1.0f));
+            float2 ndc = prev_hpos.xy / prev_hpos.w;
             float reproj_depth = prev_hpos.z / prev_hpos.w;
-	        float2 prev_screen_uv = prev_hpos.xy / prev_hpos.w * 0.5f + 0.5f;
-            uint2 prev_pixel_pos = uint2(prev_screen_uv * buffer_size);
-            if (all(prev_pixel_pos < buffer_size))
+
+            bool in_view = all(abs(ndc.xy) < 1.0);
+            if (in_view)
             {
+                // nearest neighbor sampling
+	            float2 prev_screen_uv = ndc.xy * 0.5f + 0.5f;
+                uint2 prev_pixel_pos = uint2(floor(prev_screen_uv * buffer_size));
+
                 float prev_depth_value = prev_depth[prev_pixel_pos];
-                float DEPTH_TOLERANCE = 0.005f;
+                float DEPTH_TOLERANCE = 0.0005f; // TODO compare in world space?
                 if (abs(reproj_depth - prev_depth_value) < DEPTH_TOLERANCE) {
                     radiance = prev_color[prev_pixel_pos].rgb;
                 }
@@ -143,7 +148,6 @@ void raygen() {
     );
 
     // Reservoir Temporal Resampling
-    uint buffer_index = buffer_size.x * dispatch_id.y + dispatch_id.x;
 
     Reservoir reservoir;
     float new_target_pdf = luminance(new_sample.hit_radiance);
@@ -152,13 +156,23 @@ void raygen() {
     {
         // read reservoir from prev frame
         // TODO reproject
+        uint2 prev_pos = dispatch_id.xy;
+        if (0)
+        {
+            // permutation sampling
+            // TODO add some per-frame jitter
+            prev_pos.xy ^= 3;
+        }
+        prev_pos = clamp(prev_pos, uint2(0, 0), buffer_size - uint2(1, 1));
+        uint buffer_index = buffer_size.x * prev_pos.y + prev_pos.x;
         reservoir = prev_reservoir_temporal_buffer[buffer_index];
 
         // Bound the temporal information to avoid stale sample
         if (1)
         {
-            //const uint M_MAX = 20; // [Benedikt 2020]
-            const uint M_MAX = 30; // [Ouyang 2021]
+            const uint M_MAX = 20; // [Benedikt 2020]
+            //const uint M_MAX = 30; // [Ouyang 2021]
+            //const uint M_MAX = 10; // [h3r2tic 2022]
             reservoir.M = min(reservoir.M, M_MAX);
         }
 
@@ -194,6 +208,7 @@ void raygen() {
     }
 
     // store updated reservoir
+    uint buffer_index = buffer_size.x * dispatch_id.y + dispatch_id.x;
     rw_reservoir_temporal_buffer[buffer_index] = reservoir;
 
 #if 0
