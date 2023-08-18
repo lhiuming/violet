@@ -132,7 +132,6 @@ pub struct RenderPass<'a> {
     name: String,
     ty: RenderPassType,
     pipeline: Handle<Pipeline>,
-    external_descritpr_sets: Vec<(u32, vk::DescriptorSet)>,
     descriptor_set_index: u32,
     textures: Vec<(&'a str, RGHandle<TextureView>)>,
     buffers: Vec<(&'a str, RGHandle<Buffer>)>,
@@ -154,7 +153,6 @@ impl RenderPass<'_> {
             name: String::from(name),
             ty,
             pipeline: Handle::null(),
-            external_descritpr_sets: Vec::new(),
             descriptor_set_index: 0,
             textures: Vec::new(),
             buffers: Vec::new(),
@@ -217,15 +215,13 @@ impl<'a, 'b> RenderPassBuilder<'a, 'b> {
     }
 
     // Binding an external descriptor set
-    pub fn descritpro_set(mut self, set_index: u32, set: vk::DescriptorSet) -> Self {
-        self.inner().external_descritpr_sets.push((set_index, set));
+    pub fn descritpro_set(self, _: u32, _: vk::DescriptorSet) -> Self {
+        println!("Warning: deprecated API!");
         self
     }
 
-    pub fn descritpro_sets(mut self, sets: &[(u32, vk::DescriptorSet)]) -> Self {
-        for pair in sets {
-            self.inner().external_descritpr_sets.push(*pair)
-        }
+    pub fn descritpro_sets(self, _: &[(u32, vk::DescriptorSet)]) -> Self {
+        println!("Warning: deprecated API!");
         self
     }
 
@@ -486,6 +482,10 @@ impl ResType for Buffer {
 pub struct RenderGraphBuilder<'a> {
     passes: Vec<RenderPass<'a>>,
 
+    // Descriptor sets that would be bound for all passes
+    // Exist for ergonomics reason; descriptors set like per-frame stuffs can be specify as this.
+    global_descriptor_sets: Vec<(u32, vk::DescriptorSet)>,
+
     transient_to_temporal_textures: HashMap<RGHandle<Texture>, RGTemporal<Texture>>,
     transient_to_temporal_buffers: HashMap<RGHandle<Buffer>, RGTemporal<Buffer>>,
 
@@ -550,6 +550,8 @@ impl<'a> RenderGraphBuilder<'a> {
     pub fn new() -> Self {
         Self {
             passes: Vec::new(),
+
+            global_descriptor_sets: Vec::new(),
 
             transient_to_temporal_textures: HashMap::new(),
             transient_to_temporal_buffers: HashMap::new(),
@@ -749,6 +751,22 @@ impl<'a> RenderGraphBuilder<'a> {
         }
     }
 
+    pub fn add_global_descriptor_sets(&mut self, sets: &[(u32, vk::DescriptorSet)]) {
+        for (index, _set) in sets {
+            if self
+                .global_descriptor_sets
+                .iter()
+                .find(|(i, _)| i == index)
+                .is_some()
+            {
+                println!("Warning: global descriptor set {} is overrided", index);
+                continue;
+            }
+        }
+
+        self.global_descriptor_sets.extend_from_slice(sets);
+    }
+
     pub fn add_pass(&mut self, pass: RenderPass<'a>) {
         self.passes.push(pass);
     }
@@ -895,8 +913,8 @@ impl RenderGraphBuilder<'_> {
 
         // Check for any resources
         let has_internal_set = internal_set != vk::DescriptorSet::null();
-        let has_external_set = !pass.external_descritpr_sets.is_empty();
-        let any_resource = has_internal_set || has_external_set;
+        let has_global_set = self.global_descriptor_sets.len() > 0;
+        let any_resource = has_internal_set || has_global_set;
         if !any_resource {
             return None;
         }
@@ -968,20 +986,18 @@ impl RenderGraphBuilder<'_> {
             );
         }
 
-        // Set external set
-        for (set_index, set) in &pass.external_descritpr_sets {
+        // Set globally bound sets
+        // TODO should be be set evey pass? Can't it be set once per queue/command-buffer??
+        for (set_index, set) in &self.global_descriptor_sets {
             if (*set_index == pass.descriptor_set_index)
                 && (internal_set != vk::DescriptorSet::null())
             {
-                println!("Error: RenderPass {} external set index {} is conflicted with internal set index {}", pass.name, set_index, pass.descriptor_set_index);
+                println!("Error: RenderPass {} global set index {} is conflicted with internal set index {}", pass.name, set_index, pass.descriptor_set_index);
                 continue;
             }
 
             if !pipeline.used_set.contains_key(set_index) {
-                println!(
-                    "Warning[RenderGraph: {}]: set index {} is not used",
-                    pass.name, set_index
-                );
+                // Since global sets exist only for ergonomics purpose, it is totally okay if not used
                 continue;
             }
 

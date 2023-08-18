@@ -53,7 +53,7 @@ pub fn add_gbuffer_pass<'a>(
     rd: &RenderDevice,
     shaders: &mut Shaders,
     shader_config: &ShadersConfig,
-    common_sets: &[(u32, vk::DescriptorSet)],
+    _: &[(u32, vk::DescriptorSet)],
     scene: &'a RenderScene,
     gbuffer: &GBuffer,
 ) {
@@ -66,7 +66,6 @@ pub fn add_gbuffer_pass<'a>(
         let viewport_extent = rd.swapchain.extent;
         rg.new_pass("GBuffer_Gen", RenderPassType::Graphics)
             .pipeline(pipeline)
-            .descritpro_sets(common_sets)
             .color_targets(&[ColorTarget {
                 view: gbuffer.color.1,
                 load_op: ColorLoadOp::Clear(gbuffer.color_clear),

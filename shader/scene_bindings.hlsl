@@ -39,4 +39,3 @@ struct MeshParams
 };
 [[vk::binding(4, SCENE_DESCRIPTOR_SET_INDEX)]] StructuredBuffer<MeshParams> mesh_params;
 [[vk::binding(5, SCENE_DESCRIPTOR_SET_INDEX)]] Buffer<uint> index_buffer;
-[[vk::binding(6, SCENE_DESCRIPTOR_SET_INDEX)]] SamplerState sampler_linear_clamp;

@@ -100,6 +100,7 @@ impl FrameParams {
 pub const FRAME_DESCRIPTOR_SET_INDEX: u32 = 2;
 
 pub const FRAMEPARAMS_BINDING_INDEX: u32 = 0;
+pub const SAMPLER_BINDING_INDEX_BEGIN: u32 = 1;
 
 // DescriptorSet that is allocated/updated per frame
 pub struct RenderLoopDesciptorSets {
@@ -121,6 +122,26 @@ impl RenderLoopDesciptorSets {
             }],
         );
 
+        // Static sampler
+        let sampler_linear_clamp = unsafe {
+            let create_info = vk::SamplerCreateInfo::builder()
+                .min_filter(vk::Filter::LINEAR)
+                .mag_filter(vk::Filter::LINEAR)
+                .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
+            rd.device_entry.create_sampler(&create_info, None).unwrap()
+        };
+        let sampler_linear_wrap = unsafe {
+            let create_info = vk::SamplerCreateInfo::builder()
+                .min_filter(vk::Filter::LINEAR)
+                .mag_filter(vk::Filter::LINEAR)
+                .address_mode_u(vk::SamplerAddressMode::REPEAT)
+                .address_mode_v(vk::SamplerAddressMode::REPEAT)
+                .address_mode_w(vk::SamplerAddressMode::REPEAT);
+            rd.device_entry.create_sampler(&create_info, None).unwrap()
+        };
+
         // Define set layout
         let set_layout = {
             let cbuffer = vk::DescriptorSetLayoutBinding::builder()
@@ -128,7 +149,19 @@ impl RenderLoopDesciptorSets {
                 .descriptor_type(vk::DescriptorType::UNIFORM_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::ALL);
-            let bindings = [*cbuffer];
+            let sampler_lc = vk::DescriptorSetLayoutBinding::builder()
+                .binding(SAMPLER_BINDING_INDEX_BEGIN)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::ALL)
+                .immutable_samplers(std::slice::from_ref(&sampler_linear_clamp));
+            let sampler_lw = vk::DescriptorSetLayoutBinding::builder()
+                .binding(SAMPLER_BINDING_INDEX_BEGIN + 1)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::ALL)
+                .immutable_samplers(std::slice::from_ref(&sampler_linear_wrap));
+            let bindings = [*cbuffer, *sampler_lc, *sampler_lw];
             let create_info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
             unsafe {
                 rd.device_entry

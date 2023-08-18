@@ -398,9 +398,9 @@ void closesthit(inout Payload payload, in Attribute attr) {
 	float3 bitangent = normalize(tangent.w * cross(normal, tangent.xyz));
 
     MaterialParams mat = material_params[mesh.material_index];
-	float4 base_color = bindless_textures[mat.base_color_index].SampleLevel(sampler_linear_clamp, uv, 0);
-	float4 metal_rough = bindless_textures[mat.metallic_roughness_index].SampleLevel(sampler_linear_clamp, uv, 0);
-    float4 normal_map = bindless_textures[mat.normal_index].SampleLevel(sampler_linear_clamp, uv, 0);
+	float4 base_color = bindless_textures[mat.base_color_index].SampleLevel(sampler_linear_wrap, uv, 0);
+	float4 metal_rough = bindless_textures[mat.metallic_roughness_index].SampleLevel(sampler_linear_wrap, uv, 0);
+    float4 normal_map = bindless_textures[mat.normal_index].SampleLevel(sampler_linear_wrap, uv, 0);
 
 	// normal mapping
 	float3 normal_ts = normal_map.xyz * 2.0f - 1.0f;

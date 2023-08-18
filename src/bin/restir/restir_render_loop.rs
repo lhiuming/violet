@@ -217,13 +217,6 @@ impl RenderLoop for RestirRenderLoop {
     ) {
         self.stream_lined.advance_render_index();
 
-        // Persistent binding stuff
-        let frame_descriptor_set = self.stream_lined.get_frame_desciptor_set();
-        let common_sets = [
-            (SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set),
-            (FRAME_DESCRIPTOR_SET_INDEX, frame_descriptor_set),
-        ];
-
         // Shader config
         // TODO wrap into a ShaderPool/ShaderLibrary?
         let mut shader_config = ShadersConfig::default();
@@ -238,6 +231,13 @@ impl RenderLoop for RestirRenderLoop {
         let main_size = rd.swapchain.extent;
 
         let mut rg = RenderGraphBuilder::new();
+
+        // Add persistent bindings
+        let frame_descriptor_set = self.stream_lined.get_frame_desciptor_set();
+        rg.add_global_descriptor_sets(&[
+            (SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set),
+            (FRAME_DESCRIPTOR_SET_INDEX, frame_descriptor_set),
+        ]);
 
         // a reused debug texture
         /*
@@ -256,15 +256,7 @@ impl RenderLoop for RestirRenderLoop {
         let gbuffer = create_gbuffer_textures(&mut rg, main_size);
 
         // Pass: GBuffer
-        add_gbuffer_pass(
-            &mut rg,
-            rd,
-            shaders,
-            &shader_config,
-            &common_sets,
-            scene,
-            &gbuffer,
-        );
+        add_gbuffer_pass(&mut rg, rd, shaders, &shader_config, &[], scene, &gbuffer);
 
         // Pass: Skycube update
         let skycube;
@@ -290,7 +282,6 @@ impl RenderLoop for RestirRenderLoop {
 
             rg.new_pass("SkyCubeGen", RenderPassType::Compute)
                 .pipeline(pipeline)
-                .descritpro_set(FRAME_DESCRIPTOR_SET_INDEX, frame_descriptor_set)
                 .rw_texture("rw_cube_texture", uav)
                 .push_constant(&(width as f32))
                 .render(move |cb, _, _| {
@@ -375,7 +366,6 @@ impl RenderLoop for RestirRenderLoop {
 
             rg.new_pass("Sample Gen", RenderPassType::RayTracing)
                 .pipeline(pipeline)
-                .descritpro_sets(&common_sets)
                 .accel_struct("scene_tlas", scene_tlas)
                 .texture("gbuffer_depth", gbuffer.depth.1)
                 .texture("gbuffer_color", gbuffer.color.1)
@@ -420,7 +410,6 @@ impl RenderLoop for RestirRenderLoop {
 
             rg.new_pass("Spatial Resampling", RenderPassType::Compute)
                 .pipeline(pipeline)
-                .descritpro_set(FRAME_DESCRIPTOR_SET_INDEX, frame_descriptor_set)
                 .texture("gbuffer_depth", gbuffer.depth.1)
                 .texture("gbuffer_color", gbuffer.color.1)
                 .buffer("reservoir_temporal_buffer", reservoir_temporal_buffer)
@@ -463,7 +452,6 @@ impl RenderLoop for RestirRenderLoop {
 
             rg.new_pass("Raytraced Shadow", RenderPassType::RayTracing)
                 .pipeline(pipeline)
-                .descritpro_set(FRAME_DESCRIPTOR_SET_INDEX, frame_descriptor_set)
                 .accel_struct("scene_tlas", scene_tlas)
                 .texture("gbuffer_depth", gbuffer.depth.1)
                 .rw_texture("rw_shadow", raytraced_shadow_mask.1)
@@ -513,7 +501,6 @@ impl RenderLoop for RestirRenderLoop {
 
             rg.new_pass("Sky", RenderPassType::Graphics)
                 .pipeline(pipeline)
-                .descritpro_sets(&common_sets)
                 .texture("skycube", skycube)
                 .color_targets(&[ColorTarget {
                     view: scene_color.1,
@@ -555,7 +542,6 @@ impl RenderLoop for RestirRenderLoop {
 
             rg.new_pass("Combined Lighting", RenderPassType::Compute)
                 .pipeline(pipeline)
-                .descritpro_set(FRAME_DESCRIPTOR_SET_INDEX, frame_descriptor_set)
                 .texture("gbuffer_color", gbuffer.color.1)
                 .texture("shadow_mask_buffer", raytraced_shadow_mask.1)
                 .texture("indirect_diffuse_buffer", indirect_diffuse.1)
@@ -588,7 +574,7 @@ impl RenderLoop for RestirRenderLoop {
         ) {
             rg.new_pass("Temporal AA", RenderPassType::Compute)
                 .pipeline(pipeline)
-                //.descritpro_sets(&common_sets)
+                .texture("gbuffer_depth", gbuffer.depth.1)
                 .texture("source", scene_color.1)
                 .texture("history", prev_color)
                 .rw_texture("rw_target", post_taa_color.1)
@@ -608,7 +594,6 @@ impl RenderLoop for RestirRenderLoop {
                     cb.dispatch(group_count_x, group_count_y, 1);
                 });
 
-            self.taa.prev_view_info.replace(*view_info);
             self.taa
                 .prev_color
                 .replace(rg.convert_to_temporal(&mut self.render_graph_cache, post_taa_color.0));
@@ -659,6 +644,9 @@ impl RenderLoop for RestirRenderLoop {
             &scene.sun_dir,
             &sun_inten,
         ));
+
+        // only after last use of prev_view_info
+        self.taa.prev_view_info.replace(*view_info);
 
         // Execute render graph
         {

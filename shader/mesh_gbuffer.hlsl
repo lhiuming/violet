@@ -57,9 +57,10 @@ void ps_main(
 {
 	MaterialParams mat = material_params[pc.material_index];
 
-	float4 base_color = bindless_textures[mat.base_color_index].Sample(sampler_linear_clamp, uv);
-	float4 normal_map = bindless_textures[mat.normal_index].Sample(sampler_linear_clamp, uv);
-	float4 metal_rough = bindless_textures[mat.metallic_roughness_index].Sample(sampler_linear_clamp, uv);
+	// TODO sampler based on model definition
+	float4 base_color = bindless_textures[mat.base_color_index].Sample(sampler_linear_wrap, uv);
+	float4 normal_map = bindless_textures[mat.normal_index].Sample(sampler_linear_wrap, uv);
+	float4 metal_rough = bindless_textures[mat.metallic_roughness_index].Sample(sampler_linear_wrap, uv);
 
 	// normal mapping
 	float3 normal_ts = normal_map.xyz * 2.0f - 1.0f;

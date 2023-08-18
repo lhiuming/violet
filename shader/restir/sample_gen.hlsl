@@ -149,29 +149,34 @@ void raygen() {
 
     // Reservoir Temporal Resampling
 
+    float4 prev_hpos = mul(frame_params.prev_view_proj, float4(position_ws, 1.0f));
+    float2 prev_ndc = prev_hpos.xy / prev_hpos.w;
+    bool in_view = all(abs(prev_ndc.xy) < 1.0);
+    bool sample_prev_frame = pc.has_prev_frame && in_view;
+
     Reservoir reservoir;
-    float new_target_pdf = luminance(new_sample.hit_radiance);
-    float new_w = new_target_pdf * TWO_PI; // source_pdf = 1 / TWO_PI;
-    if (pc.has_prev_frame)
+    if (sample_prev_frame)
     {
-        // read reservoir from prev frame
-        // TODO reproject
-        uint2 prev_pos = dispatch_id.xy;
+        // Read reservoir from prev frame
+
+        // Nearest neighbor sampling
+        float2 prev_screen_uv = prev_ndc.xy * 0.5f + 0.5f;
+        uint2 prev_pos = uint2(prev_screen_uv * buffer_size); // value are positive; trucated == floor
         if (0)
         {
             // permutation sampling
             // TODO add some per-frame jitter
             prev_pos.xy ^= 3;
+            prev_pos = clamp(prev_pos, uint2(0, 0), buffer_size - uint2(1, 1));
         }
-        prev_pos = clamp(prev_pos, uint2(0, 0), buffer_size - uint2(1, 1));
         uint buffer_index = buffer_size.x * prev_pos.y + prev_pos.x;
         reservoir = prev_reservoir_temporal_buffer[buffer_index];
 
         // Bound the temporal information to avoid stale sample
         if (1)
         {
-            const uint M_MAX = 20; // [Benedikt 2020]
-            //const uint M_MAX = 30; // [Ouyang 2021]
+            //const uint M_MAX = 20; // [Benedikt 2020]
+            const uint M_MAX = 30; // [Ouyang 2021]
             //const uint M_MAX = 10; // [h3r2tic 2022]
             reservoir.M = min(reservoir.M, M_MAX);
         }
@@ -179,14 +184,17 @@ void raygen() {
         float reservoir_target_pdf = luminance(reservoir.z.hit_radiance);
         float w_sum = reservoir.W * reservoir_target_pdf * float(reservoir.M);
 
+        float new_target_pdf = luminance(new_sample.hit_radiance);
+        float new_w = new_target_pdf * TWO_PI; // source_pdf = 1 / TWO_PI;
+
         // update reservoir with new sample
         w_sum += new_w;
-        reservoir.M += 1;
         float chance = new_w / w_sum;
         if (lcg_rand(rng_state) < chance) {
             reservoir.z = new_sample;
             reservoir_target_pdf = new_target_pdf;
         }
+        reservoir.M += 1;
 
         // update the W
         if (reservoir_target_pdf > 0.0) // avoid deviding zero
@@ -280,9 +288,9 @@ void closesthit(inout PayloadSecondary payload, in Attribute attr) {
 	float3 bitangent = normalize(tangent.w * cross(normal, tangent.xyz));
 
     MaterialParams mat = material_params[mesh.material_index];
-	float4 base_color = bindless_textures[mat.base_color_index].SampleLevel(sampler_linear_clamp, uv, 0);
-	float4 metal_rough = bindless_textures[mat.metallic_roughness_index].SampleLevel(sampler_linear_clamp, uv, 0);
-    float4 normal_map = bindless_textures[mat.normal_index].SampleLevel(sampler_linear_clamp, uv, 0);
+	float4 base_color = bindless_textures[mat.base_color_index].SampleLevel(sampler_linear_wrap, uv, 0);
+	float4 metal_rough = bindless_textures[mat.metallic_roughness_index].SampleLevel(sampler_linear_wrap, uv, 0);
+    float4 normal_map = bindless_textures[mat.normal_index].SampleLevel(sampler_linear_wrap, uv, 0);
 
 	// normal mapping
 	float3 normal_ts = normal_map.xyz * 2.0f - 1.0f;

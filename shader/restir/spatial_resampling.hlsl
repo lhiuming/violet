@@ -40,6 +40,9 @@ void main(uint2 dispatch_id: SV_DispatchThreadID) {
         w_sum = reservoir.W * target_pdf * reservoir.M;
     }
 
+    // Normal (for similarity test)
+    GBuffer gbuffer = decode_gbuffer(gbuffer_color[dispatch_id.xy]);
+
     float radius = 32; // px
     uint rng_state = lcg_init(dispatch_id, buffer_size, pc.frame_index);
     for (uint i = 0; i < MAX_ITERATION; i++) {
@@ -57,8 +60,17 @@ void main(uint2 dispatch_id: SV_DispatchThreadID) {
         int2 offset = int2(float2(x, y) * radius);
         uint2 sample_pos = clamp(int2(dispatch_id) + offset, int2(0, 0), int2(buffer_size) - 1); 
 
-        // TODO geometry similarity test, and continue
-        if (0)
+        GBuffer gbuffer_n = decode_gbuffer(gbuffer_color[sample_pos]);
+        float depth_n = gbuffer_depth[sample_pos];
+
+        // Geometry similarity test
+        bool geometrical_diff = false;
+        // normal test (within 25 degree) [Ouyang 2021]
+        geometrical_diff |= dot(gbuffer.normal, gbuffer_n.normal) < cos(PI * (25.0/180.0));
+        // depth test (within 0.05 of depth range) [Ouyang 2021]
+        // TODO should be normalized depth
+        geometrical_diff |= abs(depth - depth_n) > 0.0005f;
+        if (geometrical_diff)
         {
             continue;
         }
@@ -112,9 +124,6 @@ void main(uint2 dispatch_id: SV_DispatchThreadID) {
     {
 	    // world position reconstruction from depth buffer
         float3 position_ws = cs_depth_to_position(dispatch_id, buffer_size, depth);
-
-        // Normal
-        GBuffer gbuffer = decode_gbuffer(gbuffer_color[dispatch_id.xy]);
 
         float3 selected_dir = normalize(reservoir.z.hit_pos - position_ws);
         float NoL = saturate(dot(gbuffer.normal, selected_dir));

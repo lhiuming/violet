@@ -139,14 +139,10 @@ pub const BINDLESS_TEXTURE_BINDING_INDEX: u32 = 2;
 //pub const VIEWPARAMS_BINDING_INDEX: u32 = 3;
 pub const MESH_PARAMS_BINDING_INDEX: u32 = 4;
 pub const INDEX_BUFFER_BINDING_INDEX: u32 = 5;
-pub const SAMPLER_BINDING_INDEX: u32 = 6;
 
 // Contain everything to be rendered
 pub struct RenderScene {
     pub upload_context: UploadContext,
-
-    // Shared samplers
-    pub shared_sampler: vk::Sampler,
 
     // Scene Descriptor Set
     pub descriptor_pool: vk::DescriptorPool,
@@ -235,14 +231,6 @@ impl RenderScene {
             })
             .unwrap();
 
-        // Shared samplers
-        let shared_sampler = unsafe {
-            let create_info = vk::SamplerCreateInfo::builder()
-                .min_filter(vk::Filter::LINEAR)
-                .mag_filter(vk::Filter::LINEAR);
-            rd.device_entry.create_sampler(&create_info, None).unwrap()
-        };
-
         // Descriptor pool for whole scene bindless texture
         // TODO specific size and stuff
         let descriptor_pool = rd.create_descriptor_pool(
@@ -285,26 +273,18 @@ impl RenderScene {
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::ALL);
-            let samplers = [shared_sampler];
-            let sampler_ll = vk::DescriptorSetLayoutBinding::builder()
-                .binding(SAMPLER_BINDING_INDEX)
-                .descriptor_type(vk::DescriptorType::SAMPLER)
-                .stage_flags(vk::ShaderStageFlags::ALL)
-                .immutable_samplers(&samplers);
             let bindings = [
                 *vbuffer,
                 *ibuffer,
                 *mat_buffer,
                 *bindless_textures,
                 *mesh_buffer,
-                *sampler_ll,
             ];
             let binding_flags = [
                 vk::DescriptorBindingFlags::default(),
                 vk::DescriptorBindingFlags::default(),
                 vk::DescriptorBindingFlags::default(),
                 bindless_textures_flags,
-                vk::DescriptorBindingFlags::default(),
                 vk::DescriptorBindingFlags::default(),
             ];
             assert_eq!(bindings.len(), binding_flags.len());
@@ -383,7 +363,6 @@ impl RenderScene {
 
         RenderScene {
             upload_context: UploadContext::new(rd),
-            shared_sampler,
             descriptor_pool,
             descriptor_set_layout,
             descriptor_set,
