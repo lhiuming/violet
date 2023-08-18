@@ -69,6 +69,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID) {
         geometrical_diff |= dot(gbuffer.normal, gbuffer_n.normal) < cos(PI * (25.0/180.0));
         // depth test (within 0.05 of depth range) [Ouyang 2021]
         // TODO should be normalized depth
+        // TODO wall viewed from grazing-angle will become noisy because depth gradient is large in this case. So a better test should check if two visble sample are on the same surface (plane)
         geometrical_diff |= abs(depth - depth_n) > 0.0005f;
         if (geometrical_diff)
         {
@@ -76,14 +77,34 @@ void main(uint2 dispatch_id: SV_DispatchThreadID) {
         }
 
         uint sample_index = sample_pos.x + sample_pos.y * buffer_size.x;
-        Reservoir r_neighbor = reservoir_temporal_buffer[sample_index];
+        Reservoir reservoir_n = reservoir_temporal_buffer[sample_index];
 
-        // TODO calculate reuse jacobian
+        // Jacobian determinant for spatial reuse
         float reuse_jacobian = 1.0f;
+        if (1)
+        {
+            // [Ouyang 2021, eq 11]
+            // x_1^q-x_2^q
+            float3 offset_qq = reservoir_n.z.pixel_pos - reservoir_n.z.hit_pos;
+            // x_1^r-x_2^q
+            float3 offset_rq = reservoir.z.pixel_pos   - reservoir_n.z.hit_pos;
+            float3 hit_normal = reservoir_n.z.hit_normal;
+            // cos(phi_2^r)
+            float cos_rq = dot(hit_normal, normalize(offset_rq));
+            // cos(phi_2^q)
+            float cos_qq = dot(hit_normal, normalize(offset_qq));
+            reuse_jacobian = (cos_rq / cos_qq) * (dot(offset_qq, offset_qq) / dot(offset_rq, offset_rq));
 
-        float target_pdf_neighbor = luminance(r_neighbor.z.hit_radiance) / reuse_jacobian;
+            // Clamp to avoid fireflies.
+            // Jacobian of large value can happen when the reused hit is too close to current surface. Basically we apply the jocobian for the purpose of darkening the sample to avoid over-brightness artifacts at corners, so clampping high value should be fine.
+            reuse_jacobian = clamp(reuse_jacobian, 0, 10);
+        }
+
+        // NOTE: should be a typo in the ReSTIR GI paper [Ouyang 2021, algo 4]: It should be `target_pdf * jacobian` instead of `target_pdf / jacobian`
+        float target_pdf_neighbor = luminance(reservoir_n.z.hit_radiance) * reuse_jacobian;
 
         // TODO visibility test, and continue
+        // At least NoL test is cheap enough?
         if (0)
         {
             continue;
@@ -94,20 +115,21 @@ void main(uint2 dispatch_id: SV_DispatchThreadID) {
             if (0) {
                 // How can M ever exceed 500? (M is clamped to 30+1 in temporal, and up to 10 merged reservoir after spatial)
                 uint M_MAX = 500; // [Ouyang 2021]
-                r_neighbor.M = min(r_neighbor.M, M_MAX);
+                reservoir_n.M = min(reservoir_n.M, M_MAX);
             }
 
-            float w_sum_neighbor = r_neighbor.W * target_pdf_neighbor * r_neighbor.M;
+            float w_sum_neighbor = reservoir_n.W * target_pdf_neighbor * reservoir_n.M;
             w_sum += w_sum_neighbor;
             float chance = w_sum_neighbor / w_sum;
             if (lcg_rand(rng_state) < chance) {
-                reservoir.z = r_neighbor.z;
+                reservoir.z = reservoir_n.z;
             }
-            reservoir.M += r_neighbor.M;
+            reservoir.M += reservoir_n.M;
         }
     }
 
     // TODO bias correction? [Ouyang 2021, algo 4]
+    // Maybe not necessary since we are doing geometrical test 
 
     // update the W
     {

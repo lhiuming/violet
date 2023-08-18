@@ -52,6 +52,7 @@ void ps_main(
 	float4 tangent : TEXCOORD2,
 	noperspective float2 screen_pos : TEXCOORD3,
 	float3 bitangent : TEXCOORD4,
+	bool if_front_face : SV_IsFrontFace,
 	// Output
 	out uint4 output : SV_Target0)
 {
@@ -65,6 +66,7 @@ void ps_main(
 	// normal mapping
 	float3 normal_ts = normal_map.xyz * 2.0f - 1.0f;
 	float3 normal_ws = normalize( normal_ts.x * tangent.xyz + normal_ts.y * bitangent + normal_ts.z * normal );
+	normal_ws *= if_front_face ? 1.0f : -1.0f;
 
     GBuffer gbuffer;
     gbuffer.color = base_color.rgb;
