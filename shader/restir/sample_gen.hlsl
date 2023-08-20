@@ -14,8 +14,8 @@ Texture2D<uint4> gbuffer_color;
 TextureCube<float4> skycube;
 Texture2D<float3> prev_color;
 Texture2D<float> prev_depth;
-StructuredBuffer<Reservoir> prev_reservoir_temporal_buffer;
-RWStructuredBuffer<Reservoir> rw_reservoir_temporal_buffer;
+StructuredBuffer<Reservoir> prev_reservoir_buffer;
+RWStructuredBuffer<Reservoir> rw_temporal_reservoir_buffer;
 RWTexture2D<float4> rw_debug_texture;
 
 struct PushConstants
@@ -53,7 +53,7 @@ void raygen() {
     {
         // Set null reservoir to avoid stale sample during temporal accumulation
         uint buffer_index = buffer_size.x * dispatch_id.y + dispatch_id.x;
-        rw_reservoir_temporal_buffer[buffer_index] = null_reservoir();
+        rw_temporal_reservoir_buffer[buffer_index] = null_reservoir();
         return;
     }
 
@@ -170,7 +170,7 @@ void raygen() {
             prev_pos = clamp(prev_pos, uint2(0, 0), buffer_size - uint2(1, 1));
         }
         uint buffer_index = buffer_size.x * prev_pos.y + prev_pos.x;
-        reservoir = prev_reservoir_temporal_buffer[buffer_index];
+        reservoir = prev_reservoir_buffer[buffer_index];
 
         // Bound the temporal information to avoid stale sample
         if (1)
@@ -217,7 +217,7 @@ void raygen() {
 
     // store updated reservoir
     uint buffer_index = buffer_size.x * dispatch_id.y + dispatch_id.x;
-    rw_reservoir_temporal_buffer[buffer_index] = reservoir;
+    rw_temporal_reservoir_buffer[buffer_index] = reservoir;
 
 #if 0
     float3 selected_dir = normalize(reservoir.z.hit_pos - position_ws);

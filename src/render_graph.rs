@@ -751,6 +751,14 @@ impl<'a> RenderGraphBuilder<'a> {
         }
     }
 
+    pub fn get_buffer_desc(&self, buffer: RGHandle<Buffer>) -> &BufferDesc {
+        match &self.buffers[buffer.id] {
+            RenderResource::Virtual(desc) => desc,
+            RenderResource::Temporal(_) => todo!("Temporal resources are in cache"),
+            RenderResource::External(buffer) => &buffer.desc,
+        }
+    }
+
     pub fn add_global_descriptor_sets(&mut self, sets: &[(u32, vk::DescriptorSet)]) {
         for (index, _set) in sets {
             if self

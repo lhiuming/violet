@@ -60,7 +60,7 @@ struct SampleGenPass {
     miss_region: vk::StridedDeviceAddressRegionKHR,
     hit_region: vk::StridedDeviceAddressRegionKHR,
 
-    prev_reservoir_temporal_buffer: Option<RGTemporal<Buffer>>,
+    prev_reservoir_buffer: Option<RGTemporal<Buffer>>,
 }
 
 impl SampleGenPass {
@@ -104,7 +104,7 @@ impl SampleGenPass {
             raygen_region,
             miss_region,
             hit_region,
-            prev_reservoir_temporal_buffer: None,
+            prev_reservoir_buffer: None,
         }
     }
 
@@ -333,9 +333,11 @@ impl RenderLoop for RestirRenderLoop {
             (texture, view)
         };
 
+        let temporal_on_temporal = false;
+
         // Pass: sample generation (and temporal reusing)
         let main_len = main_size.width * main_size.height;
-        let reservoir_temporal_buffer =
+        let temporal_reservoir_buffer =
             rg.create_buffer(BufferDesc::compute(main_len as u64 * 24 * 4));
         if let Some(pipeline) = shaders.create_raytracing_pipeline(
             ShaderDefinition::raygen("restir/sample_gen.hlsl", "raygen"),
@@ -355,14 +357,14 @@ impl RenderLoop for RestirRenderLoop {
             let hit_sbt = self.sample_gen.hit_region;
 
             let use_prev_frame: u32;
-            let prev_reservoir_temporal_buffer =
-                if let Some(buffer) = self.sample_gen.prev_reservoir_temporal_buffer {
-                    use_prev_frame = 1;
-                    rg.convert_to_transient(buffer)
-                } else {
-                    use_prev_frame = 0;
-                    rg.register_buffer(self.default_res.dummy_buffer)
-                };
+            let prev_reservoir_buffer = if let Some(buffer) = self.sample_gen.prev_reservoir_buffer
+            {
+                use_prev_frame = 1;
+                rg.convert_to_transient(buffer)
+            } else {
+                use_prev_frame = 0;
+                rg.register_buffer(self.default_res.dummy_buffer)
+            };
 
             rg.new_pass("Sample Gen", RenderPassType::RayTracing)
                 .pipeline(pipeline)
@@ -372,11 +374,8 @@ impl RenderLoop for RestirRenderLoop {
                 .texture("skycube", skycube)
                 .texture("prev_color", prev_color)
                 .texture("prev_depth", prev_depth)
-                .buffer(
-                    "prev_reservoir_temporal_buffer",
-                    prev_reservoir_temporal_buffer,
-                )
-                .rw_buffer("rw_reservoir_temporal_buffer", reservoir_temporal_buffer)
+                .buffer("prev_reservoir_buffer", prev_reservoir_buffer)
+                .rw_buffer("rw_temporal_reservoir_buffer", temporal_reservoir_buffer)
                 //.rw_texture("rw_debug_texture", debug_texture.1)
                 .push_constant(&frame_index)
                 .push_constant(&use_prev_frame)
@@ -392,15 +391,18 @@ impl RenderLoop for RestirRenderLoop {
                     );
                 });
 
-            let temporal =
-                rg.convert_to_temporal(&mut self.render_graph_cache, reservoir_temporal_buffer);
-            self.sample_gen
-                .prev_reservoir_temporal_buffer
-                .replace(temporal);
+            if temporal_on_temporal {
+                let temporal =
+                    rg.convert_to_temporal(&mut self.render_graph_cache, temporal_reservoir_buffer);
+                self.sample_gen.prev_reservoir_buffer.replace(temporal);
+            }
         }
 
         // Pass: Spatial Resampling
         {
+            let reservoir_buffer_desc = rg.get_buffer_desc(temporal_reservoir_buffer);
+            let spatial_reservoir_buffer = rg.create_buffer(*reservoir_buffer_desc);
+
             let pipeline = shaders
                 .create_compute_pipeline(
                     ShaderDefinition::compute("restir/spatial_resampling.hlsl", "main"),
@@ -412,7 +414,8 @@ impl RenderLoop for RestirRenderLoop {
                 .pipeline(pipeline)
                 .texture("gbuffer_depth", gbuffer.depth.1)
                 .texture("gbuffer_color", gbuffer.color.1)
-                .buffer("reservoir_temporal_buffer", reservoir_temporal_buffer)
+                .buffer("temporal_reservoir_buffer", temporal_reservoir_buffer)
+                .rw_buffer("rw_spatial_reservoir_buffer", spatial_reservoir_buffer)
                 .rw_texture("rw_lighting_texture", indirect_diffuse.1)
                 //.rw_texture("rw_debug_texture", debug_texture.1)
                 .push_constant(&self.frame_index)
@@ -423,6 +426,12 @@ impl RenderLoop for RestirRenderLoop {
                         1,
                     );
                 });
+
+            if !temporal_on_temporal {
+                let temporal =
+                    rg.convert_to_temporal(&mut self.render_graph_cache, spatial_reservoir_buffer);
+                self.sample_gen.prev_reservoir_buffer.replace(temporal);
+            }
         }
 
         // Pass: Raytraced Shadow
