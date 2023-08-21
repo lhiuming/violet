@@ -584,20 +584,11 @@ impl RenderLoop for RestirRenderLoop {
             rg.new_pass("Temporal AA", RenderPassType::Compute)
                 .pipeline(pipeline)
                 .texture("gbuffer_depth", gbuffer.depth.1)
-                .texture("source", scene_color.1)
-                .texture("history", prev_color)
+                .texture("source_texture", scene_color.1)
+                .texture("history_texture", prev_color)
                 .rw_texture("rw_target", post_taa_color.1)
+                .push_constant(&has_prev_frame)
                 .render(move |cb, shaders, _| {
-                    let pipeline = shaders.get_pipeline(pipeline).unwrap();
-
-                    let pc = PushConstantsBuilder::new().push(&has_prev_frame);
-                    cb.push_constants(
-                        pipeline.layout,
-                        vk::ShaderStageFlags::COMPUTE,
-                        0,
-                        &pc.build(),
-                    );
-
                     let group_count_x = div_round_up(main_size.width, 8);
                     let group_count_y = div_round_up(main_size.height, 4);
                     cb.dispatch(group_count_x, group_count_y, 1);
