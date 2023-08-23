@@ -626,7 +626,7 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
                 nv_diagnostic_checkpoints: rd.nv_diagnostic_checkpoints_entry.clone(),
                 command_buffer,
             };
-            rg.execute(rd, &cb, &shaders, &mut self.render_graph_cache);
+            rg.execute(rd, &cb, shaders, &mut self.render_graph_cache);
         }
 
         // End command recoding

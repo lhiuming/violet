@@ -1,7 +1,7 @@
 #pragma once
 
 struct RestirSample {
-    float3 pixel_pos; // "visible point"
+    float3 pixel_pos; // "visible point", used in sample validation pass
     float3 pixel_normal;
     float3 hit_pos; // "sample point"
     float3 hit_normal;

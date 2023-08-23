@@ -13,7 +13,7 @@ use violet::{
         FRAME_DESCRIPTOR_SET_INDEX,
     },
     render_scene::{RenderScene, SCENE_DESCRIPTOR_SET_INDEX},
-    shader::{Pipeline, PushConstantsBuilder, ShaderDefinition, Shaders, ShadersConfig},
+    shader::{Pipeline, ShaderDefinition, Shaders, ShadersConfig},
 };
 
 pub struct DefaultResources {
@@ -55,69 +55,14 @@ impl DefaultResources {
 }
 
 struct SampleGenPass {
-    sbt: Buffer,
-    raygen_region: vk::StridedDeviceAddressRegionKHR,
-    miss_region: vk::StridedDeviceAddressRegionKHR,
-    hit_region: vk::StridedDeviceAddressRegionKHR,
-
     prev_reservoir_buffer: Option<RGTemporal<Buffer>>,
 }
 
 impl SampleGenPass {
-    fn new(rd: &RenderDevice) -> Self {
-        let sbt = rd
-            .create_buffer(BufferDesc {
-                size: 256,
-                usage: vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR
-                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-                memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | vk::MemoryPropertyFlags::HOST_COHERENT,
-            })
-            .unwrap();
-
-        let handle_size = rd.physical_device.shader_group_handle_size() as u64;
-        let stride = std::cmp::max(
-            handle_size,
-            rd.physical_device.shader_group_base_alignment() as u64,
-        );
-
-        let raygen_region = vk::StridedDeviceAddressRegionKHR {
-            device_address: sbt.device_address.unwrap(),
-            stride: handle_size,
-            size: handle_size,
-        };
-
-        let miss_region = vk::StridedDeviceAddressRegionKHR {
-            device_address: sbt.device_address.unwrap() + stride,
-            stride: handle_size,
-            size: handle_size,
-        };
-
-        let hit_region = vk::StridedDeviceAddressRegionKHR {
-            device_address: sbt.device_address.unwrap() + stride * 2,
-            stride: handle_size,
-            size: handle_size,
-        };
-
+    fn new() -> Self {
         Self {
-            sbt,
-            raygen_region,
-            miss_region,
-            hit_region,
             prev_reservoir_buffer: None,
         }
-    }
-
-    fn update_shader_group_handles(&mut self, rd: &RenderDevice, pipeline: &Pipeline) {
-        // TODO check shader change
-        // TODO add to stream line to avoid write on GPU using
-        let handle_data = rd.get_ray_tracing_shader_group_handles(pipeline.handle, 0, 3);
-        let mut filler = ShaderBindingTableFiller::new(&rd.physical_device, self.sbt.data);
-        filler.write_handles(&handle_data, 0, 1);
-        filler.start_group();
-        filler.write_handles(&handle_data, 1, 1);
-        filler.start_group();
-        filler.write_handles(&handle_data, 2, 1);
     }
 }
 
@@ -202,7 +147,7 @@ impl RenderLoop for RestirRenderLoop {
             stream_lined: StreamLinedFrameResource::new(rd),
             default_res: DefaultResources::new(rd),
             frame_index: 0,
-            sample_gen: SampleGenPass::new(rd),
+            sample_gen: SampleGenPass::new(),
             raytraced_shadow: RaytracedShadow::new(rd),
             taa: TAAPass::new(),
         }
@@ -230,7 +175,21 @@ impl RenderLoop for RestirRenderLoop {
 
         let main_size = rd.swapchain.extent;
 
-        let mut rg = RenderGraphBuilder::new();
+        //let mut rg = RenderGraphBuilder::new();
+        let mut rg = RenderGraphBuilder::new_with_shader_config(shader_config);
+
+        // HACK: render graph should not use this; currently using it for SBT pooling
+        rg.set_frame_index(self.frame_index);
+
+        // HACK: this should be removed once all passes create pipeline inside RG
+        let mut shader_config = ShadersConfig::default();
+        shader_config
+            .set_layout_override
+            .insert(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set_layout);
+        shader_config.set_layout_override.insert(
+            FRAME_DESCRIPTOR_SET_INDEX,
+            self.stream_lined.get_set_layout(),
+        );
 
         // Add persistent bindings
         let frame_descriptor_set = self.stream_lined.get_frame_desciptor_set();
@@ -256,7 +215,9 @@ impl RenderLoop for RestirRenderLoop {
         let gbuffer = create_gbuffer_textures(&mut rg, main_size);
 
         // Pass: GBuffer
-        add_gbuffer_pass(&mut rg, rd, shaders, &shader_config, &[], scene, &gbuffer);
+        {
+            add_gbuffer_pass(&mut rg, rd, shaders, &shader_config, &[], scene, &gbuffer);
+        }
 
         // Pass: Skycube update
         let skycube;
@@ -299,7 +260,7 @@ impl RenderLoop for RestirRenderLoop {
 
         let scene_tlas = rg.register_accel_struct(scene.scene_top_level_accel_struct.unwrap());
 
-        let has_prev_frame;
+        let has_prev_frame: u32;
         let prev_color = match self.taa.prev_color {
             Some(tex) => {
                 has_prev_frame = 1;
@@ -333,41 +294,24 @@ impl RenderLoop for RestirRenderLoop {
             (texture, view)
         };
 
-        let temporal_on_temporal = false;
-
-        // Pass: sample generation (and temporal reusing)
         let main_len = main_size.width * main_size.height;
         let temporal_reservoir_buffer =
             rg.create_buffer(BufferDesc::compute(main_len as u64 * 24 * 4));
-        if let Some(pipeline) = shaders.create_raytracing_pipeline(
-            ShaderDefinition::raygen("restir/sample_gen.hlsl", "raygen"),
-            ShaderDefinition::miss("restir/sample_gen.hlsl", "miss"),
-            Some(ShaderDefinition::closesthit(
-                "restir/sample_gen.hlsl",
-                "closesthit",
-            )),
-            &shader_config,
-        ) {
-            self.sample_gen
-                .update_shader_group_handles(rd, shaders.get_pipeline(pipeline).unwrap());
 
-            let frame_index = self.frame_index;
-            let raygen_sbt = self.sample_gen.raygen_region;
-            let miss_sbt = self.sample_gen.miss_region;
-            let hit_sbt = self.sample_gen.hit_region;
-
-            let use_prev_frame: u32;
+        // Pass: sample generation (and temporal reusing)
+        {
+            // bind a dummy texture if we don't have prev frame reservoir
             let prev_reservoir_buffer = if let Some(buffer) = self.sample_gen.prev_reservoir_buffer
             {
-                use_prev_frame = 1;
                 rg.convert_to_transient(buffer)
             } else {
-                use_prev_frame = 0;
                 rg.register_buffer(self.default_res.dummy_buffer)
             };
 
-            rg.new_pass("Sample Gen", RenderPassType::RayTracing)
-                .pipeline(pipeline)
+            rg.new_raytracing("Sample Gen")
+                .raygen_shader("restir/sample_gen.hlsl")
+                .miss_shader("raytrace/geometry.rmiss.hlsl")
+                .closest_hit_shader("raytrace/geometry.rchit.hlsl")
                 .accel_struct("scene_tlas", scene_tlas)
                 .texture("gbuffer_depth", gbuffer.depth.1)
                 .texture("gbuffer_color", gbuffer.color.1)
@@ -377,25 +321,9 @@ impl RenderLoop for RestirRenderLoop {
                 .buffer("prev_reservoir_buffer", prev_reservoir_buffer)
                 .rw_buffer("rw_temporal_reservoir_buffer", temporal_reservoir_buffer)
                 //.rw_texture("rw_debug_texture", debug_texture.1)
-                .push_constant(&frame_index)
-                .push_constant(&use_prev_frame)
-                .render(move |cb, _, _| {
-                    cb.trace_rays(
-                        &raygen_sbt,
-                        &miss_sbt,
-                        &hit_sbt,
-                        &vk::StridedDeviceAddressRegionKHR::default(),
-                        main_size.width,
-                        main_size.height,
-                        1,
-                    );
-                });
-
-            if temporal_on_temporal {
-                let temporal =
-                    rg.convert_to_temporal(&mut self.render_graph_cache, temporal_reservoir_buffer);
-                self.sample_gen.prev_reservoir_buffer.replace(temporal);
-            }
+                .push_constant(&self.frame_index)
+                .push_constant(&has_prev_frame)
+                .dimension(main_size.width, main_size.height, 1);
         }
 
         // Pass: Spatial Resampling
@@ -427,11 +355,9 @@ impl RenderLoop for RestirRenderLoop {
                     );
                 });
 
-            if !temporal_on_temporal {
-                let temporal =
-                    rg.convert_to_temporal(&mut self.render_graph_cache, spatial_reservoir_buffer);
-                self.sample_gen.prev_reservoir_buffer.replace(temporal);
-            }
+            let temporal =
+                rg.convert_to_temporal(&mut self.render_graph_cache, spatial_reservoir_buffer);
+            self.sample_gen.prev_reservoir_buffer.replace(temporal);
         }
 
         // Pass: Raytraced Shadow
@@ -588,7 +514,7 @@ impl RenderLoop for RestirRenderLoop {
                 .texture("history_texture", prev_color)
                 .rw_texture("rw_target", post_taa_color.1)
                 .push_constant(&has_prev_frame)
-                .render(move |cb, shaders, _| {
+                .render(move |cb, _, _| {
                     let group_count_x = div_round_up(main_size.width, 8);
                     let group_count_y = div_round_up(main_size.height, 4);
                     cb.dispatch(group_count_x, group_count_y, 1);

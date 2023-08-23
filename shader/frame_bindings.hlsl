@@ -45,17 +45,17 @@ ViewParams view_params() {
 }
 
 // world position reconstruction from depth buffer
-float3 cs_depth_to_position(uint2 pixel_pos, uint2 buffer_size, float depth_buffer_value) {
-    float2 screen_pos = (float2(pixel_pos) + 0.5f) / float2(buffer_size);
-	float4 position_ws_h = mul(view_params().inv_view_proj, float4(screen_pos * 2.0f - 1.0f, depth_buffer_value, 1.0f));
+float3 cs_depth_to_position(uint2 pix_coord, uint2 buffer_size, float depth_buffer_value) {
+    float2 screen_uv = (float2(pix_coord) + 0.5f) / float2(buffer_size);
+	float4 position_ws_h = mul(view_params().inv_view_proj, float4(screen_uv * 2.0f - 1.0f, depth_buffer_value, 1.0f));
 	return position_ws_h.xyz / position_ws_h.w;
 }
 
 // ray direction by pixel position, without depth buffer
-float3 cs_view_ray_direction(uint2 pixel_pos, uint2 buffer_size, float2 rand_jitter) {
-    float2 pix_coord = float2(pixel_pos) + 0.5f;
-    pix_coord += lerp(-0.5f.xx, 0.5f.xx, rand_jitter);
-    float2 ndc = pix_coord / float2(buffer_size) * 2.0f - 1.0f;
+float3 cs_view_ray_direction(uint2 pix_coord, uint2 buffer_size, float2 rand_jitter) {
+    float2 pix_coord_f = float2(pix_coord) + 0.5f;
+    pix_coord_f += lerp(-0.5f.xx, 0.5f.xx, rand_jitter);
+    float2 ndc = pix_coord_f / float2(buffer_size) * 2.0f - 1.0f;
     float4 view_dir_end_h = mul(view_params().inv_view_proj, float4(ndc, 1.0f, 1.0f));
     float3 view_dir_end = view_dir_end_h.xyz / view_dir_end_h.w;
     float3 view_dir = normalize(view_dir_end - view_params().view_pos);

@@ -4,13 +4,16 @@ use std::marker::{Copy, PhantomData};
 use std::ops::FnOnce;
 
 use ash::vk;
+use glam::UVec3;
 
 use crate::command_buffer::CommandBuffer;
 use crate::render_device::{
-    AccelerationStructure, Buffer, BufferDesc, RenderDevice, Texture, TextureDesc, TextureView,
-    TextureViewDesc,
+    AccelerationStructure, Buffer, BufferDesc, RenderDevice, ShaderBindingTableFiller, Texture,
+    TextureDesc, TextureView, TextureViewDesc,
 };
-use crate::shader::{self, Handle, Pipeline, PushConstantsBuilder, Shaders};
+use crate::shader::{
+    self, Handle, Pipeline, PushConstantsBuilder, ShaderDefinition, Shaders, ShadersConfig,
+};
 
 pub struct RGHandle<T> {
     id: usize,
@@ -124,6 +127,13 @@ pub struct DepthStencilTarget {
     pub store_op: vk::AttachmentStoreOp,
 }
 
+struct RaytracingPassData {
+    raygen_shader: Option<ShaderDefinition>,
+    miss_shader: Option<ShaderDefinition>,
+    chit_shader: Option<ShaderDefinition>,
+    dimension: UVec3,
+}
+
 pub struct RenderPass<'a> {
     //params: dyn Paramter,
     //read_textures: Vec<RGHandle<Texture>>,
@@ -133,18 +143,21 @@ pub struct RenderPass<'a> {
     ty: RenderPassType,
     pipeline: Handle<Pipeline>,
     descriptor_set_index: u32,
-    textures: Vec<(&'a str, RGHandle<TextureView>)>,
-    buffers: Vec<(&'a str, RGHandle<Buffer>)>,
-    rw_buffers: Vec<(&'a str, RGHandle<Buffer>)>,
-    accel_structs: Vec<(&'a str, RGHandle<AccelerationStructure>)>,
+    textures: Vec<(&'static str, RGHandle<TextureView>)>,
+    buffers: Vec<(&'static str, RGHandle<Buffer>)>,
+    rw_buffers: Vec<(&'static str, RGHandle<Buffer>)>,
+    accel_structs: Vec<(&'static str, RGHandle<AccelerationStructure>)>,
     color_targets: Vec<ColorTarget>,
     depth_stencil: Option<DepthStencilTarget>,
-    rw_textures: Vec<(&'a str, RGHandle<TextureView>)>,
+    rw_textures: Vec<(&'static str, RGHandle<TextureView>)>,
     push_constants: PushConstantsBuilder,
     copy_src: Option<RGHandle<TextureView>>,
     copy_dst: Option<RGHandle<TextureView>>,
     present_texture: Option<RGHandle<TextureView>>,
     render: Option<Box<dyn 'a + FnOnce(&CommandBuffer, &Shaders, &RenderPass)>>,
+
+    // Varying data
+    raytracing: Option<RaytracingPassData>,
 }
 
 impl RenderPass<'_> {
@@ -166,6 +179,8 @@ impl RenderPass<'_> {
             copy_dst: None,
             present_texture: None,
             render: None,
+
+            raytracing: None,
         }
     }
 
@@ -179,9 +194,77 @@ impl RenderPass<'_> {
     }
 }
 
+pub trait PassBuilderTrait<'a> {
+    fn inner_opt(&mut self) -> &mut Option<RenderPass<'a>>;
+
+    fn render_graph(&mut self) -> &mut RenderGraphBuilder<'a>;
+
+    fn inner(&mut self) -> &mut RenderPass<'a> {
+        self.inner_opt().as_mut().unwrap()
+    }
+
+    fn done(&mut self) {
+        if self.inner_opt().is_none() {
+            panic!("RenderPassBuilder::done is called multiple times!");
+        }
+        let inner = self.inner_opt().take();
+        self.render_graph().add_pass(inner.unwrap());
+    }
+
+    // Binding texture to per-pass descriptor set
+    fn texture(&mut self, name: &'static str, texture: RGHandle<TextureView>) -> &mut Self {
+        self.inner().textures.push((name, texture));
+        self
+    }
+
+    // Binding rw texture to per-pass descriptor set
+    fn rw_texture(&mut self, name: &'static str, texture: RGHandle<TextureView>) -> &mut Self {
+        self.inner().rw_textures.push((name, texture));
+        self
+    }
+
+    fn buffer(&mut self, name: &'static str, buffer: RGHandle<Buffer>) -> &mut Self {
+        self.inner().buffers.push((name, buffer));
+        self
+    }
+
+    fn rw_buffer(&mut self, name: &'static str, buffer: RGHandle<Buffer>) -> &mut Self {
+        self.inner().rw_buffers.push((name, buffer));
+        self
+    }
+
+    // Binding acceleration structure to per-pass descriptor set
+    fn accel_struct(
+        &mut self,
+        name: &'static str,
+        accel_struct: RGHandle<AccelerationStructure>,
+    ) -> &mut Self {
+        self.inner().accel_structs.push((name, accel_struct));
+        self
+    }
+
+    fn push_constant<T>(&mut self, value: &T) -> &mut Self
+    where
+        T: Copy,
+    {
+        self.inner().push_constants.push_inplace::<T>(value);
+        self
+    }
+}
+
 pub struct RenderPassBuilder<'a, 'b> {
     inner: Option<RenderPass<'a>>,
     render_graph: &'b mut RenderGraphBuilder<'a>,
+}
+
+impl<'a, 'b> PassBuilderTrait<'a> for RenderPassBuilder<'a, 'b> {
+    fn inner_opt(&mut self) -> &mut Option<RenderPass<'a>> {
+        &mut self.inner
+    }
+
+    fn render_graph(&mut self) -> &mut RenderGraphBuilder<'a> {
+        self.render_graph
+    }
 }
 
 // TODO generate setter with macro?
@@ -197,6 +280,7 @@ impl<'a, 'b> RenderPassBuilder<'a, 'b> {
         }
     }
 
+    /*
     fn inner(&mut self) -> &mut RenderPass<'a> {
         self.inner.as_mut().unwrap()
     }
@@ -208,37 +292,48 @@ impl<'a, 'b> RenderPassBuilder<'a, 'b> {
         let inner = self.inner.take();
         self.render_graph.add_pass(inner.unwrap());
     }
+    */
 
-    pub fn pipeline(mut self, pipeline: Handle<Pipeline>) -> Self {
+    pub fn pipeline(&mut self, pipeline: Handle<Pipeline>) -> &mut Self {
         self.inner().pipeline = pipeline;
         self
     }
 
     // Binding an external descriptor set
-    pub fn descritpro_set(self, _: u32, _: vk::DescriptorSet) -> Self {
+    pub fn descritpro_set(&mut self, _: u32, _: vk::DescriptorSet) -> &mut Self {
         println!("Warning: deprecated API!");
         self
     }
 
-    pub fn descritpro_sets(self, _: &[(u32, vk::DescriptorSet)]) -> Self {
+    pub fn descritpro_sets(&mut self, _: &[(u32, vk::DescriptorSet)]) -> &mut Self {
         println!("Warning: deprecated API!");
         self
     }
 
-    pub fn color_targets(mut self, rts: &[ColorTarget]) -> Self {
+    pub fn color_targets(&mut self, rts: &[ColorTarget]) -> &mut Self {
         self.inner().color_targets.clear();
         self.inner().color_targets.extend_from_slice(rts);
         self
     }
 
-    pub fn depth_stencil(mut self, ds: DepthStencilTarget) -> Self {
+    pub fn depth_stencil(&mut self, ds: DepthStencilTarget) -> &mut Self {
         self.inner().depth_stencil = Some(ds);
         self
     }
 
     // Index for the per-pass descriptor set
-    pub fn descriptor_set_index(mut self, index: u32) -> Self {
+    pub fn descriptor_set_index(&mut self, index: u32) -> &mut Self {
         self.inner().descriptor_set_index = index;
+        self
+    }
+
+    /*
+
+    pub fn push_constant<T>(&mut self, value: &T) -> &mut Self
+    where
+        T: Copy,
+    {
+        self.inner().push_constants.push_inplace::<T>(value);
         self
     }
 
@@ -274,30 +369,24 @@ impl<'a, 'b> RenderPassBuilder<'a, 'b> {
         self
     }
 
-    pub fn copy_src(mut self, texture: RGHandle<TextureView>) -> Self {
+    */
+
+    pub fn copy_src(&mut self, texture: RGHandle<TextureView>) -> &mut Self {
         self.inner().copy_src = Some(texture);
         self
     }
 
-    pub fn copy_dst(mut self, texture: RGHandle<TextureView>) -> Self {
+    pub fn copy_dst(&mut self, texture: RGHandle<TextureView>) -> &mut Self {
         self.inner().copy_dst = Some(texture);
         self
     }
 
-    pub fn push_constant<T>(mut self, value: &T) -> Self
-    where
-        T: Copy,
-    {
-        self.inner().push_constants.push_inplace::<T>(value);
-        self
-    }
-
-    pub fn present_texture(mut self, texture: RGHandle<TextureView>) -> Self {
+    pub fn present_texture(&mut self, texture: RGHandle<TextureView>) -> &mut Self {
         self.inner().present_texture = Some(texture);
         self
     }
 
-    pub fn render<F>(mut self, f: F) -> Self
+    pub fn render<F>(&mut self, f: F) -> &mut Self
     where
         F: FnOnce(&CommandBuffer, &Shaders, &RenderPass) + 'a,
     {
@@ -315,6 +404,83 @@ impl Drop for RenderPassBuilder<'_, '_> {
         }
     }
 }
+
+pub struct RaytracingPassBuilder<'a, 'b> {
+    inner: Option<RenderPass<'a>>,
+    render_graph: &'b mut RenderGraphBuilder<'a>,
+}
+
+impl Drop for RaytracingPassBuilder<'_, '_> {
+    fn drop(&mut self) {
+        // Call Self::done automatically if not called mannually
+        if self.inner.is_some() {
+            self.done();
+        }
+    }
+}
+
+impl<'a, 'b> PassBuilderTrait<'a> for RaytracingPassBuilder<'a, 'b> {
+    fn inner_opt(&mut self) -> &mut Option<RenderPass<'a>> {
+        &mut self.inner
+    }
+
+    fn render_graph(&mut self) -> &mut RenderGraphBuilder<'a> {
+        self.render_graph
+    }
+}
+
+impl<'a, 'b> RaytracingPassBuilder<'a, 'b> {
+    pub fn new(render_graph: &'b mut RenderGraphBuilder<'a>, name: &str) -> Self {
+        let mut pass = RenderPass::new(name, RenderPassType::RayTracing);
+        pass.raytracing = Some(RaytracingPassData {
+            raygen_shader: None,
+            miss_shader: None,
+            chit_shader: None,
+            dimension: UVec3::new(0, 0, 0),
+        });
+        Self {
+            inner: Some(pass),
+            render_graph,
+        }
+    }
+
+    fn inner(&mut self) -> &mut RaytracingPassData {
+        self.inner.as_mut().unwrap().raytracing.as_mut().unwrap()
+    }
+
+    pub fn raygen_shader(&mut self, path: &'static str) -> &mut Self {
+        self.inner().raygen_shader.replace(ShaderDefinition {
+            virtual_path: path,
+            entry_point: "main",
+            stage: shader::ShaderStage::RayGen,
+        });
+        self
+    }
+
+    pub fn miss_shader(&mut self, path: &'static str) -> &mut Self {
+        self.inner().miss_shader.replace(ShaderDefinition {
+            virtual_path: path,
+            entry_point: "main",
+            stage: shader::ShaderStage::Miss,
+        });
+        self
+    }
+
+    pub fn closest_hit_shader(&mut self, path: &'static str) -> &mut Self {
+        self.inner().chit_shader.replace(ShaderDefinition {
+            virtual_path: path,
+            entry_point: "main",
+            stage: shader::ShaderStage::ClosestHit,
+        });
+        self
+    }
+
+    pub fn dimension(&mut self, width: u32, height: u32, depth: u32) -> &mut Self {
+        self.inner().dimension = UVec3::new(width, height, depth);
+        self
+    }
+}
+
 struct ResPool<K, V>
 where
     K: Eq + Hash,
@@ -346,6 +512,79 @@ where
     }
 }
 
+// An internal resource type for ray tracing passes.
+// This kind of passes have just a few shander handles, and no extra data in shader binding tables.
+struct PassShaderBindingTable {
+    sbt: Buffer,
+    raygen_region: vk::StridedDeviceAddressRegionKHR,
+    miss_region: vk::StridedDeviceAddressRegionKHR,
+    hit_region: vk::StridedDeviceAddressRegionKHR,
+}
+
+impl PassShaderBindingTable {
+    fn new(rd: &RenderDevice) -> Self {
+        let handle_size = rd.physical_device.shader_group_handle_size() as u64;
+        let stride = std::cmp::max(
+            handle_size,
+            rd.physical_device.shader_group_base_alignment() as u64,
+        );
+
+        let sbt = rd
+            .create_buffer(BufferDesc {
+                size: handle_size + stride * 2,
+                usage: vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+            })
+            .unwrap();
+
+        let raygen_region = vk::StridedDeviceAddressRegionKHR {
+            device_address: sbt.device_address.unwrap(),
+            stride: handle_size,
+            size: handle_size,
+        };
+
+        let miss_region = vk::StridedDeviceAddressRegionKHR {
+            device_address: sbt.device_address.unwrap() + stride,
+            stride: handle_size,
+            size: handle_size,
+        };
+
+        let hit_region = vk::StridedDeviceAddressRegionKHR {
+            device_address: sbt.device_address.unwrap() + stride * 2,
+            stride: handle_size,
+            size: handle_size,
+        };
+
+        Self {
+            sbt,
+            raygen_region,
+            miss_region,
+            hit_region,
+        }
+    }
+
+    fn update_shader_group_handles(
+        &mut self,
+        rd: &RenderDevice,
+        pipeline: &Pipeline,
+        has_hit: bool,
+    ) {
+        // TODO check shader change
+        let group_count = if has_hit { 3 } else { 2 };
+        let handle_data = rd.get_ray_tracing_shader_group_handles(pipeline.handle, 0, group_count);
+        let mut filler = ShaderBindingTableFiller::new(&rd.physical_device, self.sbt.data);
+        filler.write_handles(&handle_data, 0, 1);
+        filler.start_group();
+        filler.write_handles(&handle_data, 1, 1);
+        if has_hit {
+            filler.start_group();
+            filler.write_handles(&handle_data, 2, 1);
+        }
+    }
+}
+
 const RG_MAX_SET: u32 = 1024;
 
 pub struct RenderGraphCache {
@@ -364,6 +603,7 @@ pub struct RenderGraphCache {
     texture_pool: ResPool<TextureDesc, Texture>,
     texture_view_pool: ResPool<(Texture, TextureViewDesc), TextureView>,
     buffer_pool: ResPool<BufferDesc, Buffer>,
+    sbt_pool: ResPool<u32, PassShaderBindingTable>,
 }
 
 impl RenderGraphCache {
@@ -385,6 +625,7 @@ impl RenderGraphCache {
             texture_pool: ResPool::new(),
             texture_view_pool: ResPool::new(),
             buffer_pool: ResPool::new(),
+            sbt_pool: ResPool::new(),
         }
     }
 
@@ -433,6 +674,9 @@ struct RenderGraphExecuteContext {
 
     // Per-pass descriptor set
     pub descriptor_sets: Vec<vk::DescriptorSet>, // by pass index
+
+    // Per-pass shader binding tables
+    pub shader_binding_tables: Vec<Option<PassShaderBindingTable>>, // by pass index
 }
 
 impl RenderGraphExecuteContext {
@@ -442,6 +686,7 @@ impl RenderGraphExecuteContext {
             texture_views: Vec::new(),
             buffers: Vec::new(),
             descriptor_sets: Vec::new(),
+            shader_binding_tables: Vec::new(),
         }
     }
 }
@@ -482,6 +727,8 @@ impl ResType for Buffer {
 pub struct RenderGraphBuilder<'a> {
     passes: Vec<RenderPass<'a>>,
 
+    shader_config: shader::ShadersConfig,
+
     // Descriptor sets that would be bound for all passes
     // Exist for ergonomics reason; descriptors set like per-frame stuffs can be specify as this.
     global_descriptor_sets: Vec<(u32, vk::DescriptorSet)>,
@@ -494,6 +741,8 @@ pub struct RenderGraphBuilder<'a> {
     texture_views: Vec<RenderResource<VirtualTextureView, TextureView>>,
     buffers: Vec<RenderResource<BufferDesc, Buffer>>,
     accel_structs: Vec<RenderResource<(), AccelerationStructure>>,
+
+    hack_frame_index: u32,
 }
 
 // Private stuff
@@ -548,8 +797,14 @@ impl<'a> RenderGraphBuilder<'a> {
 // Interface
 impl<'a> RenderGraphBuilder<'a> {
     pub fn new() -> Self {
+        Self::new_with_shader_config(shader::ShadersConfig::default())
+    }
+
+    pub fn new_with_shader_config(shader_config: ShadersConfig) -> Self {
         Self {
             passes: Vec::new(),
+
+            shader_config,
 
             global_descriptor_sets: Vec::new(),
 
@@ -560,7 +815,13 @@ impl<'a> RenderGraphBuilder<'a> {
             texture_views: Vec::new(),
             buffers: Vec::new(),
             accel_structs: Vec::new(),
+
+            hack_frame_index: 0,
         }
+    }
+
+    pub fn set_frame_index(&mut self, frame_index: u32) {
+        self.hack_frame_index = frame_index;
     }
 
     pub fn create_texutre(&mut self, desc: TextureDesc) -> RGHandle<Texture> {
@@ -782,6 +1043,10 @@ impl<'a> RenderGraphBuilder<'a> {
     pub fn new_pass<'b>(&'b mut self, name: &str, ty: RenderPassType) -> RenderPassBuilder<'a, 'b> {
         //println!("Adding new pass: {}", name);
         RenderPassBuilder::new(self, name, ty)
+    }
+
+    pub fn new_raytracing<'b>(&'b mut self, name: &str) -> RaytracingPassBuilder<'a, 'b> {
+        RaytracingPassBuilder::new(self, name)
     }
 }
 
@@ -1231,10 +1496,26 @@ impl RenderGraphBuilder<'_> {
         &mut self,
         rd: &RenderDevice,
         command_buffer: &CommandBuffer,
-        shaders: &Shaders,
+        shaders: &mut Shaders,
         cache: &mut RenderGraphCache,
     ) {
         let mut exec_context = RenderGraphExecuteContext::new();
+
+        // Some pre-processing
+        for pass_index in 0..self.passes.len() {
+            let pass = &mut self.passes[pass_index];
+
+            if let Some(rt) = &pass.raytracing {
+                pass.pipeline = shaders
+                    .create_raytracing_pipeline(
+                        rt.raygen_shader.unwrap(),
+                        rt.miss_shader.unwrap(),
+                        rt.chit_shader,
+                        &self.shader_config,
+                    )
+                    .unwrap();
+            }
+        }
 
         // Populate textures and views
         // TODO drain self.texture, self.texture_views to context
@@ -1296,6 +1577,7 @@ impl RenderGraphBuilder<'_> {
             };
             exec_context.buffers.push(buffer);
         }
+
         // Create (temp) descriptor set for each pass
         for pass in &self.passes {
             let pipeline = shaders.get_pipeline(pass.pipeline);
@@ -1325,6 +1607,27 @@ impl RenderGraphBuilder<'_> {
             exec_context.descriptor_sets.push(set);
         }
         assert!(exec_context.descriptor_sets.len() == self.passes.len());
+
+        // Create and update ShaderBindingTable for each pass
+        let sbt_frame_index = self.hack_frame_index % 3;
+        for pass in &self.passes {
+            let mut pass_sbt = None;
+            if let Some(rt) = &pass.raytracing {
+                let mut sbt = cache
+                    .sbt_pool
+                    .pop(&sbt_frame_index)
+                    .unwrap_or_else(|| PassShaderBindingTable::new(rd));
+
+                // update anyway :)
+                // TODO using frame index % 3 to void cpu-write-on-GPU-read; should do it with proper synchronization
+                let has_hit = rt.chit_shader.is_some();
+                let pipeline = shaders.get_pipeline(pass.pipeline).unwrap();
+                sbt.update_shader_group_handles(rd, pipeline, has_hit);
+
+                pass_sbt = Some(sbt);
+            }
+            exec_context.shader_binding_tables.push(pass_sbt);
+        }
 
         command_buffer.insert_checkpoint();
 
@@ -1400,6 +1703,31 @@ impl RenderGraphBuilder<'_> {
             if let Some(render) = render {
                 render(command_buffer, &shaders, pass);
                 command_buffer.insert_checkpoint();
+            } else if let Some(rt) = &pass.raytracing {
+                // [new passbuilder]
+                let has_hit = rt.chit_shader.is_some();
+                let dim = rt.dimension;
+
+                let empty_region = vk::StridedDeviceAddressRegionKHR::default();
+
+                let sbt = exec_context.shader_binding_tables[pass_index]
+                    .as_ref()
+                    .unwrap();
+                let hit_region = if has_hit {
+                    &sbt.hit_region
+                } else {
+                    &empty_region
+                };
+
+                command_buffer.trace_rays(
+                    &sbt.raygen_region,
+                    &sbt.miss_region,
+                    hit_region,
+                    &empty_region,
+                    dim.x,
+                    dim.y,
+                    dim.z,
+                );
             } else {
                 match pass.ty {
                     RenderPassType::Present => {}
@@ -1479,6 +1807,14 @@ impl RenderGraphBuilder<'_> {
             if set != vk::DescriptorSet::null() {
                 // TODO may be need some frame buffering, because it may be still using?
                 cache.release_descriptor_set(rd, set);
+            }
+        }
+        for sbt in exec_context
+            .shader_binding_tables
+            .drain(0..exec_context.shader_binding_tables.len())
+        {
+            if let Some(sbt) = sbt {
+                cache.sbt_pool.push(sbt_frame_index, sbt);
             }
         }
     }
