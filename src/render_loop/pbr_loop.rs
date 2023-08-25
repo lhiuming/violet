@@ -9,7 +9,7 @@ use crate::{
     },
     render_graph,
     render_scene::*,
-    shader::{Handle, Pipeline, PushConstantsBuilder, ShaderDefinition, Shaders, ShadersConfig},
+    shader::{Handle, Pipeline, ShaderDefinition, Shaders, ShadersConfig},
 };
 
 use super::{FrameParams, RenderLoopDesciptorSets, ViewInfo, FRAME_DESCRIPTOR_SET_INDEX};
@@ -251,15 +251,14 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
         view_info: &ViewInfo,
     ) {
         let command_buffer = self.command_buffer;
-
         let frame_descriptor_set = self.descriptor_sets.sets[0];
-        let common_sets = [
-            (SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set),
-            (FRAME_DESCRIPTOR_SET_INDEX, frame_descriptor_set),
-        ];
 
         use render_graph::*;
         let mut rg = RenderGraphBuilder::new();
+        rg.add_global_descriptor_sets(&[
+            (SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set),
+            (FRAME_DESCRIPTOR_SET_INDEX, frame_descriptor_set),
+        ]);
 
         // Stupid shader compiling hack
         let mut hack = ShadersConfig {
@@ -369,7 +368,7 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
         let mut skycube_texture = None;
         let skycube_gen = shaders
             .create_compute_pipeline(ShaderDefinition::compute("sky_cube.hlsl", "main"), &hack);
-        if let Some(pipeline) = skycube_gen {
+        if let Some(_) = skycube_gen {
             skycube_texture = Some(rg.create_texutre(TextureDesc {
                 width: skycube_size,
                 height: skycube_size,
@@ -379,6 +378,7 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
                 flags: vk::ImageCreateFlags::CUBE_COMPATIBLE, // required for viewed as cube
                 ..Default::default()
             }));
+            /*
             let array_uav = rg.create_texture_view(
                 skycube_texture.unwrap(),
                 Some(TextureViewDesc {
@@ -397,6 +397,7 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
                 .render(move |cb, _, _| {
                     cb.dispatch(skycube_size / 8, skycube_size / 4, 6);
                 });
+             */
         }
 
         let skycube = rg.create_texture_view(
@@ -412,11 +413,14 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
         // Define GBuffer
         let gbuffer = create_gbuffer_textures(&mut rg, rd.swapchain.extent);
 
+        /*
         // Draw mesh
-        add_gbuffer_pass(&mut rg, &rd, shaders, &hack, &common_sets, scene, &gbuffer);
+        add_gbuffer_pass(&mut rg, &rd, hack, &common_sets, scene, &gbuffer);
+        */
 
         let final_color = rg.register_texture_view(rd.swapchain.image_view[image_index as usize]);
 
+        /*
         // Draw (procedure) Sky
         let sky_pipeline = shaders.create_gfx_pipeline(
             ShaderDefinition::vert("sky_vsps.hlsl", "vs_main"),
@@ -468,9 +472,11 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
                     cb.draw(3, 1, 0, 0);
                 });
         }
+        */
 
         let scene_tlas = rg.register_accel_struct(scene.scene_top_level_accel_struct.unwrap());
 
+        /*
         let raytraced_shadow_mask = {
             let tex_desc = TextureDesc::new_2d(
                 gbuffer.size.width,
@@ -514,7 +520,9 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
                     )
                 });
         }
+        */
 
+        /*
         // GBuffer Lighting
         let gbuffer_lighting = shaders.create_compute_pipeline(
             ShaderDefinition::compute("gbuffer_lighting.hlsl", "main"),
@@ -538,6 +546,7 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
                     cb.dispatch(dispatch_x, diapatch_y, 1);
                 });
         }
+        */
 
         // Reset path tracing if camera or sun moved
         if view_info.moved {
@@ -576,30 +585,17 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
                 rg.register_texture_view(self.pathtraced_lighting.accumulated_texture_view);
 
             // Trace
-            rg.new_pass("PathTracedLighting", RenderPassType::RayTracing)
-                .pipeline(pipeline)
-                .descritpro_set(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set)
-                .descritpro_set(FRAME_DESCRIPTOR_SET_INDEX, frame_descriptor_set)
+            rg.new_raytracing("PathTracedLighting")
+                .raygen_shader_with_ep("pathtraced_lighting.hlsl", "raygen")
+                .miss_shader_with_ep("pathtraced_lighting.hlsl", "miss")
+                .closest_hit_shader_with_ep("pathtraced_lighting.hlsl", "closesthit")
                 .accel_struct("scene_tlas", scene_tlas)
                 .texture("skycube", skycube)
                 .rw_texture("rw_accumulated", rw_accumulated)
                 .rw_texture("rw_lighting", final_color)
-                .render(move |cb, shaders, _pass| {
-                    let pipeline = shaders.get_pipeline(pipeline).unwrap();
-                    cb.bind_pipeline(vk::PipelineBindPoint::RAY_TRACING_KHR, pipeline.handle);
-
-                    if !pipeline.push_constant_ranges.is_empty() {
-                        let pc = PushConstantsBuilder::new()
-                            .push(&frame_index)
-                            .push(&accumulated_count);
-                        cb.push_constants(
-                            pipeline.layout,
-                            pipeline.push_constant_ranges[0].stage_flags,
-                            0,
-                            &pc.build(),
-                        );
-                    }
-
+                .push_constant(&frame_index)
+                .push_constant(&accumulated_count)
+                .render(move |cb, _| {
                     cb.trace_rays(
                         &raygen_region,
                         &miss_region,
@@ -615,8 +611,7 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
         // Insert output pass
         let swapchain_view_handle =
             rg.register_texture_view(rd.swapchain.image_view[image_index as usize]);
-        rg.new_pass("Present", RenderPassType::Present)
-            .present_texture(swapchain_view_handle);
+        rg.present(swapchain_view_handle);
 
         // Run render graph and fianlize
         {

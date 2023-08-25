@@ -3,8 +3,7 @@ use glam::Vec3;
 use violet::{
     command_buffer::{CommandBuffer, StencilOps},
     render_device::{
-        Buffer, BufferDesc, RenderDevice, ShaderBindingTableFiller, Texture, TextureDesc,
-        TextureView, TextureViewDesc,
+        Buffer, BufferDesc, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
     },
     render_graph::*,
     render_loop::gbuffer_pass::*,
@@ -13,7 +12,7 @@ use violet::{
         FRAME_DESCRIPTOR_SET_INDEX,
     },
     render_scene::{RenderScene, SCENE_DESCRIPTOR_SET_INDEX},
-    shader::{Pipeline, ShaderDefinition, Shaders, ShadersConfig},
+    shader::{Shaders, ShadersConfig},
 };
 
 pub struct DefaultResources {
@@ -82,52 +81,6 @@ impl TAAPass {
     }
 }
 
-pub struct RaytracedShadow {
-    pub sbt: Buffer,
-    pub raygen_region: vk::StridedDeviceAddressRegionKHR,
-    pub miss_region: vk::StridedDeviceAddressRegionKHR,
-}
-
-impl RaytracedShadow {
-    pub fn new(rd: &RenderDevice) -> Self {
-        let handle_size = rd.physical_device.shader_group_handle_size() as u64;
-        let stride = std::cmp::max(
-            handle_size,
-            rd.physical_device.shader_group_base_alignment() as u64,
-        );
-
-        let sbt = rd
-            .create_buffer(BufferDesc::shader_binding_table(handle_size + stride))
-            .unwrap();
-
-        let raygen_region = vk::StridedDeviceAddressRegionKHR {
-            device_address: sbt.device_address.unwrap(),
-            stride: handle_size,
-            size: handle_size,
-        };
-
-        let miss_region = vk::StridedDeviceAddressRegionKHR {
-            device_address: sbt.device_address.unwrap() + stride,
-            stride: handle_size,
-            size: handle_size,
-        };
-
-        Self {
-            sbt,
-            raygen_region,
-            miss_region,
-        }
-    }
-
-    pub fn update_shader_group_handle(&mut self, rd: &RenderDevice, pipeline: &Pipeline) {
-        let handle_data = rd.get_ray_tracing_shader_group_handles(pipeline.handle, 0, 2);
-        let mut filler = ShaderBindingTableFiller::new(&rd.physical_device, self.sbt.data);
-        filler.write_handles(&handle_data, 0, 1);
-        filler.start_group();
-        filler.write_handles(&handle_data, 1, 1);
-    }
-}
-
 pub struct RestirRenderLoop {
     render_graph_cache: RenderGraphCache,
     stream_lined: StreamLinedFrameResource,
@@ -136,7 +89,6 @@ pub struct RestirRenderLoop {
     frame_index: u32,
 
     sample_gen: SampleGenPass,
-    raytraced_shadow: RaytracedShadow,
     taa: TAAPass,
 }
 
@@ -148,7 +100,6 @@ impl RenderLoop for RestirRenderLoop {
             default_res: DefaultResources::new(rd),
             frame_index: 0,
             sample_gen: SampleGenPass::new(),
-            raytraced_shadow: RaytracedShadow::new(rd),
             taa: TAAPass::new(),
         }
     }
@@ -181,16 +132,6 @@ impl RenderLoop for RestirRenderLoop {
         // HACK: render graph should not use this; currently using it for SBT pooling
         rg.set_frame_index(self.frame_index);
 
-        // HACK: this should be removed once all passes create pipeline inside RG
-        let mut shader_config = ShadersConfig::default();
-        shader_config
-            .set_layout_override
-            .insert(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set_layout);
-        shader_config.set_layout_override.insert(
-            FRAME_DESCRIPTOR_SET_INDEX,
-            self.stream_lined.get_set_layout(),
-        );
-
         // Add persistent bindings
         let frame_descriptor_set = self.stream_lined.get_frame_desciptor_set();
         rg.add_global_descriptor_sets(&[
@@ -215,20 +156,11 @@ impl RenderLoop for RestirRenderLoop {
         let gbuffer = create_gbuffer_textures(&mut rg, main_size);
 
         // Pass: GBuffer
-        {
-            add_gbuffer_pass(&mut rg, rd, shaders, &shader_config, &[], scene, &gbuffer);
-        }
+        add_gbuffer_pass(&mut rg, rd, scene, &gbuffer);
 
         // Pass: Skycube update
         let skycube;
         {
-            let pipeline = shaders
-                .create_compute_pipeline(
-                    ShaderDefinition::compute("sky_cube.hlsl", "main"),
-                    &shader_config,
-                )
-                .unwrap();
-
             let width = 64;
             let desc = TextureDesc::new_2d_array(
                 width,
@@ -241,13 +173,11 @@ impl RenderLoop for RestirRenderLoop {
             let skycube_texture = rg.create_texutre(desc);
             let uav = rg.create_texture_view(skycube_texture, None);
 
-            rg.new_pass("SkyCubeGen", RenderPassType::Compute)
-                .pipeline(pipeline)
+            rg.new_compute("Sky Cube")
+                .compute_shader("sky_cube.hlsl")
                 .rw_texture("rw_cube_texture", uav)
                 .push_constant(&(width as f32))
-                .render(move |cb, _, _| {
-                    cb.dispatch(width / 8, width / 4, 6);
-                });
+                .group_count(width / 8, width / 4, 6);
 
             skycube = rg.create_texture_view(
                 skycube_texture,
@@ -298,7 +228,7 @@ impl RenderLoop for RestirRenderLoop {
         let temporal_reservoir_buffer =
             rg.create_buffer(BufferDesc::compute(main_len as u64 * 24 * 4));
 
-        // Pass: sample generation (and temporal reusing)
+        // Pass: Sample Generation (and temporal reusing)
         {
             // bind a dummy texture if we don't have prev frame reservoir
             let prev_reservoir_buffer = if let Some(buffer) = self.sample_gen.prev_reservoir_buffer
@@ -331,15 +261,8 @@ impl RenderLoop for RestirRenderLoop {
             let reservoir_buffer_desc = rg.get_buffer_desc(temporal_reservoir_buffer);
             let spatial_reservoir_buffer = rg.create_buffer(*reservoir_buffer_desc);
 
-            let pipeline = shaders
-                .create_compute_pipeline(
-                    ShaderDefinition::compute("restir/spatial_resampling.hlsl", "main"),
-                    &shader_config,
-                )
-                .unwrap();
-
-            rg.new_pass("Spatial Resampling", RenderPassType::Compute)
-                .pipeline(pipeline)
+            rg.new_compute("Spatial Resampling")
+                .compute_shader("restir/spatial_resampling.hlsl")
                 .texture("gbuffer_depth", gbuffer.depth.1)
                 .texture("gbuffer_color", gbuffer.color.1)
                 .buffer("temporal_reservoir_buffer", temporal_reservoir_buffer)
@@ -347,13 +270,11 @@ impl RenderLoop for RestirRenderLoop {
                 .rw_texture("rw_lighting_texture", indirect_diffuse.1)
                 //.rw_texture("rw_debug_texture", debug_texture.1)
                 .push_constant(&self.frame_index)
-                .render(|cb, _, _| {
-                    cb.dispatch(
-                        div_round_up(main_size.width, 8),
-                        div_round_up(main_size.height, 4),
-                        1,
-                    );
-                });
+                .group_count(
+                    div_round_up(main_size.width, 8),
+                    div_round_up(main_size.height, 4),
+                    1,
+                );
 
             let temporal =
                 rg.convert_to_temporal(&mut self.render_graph_cache, spatial_reservoir_buffer);
@@ -371,37 +292,13 @@ impl RenderLoop for RestirRenderLoop {
             (tex, rg.create_texture_view(tex, None))
         };
         {
-            let pipeline = shaders
-                .create_raytracing_pipeline(
-                    ShaderDefinition::raygen("raytraced_shadow.hlsl", "raygen"),
-                    ShaderDefinition::miss("raytraced_shadow.hlsl", "miss"),
-                    None,
-                    &shader_config,
-                )
-                .unwrap();
-
-            self.raytraced_shadow
-                .update_shader_group_handle(rd, shaders.get_pipeline(pipeline).unwrap());
-            let raygen_sbt = self.raytraced_shadow.raygen_region;
-            let miss_sbt = self.raytraced_shadow.miss_region;
-
-            rg.new_pass("Raytraced Shadow", RenderPassType::RayTracing)
-                .pipeline(pipeline)
+            rg.new_raytracing("Raytraced Shadow")
+                .raygen_shader_with_ep("raytraced_shadow.hlsl", "raygen")
+                .miss_shader_with_ep("raytraced_shadow.hlsl", "miss")
                 .accel_struct("scene_tlas", scene_tlas)
                 .texture("gbuffer_depth", gbuffer.depth.1)
                 .rw_texture("rw_shadow", raytraced_shadow_mask.1)
-                .render(move |cb, _, _| {
-                    let none_sbt = vk::StridedDeviceAddressRegionKHR::default();
-                    cb.trace_rays(
-                        &raygen_sbt,
-                        &miss_sbt,
-                        &none_sbt,
-                        &none_sbt,
-                        main_size.width,
-                        main_size.height,
-                        1,
-                    );
-                });
+                .dimension(main_size.width, main_size.height, 1);
         }
 
         let scene_color = {
@@ -419,11 +316,7 @@ impl RenderLoop for RestirRenderLoop {
         };
 
         // Pass: Draw sky
-        if let Some(pipeline) = shaders.create_gfx_pipeline(
-            ShaderDefinition::vert("sky_vsps.hlsl", "vs_main"),
-            ShaderDefinition::frag("sky_vsps.hlsl", "ps_main"),
-            &shader_config,
-        ) {
+        {
             let stencil = rg.create_texture_view(
                 gbuffer.depth.0,
                 Some(TextureViewDesc {
@@ -434,8 +327,9 @@ impl RenderLoop for RestirRenderLoop {
                 }),
             );
 
-            rg.new_pass("Sky", RenderPassType::Graphics)
-                .pipeline(pipeline)
+            rg.new_graphics("Sky")
+                .vertex_shader_with_ep("sky_vsps.hlsl", "vs_main")
+                .pixel_shader_with_ep("sky_vsps.hlsl", "ps_main")
                 .texture("skycube", skycube)
                 .color_targets(&[ColorTarget {
                     view: scene_color.1,
@@ -446,9 +340,7 @@ impl RenderLoop for RestirRenderLoop {
                     load_op: DepthLoadOp::Load,
                     store_op: vk::AttachmentStoreOp::NONE,
                 })
-                .render(move |cb, shaders, _pass| {
-                    let pipeline = shaders.get_pipeline(pipeline).unwrap();
-
+                .render(move |cb, pipeline| {
                     // Set up raster states
                     cb.set_depth_test_enable(false);
                     cb.set_depth_write_enable(false);
@@ -468,26 +360,17 @@ impl RenderLoop for RestirRenderLoop {
         // Pass: Final Lighting (Combine)
         // TODO pixel shader to utilize the stencil buffer
         {
-            let pipeline = shaders
-                .create_compute_pipeline(
-                    ShaderDefinition::compute("restir/final_lighting.hlsl", "main"),
-                    &shader_config,
-                )
-                .unwrap();
-
-            rg.new_pass("Combined Lighting", RenderPassType::Compute)
-                .pipeline(pipeline)
+            rg.new_compute("Combined Lighting")
+                .compute_shader("restir/final_lighting.hlsl")
                 .texture("gbuffer_color", gbuffer.color.1)
                 .texture("shadow_mask_buffer", raytraced_shadow_mask.1)
                 .texture("indirect_diffuse_buffer", indirect_diffuse.1)
                 .rw_texture("rw_color_buffer", scene_color.1)
-                .render(|cb, _, _| {
-                    cb.dispatch(
-                        div_round_up(main_size.width, 8),
-                        div_round_up(main_size.height, 4),
-                        1,
-                    );
-                });
+                .group_count(
+                    div_round_up(main_size.width, 8),
+                    div_round_up(main_size.height, 4),
+                    1,
+                );
         }
 
         // Pass: TAA
@@ -503,22 +386,19 @@ impl RenderLoop for RestirRenderLoop {
             let view = rg.create_texture_view(texture, None);
             (texture, view)
         };
-        if let Some(pipeline) = shaders.create_compute_pipeline(
-            ShaderDefinition::compute("temporal_aa.hlsl", "main"),
-            &shader_config,
-        ) {
-            rg.new_pass("Temporal AA", RenderPassType::Compute)
-                .pipeline(pipeline)
+        {
+            rg.new_compute("Temporal AA")
+                .compute_shader("temporal_aa.hlsl")
                 .texture("gbuffer_depth", gbuffer.depth.1)
                 .texture("source_texture", scene_color.1)
                 .texture("history_texture", prev_color)
                 .rw_texture("rw_target", post_taa_color.1)
                 .push_constant(&has_prev_frame)
-                .render(move |cb, _, _| {
-                    let group_count_x = div_round_up(main_size.width, 8);
-                    let group_count_y = div_round_up(main_size.height, 4);
-                    cb.dispatch(group_count_x, group_count_y, 1);
-                });
+                .group_count(
+                    div_round_up(main_size.width, 8),
+                    div_round_up(main_size.height, 4),
+                    1,
+                );
 
             self.taa
                 .prev_color
@@ -533,30 +413,18 @@ impl RenderLoop for RestirRenderLoop {
             rg.register_texture_view(rd.swapchain.image_view[swapchain_image_index as usize]);
 
         // Pass: Post Processing (write to swapchain)
-        {
-            let pipeline = shaders
-                .create_compute_pipeline(
-                    ShaderDefinition::compute("post_processing.hlsl", "main"),
-                    &shader_config,
-                )
-                .unwrap();
-
-            rg.new_pass("Post Processing", RenderPassType::Compute)
-                .pipeline(pipeline)
-                .texture("src_color_buffer", post_taa_color.1)
-                .rw_texture("rw_target_buffer", present_target)
-                .render(|cb, _, _| {
-                    cb.dispatch(
-                        div_round_up(main_size.width, 8),
-                        div_round_up(main_size.height, 4),
-                        1,
-                    );
-                });
-        }
+        rg.new_compute("Post Processing")
+            .compute_shader("post_processing.hlsl")
+            .texture("src_color_buffer", post_taa_color.1)
+            .rw_texture("rw_target_buffer", present_target)
+            .group_count(
+                div_round_up(main_size.width, 8),
+                div_round_up(main_size.height, 4),
+                1,
+            );
 
         // Pass: Output
-        rg.new_pass("Present", RenderPassType::Present)
-            .present_texture(present_target);
+        rg.present(present_target);
 
         // Prepare command buffer
         let command_buffer = self.stream_lined.wait_and_reset_command_buffer(rd);
