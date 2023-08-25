@@ -48,10 +48,10 @@ pub fn create_gbuffer_textures(rg: &mut RenderGraphBuilder, size: vk::Extent2D) 
     }
 }
 
-pub fn add_gbuffer_pass<'a>(
-    rg: &mut RenderGraphBuilder<'a>,
+pub fn add_gbuffer_pass<'a, 'render>(
+    rg: &'a mut RenderGraphBuilder<'render>,
     rd: &RenderDevice,
-    scene: &'a RenderScene,
+    scene: &'render RenderScene,
     gbuffer: &GBuffer,
 ) {
     let viewport_extent = rd.swapchain.extent;

@@ -124,12 +124,15 @@ struct RaytracingPassData {
     dimension: UVec3,
 }
 
-//#[derive(PartialEq, Eq)]
+struct PresentData {
+    texture: RGHandle<TextureView>,
+}
+
 enum RenderPassType {
     Graphics(GraphicsPassData),
     Compute(ComputePassData),
     RayTracing(RaytracingPassData),
-    Present,
+    Present(PresentData),
 }
 
 impl RenderPassType {
@@ -138,7 +141,7 @@ impl RenderPassType {
             RenderPassType::Graphics(_) => vk::PipelineBindPoint::GRAPHICS,
             RenderPassType::Compute(_) => vk::PipelineBindPoint::COMPUTE,
             RenderPassType::RayTracing(_) => vk::PipelineBindPoint::RAY_TRACING_KHR,
-            RenderPassType::Present => return None,
+            RenderPassType::Present(_) => return None,
         };
         Some(bind_point)
     }
@@ -152,7 +155,7 @@ impl RenderPassType {
 
     fn is_present(&self) -> bool {
         match self {
-            RenderPassType::Present => true,
+            RenderPassType::Present(_) => true,
             _ => false,
         }
     }
@@ -186,9 +189,17 @@ impl RenderPassType {
             _ => None,
         }
     }
+
+    fn present(&self) -> Option<&PresentData> {
+        match self {
+            RenderPassType::Present(present) => Some(present),
+            _ => None,
+        }
+    }
 }
 
-pub struct RenderPass<'a> {
+// Lifetime marker 'render is required becaues RenderPass::render may (unmutably) reference the RenderScene (or other things that live in the render loop call)
+pub struct RenderPass<'render> {
     name: String,
     ty: RenderPassType,
     descriptor_set_index: u32,
@@ -198,8 +209,7 @@ pub struct RenderPass<'a> {
     rw_buffers: Vec<(&'static str, RGHandle<Buffer>)>,
     rw_textures: Vec<(&'static str, RGHandle<TextureView>)>,
     push_constants: PushConstantsBuilder,
-    present_texture: Option<RGHandle<TextureView>>,
-    render: Option<Box<dyn 'a + FnOnce(&CommandBuffer, &Pipeline)>>,
+    render: Option<Box<dyn 'render + FnOnce(&CommandBuffer, &Pipeline)>>,
 }
 
 impl RenderPass<'_> {
@@ -214,45 +224,19 @@ impl RenderPass<'_> {
             rw_buffers: Vec::new(),
             rw_textures: Vec::new(),
             push_constants: PushConstantsBuilder::new(),
-            present_texture: None,
             render: None,
         }
     }
-
-    /*
-    fn get_texture(&self, name: &str) -> RGHandle<TextureView> {
-        for (n, t) in &self.textures {
-            if n == &name {
-                return *t;
-            }
-        }
-        panic!("Cannot find texture with name: {}", name);
-    }
-    */
 }
 
 // Private interfaces for all pass builders, for implementing the public trait
 // TODO any way in rust to actually make this private?
-pub trait PrivatePassBuilderTrait<'a> {
-    fn inner_opt(&mut self) -> &mut Option<RenderPass<'a>>;
-
-    fn render_graph(&mut self) -> &mut RenderGraphBuilder<'a>;
-
-    fn inner(&mut self) -> &mut RenderPass<'a> {
-        self.inner_opt().as_mut().unwrap()
-    }
-
-    fn done(&mut self) {
-        if self.inner_opt().is_none() {
-            panic!("RenderPassBuilder::done is called multiple times!");
-        }
-        let inner = self.inner_opt().take();
-        self.render_graph().add_pass(inner.unwrap());
-    }
+pub trait PrivatePassBuilderTrait<'render> {
+    fn inner(&mut self) -> &mut RenderPass<'render>;
 }
 
 // Common interfaces for all pass builders
-pub trait PassBuilderTrait<'a>: PrivatePassBuilderTrait<'a> {
+pub trait PassBuilderTrait<'render>: PrivatePassBuilderTrait<'render> {
     // Binding texture to per-pass descriptor set
     fn texture(&mut self, name: &'static str, texture: RGHandle<TextureView>) -> &mut Self {
         self.inner().textures.push((name, texture));
@@ -296,7 +280,7 @@ pub trait PassBuilderTrait<'a>: PrivatePassBuilderTrait<'a> {
     // Render function for graphics pass
     fn render<F>(&mut self, f: F) -> &mut Self
     where
-        F: FnOnce(&CommandBuffer, &Pipeline) + 'a,
+        F: 'render + FnOnce(&CommandBuffer, &Pipeline),
     {
         self.inner().render = Some(Box::new(f));
         self
@@ -306,29 +290,26 @@ pub trait PassBuilderTrait<'a>: PrivatePassBuilderTrait<'a> {
 macro_rules! define_pass_builder {
     ($pass_builder:ident) => {
         // Declare
-        pub struct $pass_builder<'a, 'b> {
-            inner: Option<RenderPass<'a>>,
-            render_graph: &'b mut RenderGraphBuilder<'a>,
+        pub struct $pass_builder<'a, 'render> {
+            inner: Option<RenderPass<'render>>,
+            render_graph: &'a mut RenderGraphBuilder<'render>,
         }
 
         // Implement methods
-        impl<'a, 'b> PrivatePassBuilderTrait<'a> for $pass_builder<'a, 'b> {
-            fn inner_opt(&mut self) -> &mut Option<RenderPass<'a>> {
-                &mut self.inner
-            }
-
-            fn render_graph(&mut self) -> &mut RenderGraphBuilder<'a> {
-                self.render_graph
+        impl<'render> PrivatePassBuilderTrait<'render> for $pass_builder<'_, 'render> {
+            fn inner(&mut self) -> &mut RenderPass<'render> {
+                self.inner.as_mut().unwrap()
             }
         }
 
-        impl<'a, 'b> PassBuilderTrait<'a> for $pass_builder<'a, 'b> {}
+        impl<'render> PassBuilderTrait<'render> for $pass_builder<'_, 'render> {}
 
         impl Drop for $pass_builder<'_, '_> {
             fn drop(&mut self) {
-                // Call Self::done automatically after last method call (drop form rg::new_pass())
-                if self.inner_opt().is_some() {
-                    self.done();
+                // Add the pass to render graph automatically after last method call (drop form rg::new_*())
+                if self.inner.is_some() {
+                    let inner = self.inner.take();
+                    self.render_graph.add_pass(inner.unwrap());
                 }
             }
         }
@@ -337,8 +318,8 @@ macro_rules! define_pass_builder {
 
 define_pass_builder!(GraphicsPassBuilder);
 
-impl<'a, 'b> GraphicsPassBuilder<'a, 'b> {
-    fn new(render_graph: &'b mut RenderGraphBuilder<'a>, name: &str) -> Self {
+impl<'a, 'render> GraphicsPassBuilder<'a, 'render> {
+    fn new(render_graph: &'a mut RenderGraphBuilder<'render>, name: &str) -> Self {
         let ty = RenderPassType::Graphics(GraphicsPassData {
             vertex_shader: None,
             pixel_shader: None,
@@ -396,8 +377,8 @@ impl<'a, 'b> GraphicsPassBuilder<'a, 'b> {
 
 define_pass_builder!(ComputePassBuilder);
 
-impl<'a, 'b> ComputePassBuilder<'a, 'b> {
-    pub fn new(render_graph: &'b mut RenderGraphBuilder<'a>, name: &str) -> Self {
+impl<'a, 'render> ComputePassBuilder<'a, 'render> {
+    pub fn new(render_graph: &'a mut RenderGraphBuilder<'render>, name: &str) -> Self {
         let ty = RenderPassType::Compute(ComputePassData {
             shader: None,
             group_count: UVec3::new(0, 0, 0),
@@ -430,8 +411,8 @@ impl<'a, 'b> ComputePassBuilder<'a, 'b> {
 
 define_pass_builder!(RaytracingPassBuilder);
 
-impl<'a, 'b> RaytracingPassBuilder<'a, 'b> {
-    pub fn new(render_graph: &'b mut RenderGraphBuilder<'a>, name: &str) -> Self {
+impl<'a, 'render> RaytracingPassBuilder<'a, 'render> {
+    pub fn new(render_graph: &'a mut RenderGraphBuilder<'render>, name: &str) -> Self {
         let ty = RenderPassType::RayTracing(RaytracingPassData {
             raygen_shader: None,
             miss_shader: None,
@@ -768,8 +749,8 @@ impl ResType for Buffer {
 }
 
 // A Render Graph to handle resource transitions automatically
-pub struct RenderGraphBuilder<'a> {
-    passes: Vec<RenderPass<'a>>,
+pub struct RenderGraphBuilder<'render> {
+    passes: Vec<RenderPass<'render>>,
 
     shader_config: shader::ShadersConfig,
 
@@ -791,6 +772,10 @@ pub struct RenderGraphBuilder<'a> {
 
 // Private stuff
 impl<'a> RenderGraphBuilder<'a> {
+    fn add_pass(&mut self, pass: RenderPass<'a>) {
+        self.passes.push(pass);
+    }
+
     fn is_virtual<T>(&self, handle: RGHandle<T>) -> bool
     where
         T: ResType,
@@ -1080,25 +1065,21 @@ impl<'a> RenderGraphBuilder<'a> {
         self.global_descriptor_sets.extend_from_slice(sets);
     }
 
-    pub fn add_pass(&mut self, pass: RenderPass<'a>) {
-        self.passes.push(pass);
-    }
-
-    pub fn new_graphics<'b>(&'b mut self, name: &str) -> GraphicsPassBuilder<'a, 'b> {
+    pub fn new_graphics<'tmp>(&'tmp mut self, name: &str) -> GraphicsPassBuilder<'tmp, 'a> {
         GraphicsPassBuilder::new(self, name)
     }
 
-    pub fn new_compute<'b>(&'b mut self, name: &str) -> ComputePassBuilder<'a, 'b> {
+    pub fn new_compute<'tmp>(&'tmp mut self, name: &str) -> ComputePassBuilder<'tmp, 'a> {
         ComputePassBuilder::new(self, name)
     }
 
-    pub fn new_raytracing<'b>(&'b mut self, name: &str) -> RaytracingPassBuilder<'a, 'b> {
+    pub fn new_raytracing<'tmp>(&'tmp mut self, name: &str) -> RaytracingPassBuilder<'tmp, 'a> {
         RaytracingPassBuilder::new(self, name)
     }
 
     pub fn present(&mut self, texture: RGHandle<TextureView>) {
-        let mut pass = RenderPass::new("Present", RenderPassType::Present);
-        pass.present_texture = Some(texture);
+        let present_data = PresentData { texture: texture };
+        let pass = RenderPass::new("Present", RenderPassType::Present(present_data));
         self.passes.push(pass);
     }
 }
@@ -1347,11 +1328,11 @@ impl RenderGraphBuilder<'_> {
         pass_index: u32,
     ) {
         // helper
-        let map_stage_mask = |pass: &RenderPass<'_>| match pass.ty {
+        let map_stage_mask = |pass: &RenderPass| match pass.ty {
             RenderPassType::Graphics(_) => vk::PipelineStageFlags::ALL_GRAPHICS, // TODO fragment access? vertex access? color output?
             RenderPassType::Compute(_) => vk::PipelineStageFlags::COMPUTE_SHADER,
             RenderPassType::RayTracing(_) => vk::PipelineStageFlags::RAY_TRACING_SHADER_KHR,
-            RenderPassType::Present => vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+            RenderPassType::Present(_) => vk::PipelineStageFlags::BOTTOM_OF_PIPE,
         };
 
         let get_last_access = |image: vk::Image,
@@ -1456,7 +1437,8 @@ impl RenderGraphBuilder<'_> {
         }
 
         // Special: check present, transition after last access
-        if let Some(present_tex) = pass.present_texture {
+        if let Some(present) = pass.ty.present() {
+            let present_tex = present.texture;
             transition_view_to(present_tex, vk::ImageLayout::PRESENT_SRC_KHR);
         }
 
@@ -1796,7 +1778,7 @@ impl RenderGraphBuilder<'_> {
                             dim.z,
                         );
                     }
-                    RenderPassType::Present => {
+                    RenderPassType::Present(_) => {
                         // nothing to call
                     }
                 }
