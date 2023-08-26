@@ -126,7 +126,6 @@ impl RenderLoop for RestirRenderLoop {
 
         let main_size = rd.swapchain.extent;
 
-        //let mut rg = RenderGraphBuilder::new();
         let mut rg = RenderGraphBuilder::new_with_shader_config(shader_config);
 
         // HACK: render graph should not use this; currently using it for SBT pooling
@@ -228,16 +227,17 @@ impl RenderLoop for RestirRenderLoop {
         let temporal_reservoir_buffer =
             rg.create_buffer(BufferDesc::compute(main_len as u64 * 24 * 4));
 
-        // Pass: Sample Generation (and temporal reusing)
-        {
-            // bind a dummy texture if we don't have prev frame reservoir
-            let prev_reservoir_buffer = if let Some(buffer) = self.sample_gen.prev_reservoir_buffer
-            {
-                rg.convert_to_transient(buffer)
-            } else {
-                rg.register_buffer(self.default_res.dummy_buffer)
-            };
+        let is_validation_frame = ((self.frame_index & 3) == 0) && (has_prev_frame != 0);
 
+        // bind a dummy texture if we don't have prev frame reservoir
+        let prev_reservoir_buffer = if let Some(buffer) = self.sample_gen.prev_reservoir_buffer {
+            rg.convert_to_transient(buffer)
+        } else {
+            rg.register_buffer(self.default_res.dummy_buffer)
+        };
+
+        // Pass: Sample Generation (and temporal reusing)
+        if !is_validation_frame {
             rg.new_raytracing("Sample Gen")
                 .raygen_shader("restir/sample_gen.hlsl")
                 .miss_shader("raytrace/geometry.rmiss.hlsl")
@@ -253,6 +253,24 @@ impl RenderLoop for RestirRenderLoop {
                 //.rw_texture("rw_debug_texture", debug_texture.1)
                 .push_constant(&self.frame_index)
                 .push_constant(&has_prev_frame)
+                .dimension(main_size.width, main_size.height, 1);
+        }
+        // Pass Sample Validation
+        else {
+            rg.new_raytracing("Sample Validate")
+                .raygen_shader("restir/sample_validate.hlsl")
+                .miss_shader("raytrace/geometry.rmiss.hlsl")
+                .closest_hit_shader("raytrace/geometry.rchit.hlsl")
+                .accel_struct("scene_tlas", scene_tlas)
+                .texture("gbuffer_depth", gbuffer.depth.1)
+                .texture("gbuffer_color", gbuffer.color.1)
+                .texture("skycube", skycube)
+                .texture("prev_color", prev_color)
+                .texture("prev_depth", prev_depth)
+                .buffer("prev_reservoir_buffer", prev_reservoir_buffer)
+                .rw_buffer("rw_temporal_reservoir_buffer", temporal_reservoir_buffer)
+                //.rw_texture("rw_debug_texture", debug_texture.1)
+                .push_constant(&self.frame_index)
                 .dimension(main_size.width, main_size.height, 1);
         }
 

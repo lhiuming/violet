@@ -12,25 +12,20 @@ Texture2D<float> gbuffer_depth;
 Texture2D<uint4> gbuffer_color;
 StructuredBuffer<Reservoir> prev_reservoir_buffer;
 RWStructuredBuffer<Reservoir> rw_temporal_reservoir_buffer;
-RWTexture2D<float4> rw_debug_texture;
+// RWTexture2D<float4> rw_debug_texture;
 
 struct PushConstants
 {
     uint frame_index;
-    uint has_prev_frame;
 };
 [[vk::push_constant]]
 PushConstants pc;
 
-struct Payload
-{
-    bool missed;
-    float hit_t;
-};
-
 [shader("raygeneration")]
-void raygen(uint2 dispatch_id: SV_DispatchThreadID)
+void main()
 {
+    uint2 dispatch_id = DispatchRaysIndex().xy;
+
     uint2 buffer_size;
     gbuffer_depth.GetDimensions(buffer_size.x, buffer_size.y);
 
@@ -50,9 +45,9 @@ void raygen(uint2 dispatch_id: SV_DispatchThreadID)
     // Read reservoir from last frame
     float4 prev_hpos = mul(frame_params.prev_view_proj, float4(position_ws, 1.0f));
     float2 prev_ndc = prev_hpos.xy / prev_hpos.w;
-    bool in_view = all(abs(prev_ndc.xy) < 1.0);
-    bool sample_prev_frame = pc.has_prev_frame && in_view;
+    bool sample_prev_frame = all(abs(prev_ndc.xy) < 1.0);
 
+    bool generate_new_sample = true;
     float3 sample_origin_ws;
     float3 sample_dir_ws;
     Reservoir reservoir;
@@ -67,10 +62,18 @@ void raygen(uint2 dispatch_id: SV_DispatchThreadID)
         uint buffer_index = buffer_size.x * prev_pos.y + prev_pos.x;
         reservoir = prev_reservoir_buffer[buffer_index];
 
-        sample_origin_ws = reservoir.z.pixel_pos;
-        sample_dir_ws = normalize(reservoir.z.hit_pos - position_ws);
+        // NOTE: it is possible to sample invalid sample (sky, etc.)
+        // TODO maybe just validation and not reproject in this pass. Only reproject in a seperate temporal result pass.
+        if (reservoir.M > 0)
+        {
+            sample_origin_ws = reservoir.z.pixel_pos;
+            sample_dir_ws = normalize(reservoir.z.hit_pos - sample_origin_ws);
+            generate_new_sample = false;
+        }
     }
-    else
+
+    // For invalid reprojection (sampling the sky, dis occlusion, etc.), generate a new sample, to keep the similar cost as sample generate frame, and avoid under sampling.
+    if (generate_new_sample)
     {
         // Genetate new sample for disocclusion
         sample_origin_ws = position_ws;
@@ -86,7 +89,15 @@ void raygen(uint2 dispatch_id: SV_DispatchThreadID)
 
     TraceResult hit = trace(sample_origin_ws, sample_dir_ws, true);
 
-    if (sample_prev_frame)
+    if (generate_new_sample)
+    {
+        // Make a new reservoir
+        RestirSample z = make_restir_sample(sample_origin_ws, src_normal, hit.position_ws, hit.normal_ws, hit.radiance);
+        uint M = 1;
+        float W = TWO_PI;
+        reservoir = init_reservoir(z, M, W);
+    }
+    else
     {
         // Just replace the sample if too different
         // TODO should blend in natually
@@ -98,19 +109,11 @@ void raygen(uint2 dispatch_id: SV_DispatchThreadID)
             reservoir.M = 1;
         }
 
-        reservoir.z.pixel_pos = position_ws;               // TODO not used
-        reservoir.z.pixel_normal = reservoir.z.hit_normal; // TODO not used
+        reservoir.z.pixel_pos = sample_origin_ws;
+        reservoir.z.pixel_normal = reservoir.z.pixel_normal; // TODO not used
         reservoir.z.hit_pos = hit.position_ws;
         reservoir.z.hit_normal = hit.normal_ws;
         reservoir.z.hit_radiance = hit.radiance;
-    }
-    else
-    {
-        // Make a new reservoir
-        RestirSample z = make_restir_sample(position_ws, src_normal, hit.position_ws, hit.normal_ws, hit.radiance);
-        uint M = 1;
-        float W = TWO_PI;
-        reservoir = init_reservoir(z, M, W);
     }
 
     rw_temporal_reservoir_buffer[buffer_size.x * dispatch_id.y + dispatch_id.x] = reservoir;
