@@ -1,7 +1,7 @@
 use std::{mem::size_of, slice};
 
 use ash::vk;
-use glam::{Mat4, Vec3, Vec4, Vec4Swizzles};
+use glam::{Mat4, UVec2, Vec3, Vec4, Vec4Swizzles};
 
 use crate::render_device::{Buffer, BufferDesc, RenderDevice};
 
@@ -456,6 +456,10 @@ where
         + Copy,
 {
     (a + (b - T::from(1))) / b
+}
+
+pub fn div_round_up_uvec2(a: UVec2, b: UVec2) -> UVec2 {
+    (a + (b - UVec2::new(1, 1))) / b
 }
 
 pub mod rg_util {

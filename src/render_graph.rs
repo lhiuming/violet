@@ -407,6 +407,11 @@ impl<'a, 'render> ComputePassBuilder<'a, 'render> {
         self.compute().group_count = UVec3::new(width, height, depth);
         self
     }
+
+    pub fn group_count_uvec3(&mut self, group_count: UVec3) -> &mut Self {
+        self.compute().group_count = group_count;
+        self
+    }
 }
 
 define_pass_builder!(RaytracingPassBuilder);

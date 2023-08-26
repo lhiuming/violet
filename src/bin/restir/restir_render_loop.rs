@@ -1,16 +1,16 @@
 use ash::vk;
-use glam::Vec3;
+use glam::{UVec2, Vec3};
 use violet::{
     command_buffer::{CommandBuffer, StencilOps},
     render_device::{
         Buffer, BufferDesc, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
     },
     render_graph::*,
-    render_loop::gbuffer_pass::*,
     render_loop::{
         div_round_up, rg_util, FrameParams, RenderLoop, StreamLinedFrameResource, ViewInfo,
         FRAME_DESCRIPTOR_SET_INDEX,
     },
+    render_loop::{div_round_up_uvec2, gbuffer_pass::*},
     render_scene::{RenderScene, SCENE_DESCRIPTOR_SET_INDEX},
     shader::{Shaders, ShadersConfig},
 };
@@ -125,6 +125,7 @@ impl RenderLoop for RestirRenderLoop {
         );
 
         let main_size = rd.swapchain.extent;
+        let main_size_vec = UVec2::new(main_size.width, main_size.height);
 
         let mut rg = RenderGraphBuilder::new_with_shader_config(shader_config);
 
@@ -227,8 +228,6 @@ impl RenderLoop for RestirRenderLoop {
         let temporal_reservoir_buffer =
             rg.create_buffer(BufferDesc::compute(main_len as u64 * 24 * 4));
 
-        let is_validation_frame = ((self.frame_index & 3) == 0) && (has_prev_frame != 0);
-
         // bind a dummy texture if we don't have prev frame reservoir
         let prev_reservoir_buffer = if let Some(buffer) = self.sample_gen.prev_reservoir_buffer {
             rg.convert_to_transient(buffer)
@@ -236,43 +235,64 @@ impl RenderLoop for RestirRenderLoop {
             rg.register_buffer(self.default_res.dummy_buffer)
         };
 
+        let is_validation_frame =
+            self.sample_gen.prev_reservoir_buffer.is_some() && ((self.frame_index & 3) == 0);
+
+        let has_new_sample;
+        let new_sample_buffer;
+
         // Pass: Sample Generation (and temporal reusing)
         if !is_validation_frame {
+            has_new_sample = 1u32;
+            new_sample_buffer = rg.create_buffer(BufferDesc::compute(main_len as u64 * 5 * 4 * 4));
+
             rg.new_raytracing("Sample Gen")
                 .raygen_shader("restir/sample_gen.hlsl")
                 .miss_shader("raytrace/geometry.rmiss.hlsl")
                 .closest_hit_shader("raytrace/geometry.rchit.hlsl")
                 .accel_struct("scene_tlas", scene_tlas)
-                .texture("gbuffer_depth", gbuffer.depth.1)
-                .texture("gbuffer_color", gbuffer.color.1)
                 .texture("skycube", skycube)
                 .texture("prev_color", prev_color)
                 .texture("prev_depth", prev_depth)
-                .buffer("prev_reservoir_buffer", prev_reservoir_buffer)
-                .rw_buffer("rw_temporal_reservoir_buffer", temporal_reservoir_buffer)
+                .texture("gbuffer_depth", gbuffer.depth.1)
+                .texture("gbuffer_color", gbuffer.color.1)
+                .buffer("rw_new_sample_buffer", new_sample_buffer)
                 //.rw_texture("rw_debug_texture", debug_texture.1)
                 .push_constant(&self.frame_index)
                 .push_constant(&has_prev_frame)
                 .dimension(main_size.width, main_size.height, 1);
         }
-        // Pass Sample Validation
+        // Pass: Sample Validation
         else {
+            has_new_sample = 0u32;
+            new_sample_buffer = rg.register_buffer(self.default_res.dummy_buffer);
+
             rg.new_raytracing("Sample Validate")
                 .raygen_shader("restir/sample_validate.hlsl")
                 .miss_shader("raytrace/geometry.rmiss.hlsl")
                 .closest_hit_shader("raytrace/geometry.rchit.hlsl")
                 .accel_struct("scene_tlas", scene_tlas)
-                .texture("gbuffer_depth", gbuffer.depth.1)
-                .texture("gbuffer_color", gbuffer.color.1)
                 .texture("skycube", skycube)
                 .texture("prev_color", prev_color)
                 .texture("prev_depth", prev_depth)
-                .buffer("prev_reservoir_buffer", prev_reservoir_buffer)
-                .rw_buffer("rw_temporal_reservoir_buffer", temporal_reservoir_buffer)
+                .rw_buffer("rw_prev_reservoir_buffer", prev_reservoir_buffer)
                 //.rw_texture("rw_debug_texture", debug_texture.1)
-                .push_constant(&self.frame_index)
                 .dimension(main_size.width, main_size.height, 1);
         }
+
+        // Pass: Temporal Resampling
+        rg.new_compute("Temporal Resample")
+            .compute_shader("restir/temporal_resample.hlsl")
+            .texture("prev_gbuffer_depth", prev_depth)
+            .texture("gbuffer_depth", gbuffer.depth.1)
+            .texture("gbuffer_color", gbuffer.color.1)
+            .buffer("new_sample_buffer", new_sample_buffer)
+            .buffer("prev_reservoir_buffer", prev_reservoir_buffer)
+            .buffer("rw_temporal_reservoir_buffer", temporal_reservoir_buffer)
+            .push_constant(&self.frame_index)
+            .push_constant(&has_prev_frame)
+            .push_constant(&has_new_sample)
+            .group_count_uvec3(div_round_up_uvec2(main_size_vec, UVec2::new(8, 4)).extend(1));
 
         // Pass: Spatial Resampling
         {
