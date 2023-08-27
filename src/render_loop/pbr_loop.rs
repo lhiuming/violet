@@ -615,12 +615,7 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
 
         // Run render graph and fianlize
         {
-            let cb = CommandBuffer {
-                device: rd.device_entry.clone(),
-                raytracing_pipeline: rd.raytracing_pipeline_entry.clone(),
-                nv_diagnostic_checkpoints: rd.nv_diagnostic_checkpoints_entry.clone(),
-                command_buffer,
-            };
+            let cb = CommandBuffer::new(&rd, command_buffer);
             rg.execute(rd, &cb, shaders, &mut self.render_graph_cache);
         }
 

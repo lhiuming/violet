@@ -69,6 +69,7 @@ pub struct RenderDevice {
     pub surface_entry: khr::Surface,
     pub raytracing_pipeline_entry: khr::RayTracingPipeline,
     pub acceleration_structure_entry: khr::AccelerationStructure,
+    pub debug_utils: ext::DebugUtils,
     pub nv_diagnostic_checkpoints_entry: nv::DeviceDiagnosticCheckpoints,
 
     pub gfx_queue: vk::Queue,
@@ -115,8 +116,10 @@ impl RenderDevice {
             instance
         };
 
+        // Create instance extensions
+        let debug_utils = ash::extensions::ext::DebugUtils::new(&entry, &instance);
+
         // Debug callback
-        let debug_report = ash::extensions::ext::DebugUtils::new(&entry, &instance);
         unsafe {
             use vk::DebugUtilsMessageSeverityFlagsEXT as Severity;
             use vk::DebugUtilsMessageTypeFlagsEXT as Type;
@@ -124,7 +127,7 @@ impl RenderDevice {
                 .message_severity(Severity::ERROR | Severity::WARNING)
                 .message_type(Type::PERFORMANCE | Type::VALIDATION)
                 .pfn_user_callback(Some(vulkan_debug_report_callback));
-            debug_report
+           debug_utils 
                 .create_debug_utils_messenger(&create_info, None)
                 .expect("Failed to register debug callback");
             println!("Vulkan Debug report callback registered.");
@@ -341,6 +344,7 @@ impl RenderDevice {
             swapchain_entry,
             raytracing_pipeline_entry,
             acceleration_structure_entry,
+            debug_utils,
             nv_diagnostic_checkpoints_entry,
 
             gfx_queue,

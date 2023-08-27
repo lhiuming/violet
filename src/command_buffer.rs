@@ -1,4 +1,6 @@
-use ash::extensions::{khr, nv};
+use std::ffi::CStr;
+
+use ash::extensions::{khr, nv, ext};
 use ash::vk::{self};
 
 use crate::render_device::RenderDevice;
@@ -6,8 +8,11 @@ use crate::render_device::RenderDevice;
 pub struct CommandBuffer {
     pub device: ash::Device,
     pub raytracing_pipeline: khr::RayTracingPipeline,
+    pub debug_utils: ext::DebugUtils,
     pub nv_diagnostic_checkpoints: nv::DeviceDiagnosticCheckpoints,
     pub command_buffer: vk::CommandBuffer,
+
+    pub enable_check_point: bool,
 }
 
 impl CommandBuffer {
@@ -15,8 +20,10 @@ impl CommandBuffer {
         Self {
             device: rd.device_entry.clone(),
             raytracing_pipeline: rd.raytracing_pipeline_entry.clone(),
+            debug_utils: rd.debug_utils.clone(),
             nv_diagnostic_checkpoints: rd.nv_diagnostic_checkpoints_entry.clone(),
             command_buffer,
+            enable_check_point: false,
         }
     }
 }
@@ -308,8 +315,43 @@ impl CommandBuffer {
         }
     }
 
+    // Debug Labels //
+
+    pub fn begin_label(&self, name: &CStr, color: Option<[f32; 4]>) {
+        //let default_color = [134.0/255.0, 1.0/255.0, 175.0/255.0, 1.0];
+        //let default_color = [128.0/255.0, 0.0/255.0, 255.0/255.0, 1.0];
+        let default_color = [191.0/255.0, 1.0/255.0, 255.0/255.0, 1.0];
+        let label_info = vk::DebugUtilsLabelEXT::builder()
+        .label_name(name)
+        .color(color.unwrap_or(default_color));
+        unsafe {
+            self.debug_utils
+                .cmd_begin_debug_utils_label(self.command_buffer, &label_info);
+        }
+    } 
+
+    pub fn end_label(&self) {
+        unsafe {
+            self.debug_utils.cmd_end_debug_utils_label(self.command_buffer);
+        }
+    }
+
+    pub fn insert_label(&self, name: &CStr, color: Option<[f32; 4]>) {
+        let default_color = [134.0/255.0, 1.0/255.0, 175.0/255.0, 1.0];
+        let label = vk::DebugUtilsLabelEXT::builder()
+        .label_name(name)
+        .color(color.unwrap_or(default_color));
+        unsafe {
+            self.debug_utils.cmd_insert_debug_utils_label(self.command_buffer, &label)
+        }
+
+    }
+
     // Debugging
     pub fn insert_checkpoint(&self) {
+        if !self.enable_check_point {
+            return;
+        }
         unsafe {
             self.nv_diagnostic_checkpoints
                 .cmd_set_checkpoint(self.command_buffer, 0 as _);

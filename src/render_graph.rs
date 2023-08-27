@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ffi::CString;
 use std::hash::Hash;
 use std::marker::{Copy, PhantomData};
 use std::ops::FnOnce;
@@ -1525,6 +1526,8 @@ impl RenderGraphBuilder<'_> {
     ) {
         let mut exec_context = RenderGraphExecuteContext::new();
 
+        command_buffer.insert_label(&CString::new("RenderGraph Begin").unwrap(), None);
+
         // Create pipelines
         for pass_index in 0..self.passes.len() {
             let pass = &mut self.passes[pass_index];
@@ -1674,10 +1677,13 @@ impl RenderGraphBuilder<'_> {
         command_buffer.insert_checkpoint();
 
         for pass_index in 0..self.passes.len() {
+
             // take the FnOnce callback before unmutable reference
             let render = self.passes[pass_index].render.take();
 
             let pass = &self.passes[pass_index];
+
+            command_buffer.begin_label(&CString::new(pass.name.clone()).unwrap(), None);
 
             // TODO analysis of the DAG and sync properly
             self.ad_hoc_transition(command_buffer, &mut exec_context, pass_index as u32);
@@ -1794,6 +1800,8 @@ impl RenderGraphBuilder<'_> {
                 self.end_graphics(command_buffer);
                 command_buffer.insert_checkpoint();
             }
+
+            command_buffer.end_label();
         }
 
         command_buffer.insert_checkpoint();
@@ -1847,5 +1855,7 @@ impl RenderGraphBuilder<'_> {
                 cache.sbt_pool.push(sbt_frame_index, sbt);
             }
         }
+
+        command_buffer.insert_label(&CString::new("RenderGraph End").unwrap(), None);
     }
 }
