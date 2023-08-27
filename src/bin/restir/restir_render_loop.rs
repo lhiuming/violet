@@ -140,7 +140,6 @@ impl RenderLoop for RestirRenderLoop {
         ]);
 
         // a reused debug texture
-        /*
         let debug_texture = rg_util::create_texture_and_view(
             &mut rg,
             TextureDesc::new_2d(
@@ -150,7 +149,6 @@ impl RenderLoop for RestirRenderLoop {
                 vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
             ),
         );
-        */
 
         // Create GBuffer
         let gbuffer = create_gbuffer_textures(&mut rg, main_size);
@@ -306,7 +304,7 @@ impl RenderLoop for RestirRenderLoop {
                 .buffer("temporal_reservoir_buffer", temporal_reservoir_buffer)
                 .rw_buffer("rw_spatial_reservoir_buffer", spatial_reservoir_buffer)
                 .rw_texture("rw_lighting_texture", indirect_diffuse.1)
-                //.rw_texture("rw_debug_texture", debug_texture.1)
+                .rw_texture("rw_debug_texture", debug_texture.1)
                 .push_constant(&self.frame_index)
                 .group_count(
                     div_round_up(main_size.width, 8),
@@ -453,7 +451,8 @@ impl RenderLoop for RestirRenderLoop {
         // Pass: Post Processing (write to swapchain)
         rg.new_compute("Post Processing")
             .compute_shader("post_processing.hlsl")
-            .texture("src_color_buffer", post_taa_color.1)
+            .texture("src_color_texture", post_taa_color.1)
+            .texture("debug_texture", debug_texture.1)
             .rw_texture("rw_target_buffer", present_target)
             .group_count(
                 div_round_up(main_size.width, 8),

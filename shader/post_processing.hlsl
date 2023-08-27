@@ -1,16 +1,27 @@
 #include "display.hlsl"
 
-Texture2D<float3> src_color_buffer;
-RWTexture2D<float4> rw_target_buffer;
-
 // TODO use a auto-exposure
 #define EXPOSURE 3.0
-
 #define DISPLAY_MAPPING 1
+#define DEBUG_VIEW 0
+
+Texture2D<float3> src_color_texture;
+Texture2D<float4> debug_texture;
+RWTexture2D<float4> rw_target_buffer;
+
+/*
+struct PushConstants
+{
+    uint debug_view;
+};
+[[vk::push_constant]]
+PushConstants pc;
+*/
 
 [numthreads(8, 4, 1)]
-void main(uint2 dispatch_id: SV_DispatchThreadID) {
-    float3 scene_referred = src_color_buffer[dispatch_id.xy];
+void main(uint2 dispatch_id: SV_DispatchThreadID)
+{
+    float3 scene_referred = src_color_texture[dispatch_id.xy];
 
     // Exposure adjustment
     scene_referred *= pow(2, EXPOSURE);
@@ -26,4 +37,12 @@ void main(uint2 dispatch_id: SV_DispatchThreadID) {
     float3 display_encoded = srgb_eotf_inv_float3(display_referred);
 
     rw_target_buffer[dispatch_id.xy] = float4(display_encoded, 1.0f);
+
+#if DEBUG_VIEW
+    {
+        float3 debug_color = debug_texture[dispatch_id.xy].rgb;
+        rw_target_buffer[dispatch_id.xy] = float4(debug_color, 1.0);
+        return;
+    }
+#endif
 }
