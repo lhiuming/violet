@@ -233,5 +233,9 @@ where
         }
 
         render_loop.render(&mut rd, &mut shaders, &render_scene, &view_info);
+
+        if window.clicked('p') {
+            render_loop.print_stat();
+        }
     }
 }

@@ -1,6 +1,6 @@
 use std::ffi::CStr;
 
-use ash::extensions::{khr, nv, ext};
+use ash::extensions::{ext, khr, nv};
 use ash::vk::{self};
 
 use crate::render_device::RenderDevice;
@@ -315,36 +315,62 @@ impl CommandBuffer {
         }
     }
 
+    // GPU Query and profiling //
+
+    pub fn reset_queries(&self, query_pool: vk::QueryPool, first_query: u32, query_count: u32) {
+        unsafe {
+            self.device.cmd_reset_query_pool(
+                self.command_buffer,
+                query_pool,
+                first_query,
+                query_count,
+            );
+        }
+    }
+
+    pub fn write_time_stamp(
+        &self,
+        pipeline_stage: vk::PipelineStageFlags,
+        query_pool: vk::QueryPool,
+        query: u32,
+    ) {
+        unsafe {
+            self.device
+                .cmd_write_timestamp(self.command_buffer, pipeline_stage, query_pool, query)
+        }
+    }
+
     // Debug Labels //
 
     pub fn begin_label(&self, name: &CStr, color: Option<[f32; 4]>) {
         //let default_color = [134.0/255.0, 1.0/255.0, 175.0/255.0, 1.0];
         //let default_color = [128.0/255.0, 0.0/255.0, 255.0/255.0, 1.0];
-        let default_color = [191.0/255.0, 1.0/255.0, 255.0/255.0, 1.0];
+        let default_color = [191.0 / 255.0, 1.0 / 255.0, 255.0 / 255.0, 1.0];
         let label_info = vk::DebugUtilsLabelEXT::builder()
-        .label_name(name)
-        .color(color.unwrap_or(default_color));
+            .label_name(name)
+            .color(color.unwrap_or(default_color));
         unsafe {
             self.debug_utils
                 .cmd_begin_debug_utils_label(self.command_buffer, &label_info);
         }
-    } 
+    }
 
     pub fn end_label(&self) {
         unsafe {
-            self.debug_utils.cmd_end_debug_utils_label(self.command_buffer);
+            self.debug_utils
+                .cmd_end_debug_utils_label(self.command_buffer);
         }
     }
 
     pub fn insert_label(&self, name: &CStr, color: Option<[f32; 4]>) {
-        let default_color = [134.0/255.0, 1.0/255.0, 175.0/255.0, 1.0];
+        let default_color = [134.0 / 255.0, 1.0 / 255.0, 175.0 / 255.0, 1.0];
         let label = vk::DebugUtilsLabelEXT::builder()
-        .label_name(name)
-        .color(color.unwrap_or(default_color));
+            .label_name(name)
+            .color(color.unwrap_or(default_color));
         unsafe {
-            self.debug_utils.cmd_insert_debug_utils_label(self.command_buffer, &label)
+            self.debug_utils
+                .cmd_insert_debug_utils_label(self.command_buffer, &label)
         }
-
     }
 
     // Debugging

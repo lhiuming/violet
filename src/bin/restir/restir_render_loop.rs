@@ -90,6 +90,13 @@ pub struct RestirRenderLoop {
 
     sample_gen: SampleGenPass,
     taa: TAAPass,
+
+    last_start_time: Option<std::time::Instant>,
+    total_frame_duration: std::time::Duration,
+    total_frame_count: u32,
+    total_acquire_duration: std::time::Duration,
+    total_wait_duration: std::time::Duration,
+    total_present_duration: std::time::Duration,
 }
 
 impl RenderLoop for RestirRenderLoop {
@@ -101,7 +108,27 @@ impl RenderLoop for RestirRenderLoop {
             frame_index: 0,
             sample_gen: SampleGenPass::new(),
             taa: TAAPass::new(),
+            last_start_time: None,
+            total_frame_duration: std::time::Duration::ZERO,
+            total_frame_count: 0,
+            total_acquire_duration: std::time::Duration::ZERO,
+            total_wait_duration: std::time::Duration::ZERO,
+            total_present_duration: std::time::Duration::ZERO,
         }
+    }
+
+    fn print_stat(&self) {
+        println!("CPU Profiling:");
+        let avg_ms = |name: &str, dur: std::time::Duration| {
+            let ms = dur.as_secs_f64() * 1000.0 / self.total_frame_count as f64;
+            println!("\t{:>24}: {:.2}ms", name, ms);
+        };
+        avg_ms("[Frame]", self.total_frame_duration);
+        avg_ms("Acq. Swap.", self.total_acquire_duration);
+        avg_ms("Wait Swap.", self.total_wait_duration);
+        avg_ms("Present", self.total_present_duration);
+
+        self.render_graph_cache.pass_profiling.print();
     }
 
     fn render(
@@ -112,6 +139,16 @@ impl RenderLoop for RestirRenderLoop {
         view_info: &ViewInfo,
     ) {
         self.stream_lined.advance_render_index();
+
+        // Update cpu profiling
+        {
+            let now = std::time::Instant::now();
+            if let Some(last) = self.last_start_time {
+                self.total_frame_duration += now - last;
+                self.total_frame_count += 1;
+            }
+            self.last_start_time = Some(now);
+        }
 
         // Shader config
         // TODO wrap into a ShaderPool/ShaderLibrary?
@@ -444,7 +481,10 @@ impl RenderLoop for RestirRenderLoop {
                 .replace(rg.convert_to_temporal(&mut self.render_graph_cache, gbuffer.depth.0));
         }
 
-        let swapchain_image_index = self.stream_lined.acquire_next_swapchain_image(rd);
+        let (swapchain_image_index, acquire_swapchain_duratiaon) = self
+            .stream_lined
+            .acquire_next_swapchain_image_with_duration(rd);
+        self.total_acquire_duration += acquire_swapchain_duratiaon;
         let present_target =
             rg.register_texture_view(rd.swapchain.image_view[swapchain_image_index as usize]);
 
@@ -500,8 +540,11 @@ impl RenderLoop for RestirRenderLoop {
         }
 
         // Submit, Present and stuff
-        self.stream_lined
+        let (wait_duration, present_duration) = self
+            .stream_lined
             .wait_and_submit_and_present(rd, swapchain_image_index);
+        self.total_wait_duration += wait_duration;
+        self.total_present_duration += present_duration;
 
         self.frame_index += 1;
     }

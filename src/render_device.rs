@@ -56,6 +56,13 @@ impl PhysicalDevice {
         self.ray_tracing_pipeline_properties
             .shader_group_base_alignment
     }
+
+    pub fn support_timestamp(&self) -> bool {
+        // Must have proper timestamp_period
+        (self.properties.limits.timestamp_period > 0.0)
+        // If support compute_and_graphics, we dont need to query support from each quere
+        && (self.properties.limits.timestamp_compute_and_graphics == vk::TRUE)
+    }
 }
 
 pub struct RenderDevice {
@@ -127,7 +134,7 @@ impl RenderDevice {
                 .message_severity(Severity::ERROR | Severity::WARNING)
                 .message_type(Type::PERFORMANCE | Type::VALIDATION)
                 .pfn_user_callback(Some(vulkan_debug_report_callback));
-           debug_utils 
+            debug_utils
                 .create_debug_utils_messenger(&create_info, None)
                 .expect("Failed to register debug callback");
             println!("Vulkan Debug report callback registered.");
@@ -266,6 +273,8 @@ impl RenderDevice {
             assert!(acceleration_structure_features.acceleration_structure == vk::TRUE);
             // Buffer Device Address (required by ray tracing, to retrive buffer address for shader binding table)
             assert!(vulkan12_features.buffer_device_address == vk::TRUE);
+            // Host Query Reset (for internal GPU profiling)
+            assert!(vulkan12_features.host_query_reset == vk::TRUE);
             // Finally, create the device, with all supproted feature enabled (for simplicity)
             let create_info = vk::DeviceCreateInfo::builder()
                 .queue_create_infos(&queue_create_infos)
@@ -521,6 +530,13 @@ impl SwapchainEntry {
 
         let image_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::STORAGE;
 
+        let vsync = true;
+        let present_mode = if vsync {
+            vk::PresentModeKHR::FIFO
+        } else {
+            vk::PresentModeKHR::IMMEDIATE
+        };
+
         // Create swapchain object
         let create_info = {
             vk::SwapchainCreateInfoKHR::builder()
@@ -534,7 +550,7 @@ impl SwapchainEntry {
                 .image_usage(image_usage)
                 .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
                 .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-                .present_mode(vk::PresentModeKHR::FIFO)
+                .present_mode(present_mode)
         };
         ret.handle = unsafe { self.entry.create_swapchain(&create_info, None) }
             .expect("Vulkan: Swapchain creatino failed???");
@@ -620,7 +636,6 @@ impl RenderDevice {
                 || (fence_to_signal != vk::Fence::null())
         );
 
-        let wait = std::time::Instant::now();
         let (index, is_suboptimal) = unsafe {
             self.swapchain_entry
                 .entry
@@ -632,12 +647,6 @@ impl RenderDevice {
                 )
                 .expect("RenderDevice: failed to acquire next swapchain image")
         };
-
-        // Warn if acquire next image takes too long
-        let elapsed = wait.elapsed().as_micros();
-        if elapsed > 500 {
-            println!("RenderDevice: acquire next image takes {} ms!", elapsed);
-        }
 
         if is_suboptimal {
             panic!("RenderDevice: acquired surface image has unexpected properties");

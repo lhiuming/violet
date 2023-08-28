@@ -27,6 +27,8 @@ pub trait RenderLoop {
         scene: &crate::render_scene::RenderScene,
         view_info: &ViewInfo,
     );
+
+    fn print_stat(&self) {}
 }
 
 /*
@@ -304,9 +306,31 @@ impl StreamLinedFrameResource {
     }
 
     pub fn acquire_next_swapchain_image(&self, rd: &RenderDevice) -> u32 {
+        self.acquire_next_swapchain_image_with_duration(rd).0
+    }
+
+    pub fn acquire_next_swapchain_image_with_duration(
+        &self,
+        rd: &RenderDevice,
+    ) -> (u32, std::time::Duration) {
         // temporary fence for this image
         let swapchain_ready_fence = self.present_finished_fences[self.render_index as usize];
-        rd.acquire_next_swapchain_image(vk::Semaphore::null(), swapchain_ready_fence)
+
+        let start = std::time::Instant::now();
+
+        // TODO temporary semaphore for this image (for accss in GPU)?
+        // ref: https://github.com/KhronosGroup/Vulkan-Docs/issues/1158#issuecomment-573874821
+        let index = rd.acquire_next_swapchain_image(vk::Semaphore::null(), swapchain_ready_fence);
+
+        let elapsed = start.elapsed();
+
+        // Warn if acquire_next_swapchain_image takes too long
+        let elapsed_us = elapsed.as_micros();
+        if elapsed_us > 500 {
+            println!("RenderDevice: acquire next image takes {} us!", elapsed_us);
+        }
+
+        (index, elapsed)
     }
 
     // Wait for command buffer finished and reset it for recording.
@@ -366,7 +390,7 @@ impl StreamLinedFrameResource {
             .update_frame_params(self.render_index, params);
     }
 
-    fn wait_and_reset_fence(rd: &RenderDevice, fence: vk::Fence) {
+    fn wait_and_reset_fence(rd: &RenderDevice, fence: vk::Fence) -> std::time::Duration {
         // Wait for the oldest image present finished
         let timeout = 5000 * 1000_000; // 5s
         let wait_begin = std::time::Instant::now();
@@ -400,15 +424,21 @@ impl StreamLinedFrameResource {
                 .reset_fences(slice::from_ref(&fence))
                 .unwrap();
         }
+
+        wait_begin.elapsed()
     }
 
-    pub fn wait_and_submit_and_present(&self, rd: &RenderDevice, image_index: u32) {
+    pub fn wait_and_submit_and_present(
+        &self,
+        rd: &RenderDevice,
+        image_index: u32,
+    ) -> (std::time::Duration, std::time::Duration) {
         // Wait for swapchain image ready (before submit the GPU works modifying the image)
-        {
+        let wait_duration = {
             // the same temporary fence in acquire_next_swapchain_image
             let swapchain_ready_fence = self.present_finished_fences[self.render_index as usize];
-            Self::wait_and_reset_fence(rd, swapchain_ready_fence);
-        }
+            Self::wait_and_reset_fence(rd, swapchain_ready_fence)
+        };
 
         // Submit the command buffer
         let present_ready = self.present_ready_semaphores[self.render_index as usize];
@@ -427,7 +457,9 @@ impl StreamLinedFrameResource {
         }
 
         // Present
-        {
+        let present_duration = {
+            let present_begin = std::time::Instant::now();
+
             let present_info = vk::PresentInfoKHR::builder()
                 .wait_semaphores(slice::from_ref(&present_ready))
                 .swapchains(slice::from_ref(&rd.swapchain.handle))
@@ -439,7 +471,11 @@ impl StreamLinedFrameResource {
                     .queue_present(rd.gfx_queue, &present_info)
                     .unwrap();
             }
-        }
+
+            present_begin.elapsed()
+        };
+
+        (wait_duration, present_duration)
     }
 }
 

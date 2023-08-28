@@ -8,6 +8,7 @@ use ash::vk;
 use glam::UVec3;
 
 use crate::command_buffer::CommandBuffer;
+use crate::gpu_profiling::NamedProfiling;
 use crate::render_device::{
     AccelerationStructure, Buffer, BufferDesc, RenderDevice, ShaderBindingTableFiller, Texture,
     TextureDesc, TextureView, TextureViewDesc,
@@ -631,6 +632,10 @@ pub struct RenderGraphCache {
     texture_view_pool: ResPool<(Texture, TextureViewDesc), TextureView>,
     buffer_pool: ResPool<BufferDesc, Buffer>,
     sbt_pool: ResPool<u32, PassShaderBindingTable>,
+
+    // Accumulated pass profilng info
+    // TODO should just pass in
+    pub pass_profiling: NamedProfiling,
 }
 
 impl RenderGraphCache {
@@ -653,6 +658,7 @@ impl RenderGraphCache {
             texture_view_pool: ResPool::new(),
             buffer_pool: ResPool::new(),
             sbt_pool: ResPool::new(),
+            pass_profiling: NamedProfiling::new(rd),
         }
     }
 
@@ -1528,6 +1534,24 @@ impl RenderGraphBuilder<'_> {
 
         command_buffer.insert_label(&CString::new("RenderGraph Begin").unwrap(), None);
 
+        // Update GPU profiling queries
+        cache.pass_profiling.update(rd);
+
+        // Prepare for this frame
+        let query_pool = {
+            let batch = cache.pass_profiling.new_batch(self.passes.len() as u32 + 1);
+            command_buffer.reset_queries(batch.pool(), batch.query(0).0, batch.size());
+            batch.pool()
+        };
+
+        // Whole Frame timer
+        let (frame_beg, frame_end) = cache.pass_profiling.new_timer("[Frame]");
+        command_buffer.write_time_stamp(
+            vk::PipelineStageFlags::TOP_OF_PIPE,
+            query_pool,
+            frame_beg.0,
+        );
+
         // Create pipelines
         for pass_index in 0..self.passes.len() {
             let pass = &mut self.passes[pass_index];
@@ -1677,7 +1701,6 @@ impl RenderGraphBuilder<'_> {
         command_buffer.insert_checkpoint();
 
         for pass_index in 0..self.passes.len() {
-
             // take the FnOnce callback before unmutable reference
             let render = self.passes[pass_index].render.take();
 
@@ -1743,6 +1766,14 @@ impl RenderGraphBuilder<'_> {
                 );
             }
 
+            // Timestamp: before executing the work
+            let (timer_beg, timer_end) = cache.pass_profiling.new_timer(&pass.name);
+            command_buffer.write_time_stamp(
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                query_pool,
+                timer_beg.0,
+            );
+
             // Run pass
             // prioritize the custom render function
             if let Some(render) = render {
@@ -1801,6 +1832,13 @@ impl RenderGraphBuilder<'_> {
                 command_buffer.insert_checkpoint();
             }
 
+            // Timestamp: after executing the work
+            command_buffer.write_time_stamp(
+                vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                query_pool,
+                timer_end.0,
+            );
+
             command_buffer.end_label();
         }
 
@@ -1855,6 +1893,12 @@ impl RenderGraphBuilder<'_> {
                 cache.sbt_pool.push(sbt_frame_index, sbt);
             }
         }
+
+        command_buffer.write_time_stamp(
+            vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+            query_pool,
+            frame_end.0,
+        );
 
         command_buffer.insert_label(&CString::new("RenderGraph End").unwrap(), None);
     }
