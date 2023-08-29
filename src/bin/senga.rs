@@ -93,6 +93,7 @@ impl RenderLoop for SengaRenderLoop {
             None,
             &scene.sun_dir,
             &sun_inten,
+            None,
         ));
 
         // Execute the render graph, writing into command buffer

@@ -11,7 +11,7 @@ void vs_main(
 ) {
 	float2 pos = float2(vert_id & 1, vert_id >> 1);
 	hpos = float4(pos * 4.0 - 1.0, 1.0, 1.0);
-	float4 position_ws_h = mul(view_params().inv_view_proj, hpos);
+	float4 position_ws_h = mul(view_params().inv_view_proj, hpos + float4(frame_params.jitter.xy, 0.0, 0.0));
 	position_ws = position_ws_h.xyz / position_ws_h.w;
 }
 

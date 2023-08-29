@@ -52,7 +52,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     float3 position_ws = cs_depth_to_position(dispatch_id, buffer_size, depth);
 
     float4 hpos_reproj = mul(frame_params.prev_view_proj, float4(position_ws, 1.0f));
-    float3 ndc_reproj = hpos_reproj.xyz / hpos_reproj.w;
+    float3 ndc_reproj = hpos_reproj.xyz / hpos_reproj.w - float3(frame_params.jitter.zw, 0.0f);
     float2 uv_reproj = ndc_reproj.xy * 0.5f + 0.5f;
 
     bool in_view = all(abs(ndc_reproj.xy) < 1.0);
@@ -64,7 +64,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         // TODO try something like PCF and reject softly?
         float reproj_depth = ndc_reproj.z;
         float prev_depth = prev_gbuffer_depth.SampleLevel(sampler_linear_clamp, uv_reproj, 0); // NO, dont lerp the depth!
-        const float TOLERANCE = 0.0005f;
+        const float TOLERANCE = 0.001f;
         if (abs(prev_depth - reproj_depth) > TOLERANCE)
         {
             sample_prev_frame = false;

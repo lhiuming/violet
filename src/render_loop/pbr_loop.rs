@@ -12,7 +12,7 @@ use crate::{
     shader::{Handle, Pipeline, ShaderDefinition, Shaders, ShadersConfig},
 };
 
-use super::{FrameParams, RenderLoopDesciptorSets, ViewInfo, FRAME_DESCRIPTOR_SET_INDEX};
+use super::{RenderLoopDesciptorSets, ViewInfo, FRAME_DESCRIPTOR_SET_INDEX};
 
 use super::{gbuffer_pass::*, RenderLoop};
 
@@ -343,6 +343,7 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
         };
 
         // Update GPU ViewParams const buffer
+        /*
         {
             // TODO
             let exposure = 20.0;
@@ -351,6 +352,7 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
             let params = FrameParams::make(view_info, None, &scene.sun_dir, &sun_inten);
             self.descriptor_sets.update_frame_params(0, params);
         }
+        */
 
         // Being command recording
         {

@@ -52,10 +52,9 @@ TraceResult trace(float3 ray_origin, float3 ray_dir, uint has_prev_frame)
         radiance = 0.0;
 
         // try to read from prev frame color
-        //if (pc.has_prev_frame) {
         if (has_prev_frame) {
             float4 prev_hpos = mul(frame_params.prev_view_proj, float4(payload.position_ws, 1.0f));
-            float2 ndc = prev_hpos.xy / prev_hpos.w;
+            float2 ndc = prev_hpos.xy / prev_hpos.w - frame_params.jitter.zw;
             float reproj_depth = prev_hpos.z / prev_hpos.w;
 
             bool in_view = all(abs(ndc.xy) < 1.0);

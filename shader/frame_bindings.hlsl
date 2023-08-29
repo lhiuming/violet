@@ -8,12 +8,15 @@ struct FrameParams
     // TODO may be in seperate set
     float4x4 view_proj;
 	float4x4 inv_view_proj;
+
 	float4 view_pos;
 	float4 view_ray_top_left;
 	float4 view_ray_right_shift;
 	float4 view_ray_down_shift;
 
     float4x4 prev_view_proj;
+
+    float4 jitter; // in clip space; xy: this frame; zw: prev frame
 
 	float4 sun_dir;
     float4 sun_inten;

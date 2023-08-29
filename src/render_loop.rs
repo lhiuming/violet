@@ -1,7 +1,7 @@
 use std::{mem::size_of, slice};
 
 use ash::vk;
-use glam::{Mat4, UVec2, Vec3, Vec4, Vec4Swizzles};
+use glam::{Mat4, UVec2, Vec2, Vec3, Vec4, Vec4Swizzles};
 
 use crate::render_device::{Buffer, BufferDesc, RenderDevice};
 
@@ -43,11 +43,24 @@ pub struct ViewInfo {
     pub moved: bool,
 }
 
+#[derive(Clone, Copy)]
+pub struct JitterInfo {
+    pub frame_index: u32,
+    pub viewport_size: UVec2,
+}
+
+#[derive(Clone, Copy)]
+pub struct PrevView {
+    pub view_info: ViewInfo,
+    pub jitter_info: Option<JitterInfo>,
+}
+
 #[derive(Debug, Clone, Copy)]
 #[repr(C)]
 pub struct FrameParams {
     pub view_proj: Mat4,
     pub inv_view_proj: Mat4,
+
     pub view_pos: Vec4,
     pub view_ray_top_left: Vec4,
     pub view_ray_right_shift: Vec4,
@@ -55,19 +68,42 @@ pub struct FrameParams {
 
     pub prev_view_proj: Mat4,
 
+    pub jitter: Vec4,
+
     pub sun_dir: Vec4,
     pub sun_inten: Vec4,
 }
 
 impl FrameParams {
+    // 2D jitter in range of [-1.0, 1.0]
+    pub fn jitter(frame_index: u32) -> Vec2 {
+        let cycle = 8;
+        // NOTE: +1 to ignore the (0.0, 0.0) jitter
+        let frame_index = frame_index % cycle + 1;
+        let x = 2.0 * halton(frame_index, 2) - 1.0;
+        let y = 2.0 * halton(frame_index, 3) - 1.0;
+        Vec2::new(x, y)
+    }
+
+    pub fn make_view_proj(view_info: &ViewInfo, jitter_info: Option<&JitterInfo>) -> (Mat4, Vec2) {
+        let mut view_proj = view_info.projection * view_info.view_transform;
+        let mut jitter_ndc = Vec2::ZERO;
+        if let Some(jitter_info) = jitter_info {
+            let raster_size = jitter_info.viewport_size.as_vec2();
+            jitter_ndc = Self::jitter(jitter_info.frame_index) / raster_size;
+            view_proj = Mat4::from_translation(jitter_ndc.extend(0.0)) * view_proj;
+        }
+        (view_proj, jitter_ndc)
+    }
+
     pub fn make(
         view_info: &ViewInfo,
-        prev_view_info: Option<&ViewInfo>,
+        jitter_info: Option<&JitterInfo>,
         sun_dir: &Vec3,
         sun_inten: &Vec3,
+        prev_view: Option<&PrevView>,
     ) -> Self {
-        // From row major float4x4 to column major Mat4
-        let view_proj = view_info.projection * view_info.view_transform;
+        let (view_proj, jitter_ndc) = Self::make_view_proj(view_info, jitter_info);
         let inv_proj = view_proj.inverse();
         let ndc_to_ray = |ndc: Vec4| {
             let pos_ws_h = inv_proj * ndc;
@@ -80,10 +116,17 @@ impl FrameParams {
         let view_ray_up = ndc_to_ray(Vec4::new(0.0, -1.0, 1.0, 1.0));
         let view_ray_down = ndc_to_ray(Vec4::new(0.0, 1.0, 1.0, 1.0));
 
-        let prev_view_proj = match prev_view_info {
-            Some(view_info) => view_info.projection * view_info.view_transform,
-            None => view_proj,
+        let (prev_view_proj, prev_jitter_ndc) = match prev_view {
+            Some(prev) => Self::make_view_proj(&prev.view_info, prev.jitter_info.as_ref()),
+            None => (view_proj, Vec2::ZERO),
         };
+
+        let jitter_vec4 = Vec4::new(
+            jitter_ndc.x,
+            jitter_ndc.y,
+            prev_jitter_ndc.x,
+            prev_jitter_ndc.y,
+        );
 
         Self {
             view_proj: view_proj,
@@ -93,6 +136,7 @@ impl FrameParams {
             view_ray_right_shift: (view_ray_right - view_ray_left).extend(0.0),
             view_ray_down_shift: (view_ray_down - view_ray_up).extend(0.0),
             prev_view_proj,
+            jitter: jitter_vec4,
             sun_dir: sun_dir.extend(0.0),
             sun_inten: sun_inten.extend(0.0),
         }
@@ -496,6 +540,20 @@ where
 
 pub fn div_round_up_uvec2(a: UVec2, b: UVec2) -> UVec2 {
     (a + (b - UVec2::new(1, 1))) / b
+}
+
+// Naive impelementation of Halton sequence; proper only for small indices.
+// ref: https://en.wikipedia.org/wiki/Halton_sequence
+pub fn halton(index: u32, base: u32) -> f32 {
+    let mut i = index;
+    let mut f = 1.0;
+    let mut r = 0.0;
+    while i > 0 {
+        f /= base as f32;
+        r += f * (i % base) as f32;
+        i = i / base;
+    }
+    r
 }
 
 pub mod rg_util {

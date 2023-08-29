@@ -7,8 +7,8 @@ use violet::{
     },
     render_graph::*,
     render_loop::{
-        div_round_up, rg_util, FrameParams, RenderLoop, StreamLinedFrameResource, ViewInfo,
-        FRAME_DESCRIPTOR_SET_INDEX,
+        div_round_up, rg_util, FrameParams, JitterInfo, PrevView, RenderLoop,
+        StreamLinedFrameResource, ViewInfo, FRAME_DESCRIPTOR_SET_INDEX,
     },
     render_loop::{div_round_up_uvec2, gbuffer_pass::*},
     render_scene::{RenderScene, SCENE_DESCRIPTOR_SET_INDEX},
@@ -66,7 +66,7 @@ impl SampleGenPass {
 }
 
 struct TAAPass {
-    prev_view_info: Option<ViewInfo>,
+    prev_view: Option<PrevView>,
     prev_color: Option<RGTemporal<Texture>>,
     prev_depth: Option<RGTemporal<Texture>>,
 }
@@ -74,7 +74,7 @@ struct TAAPass {
 impl TAAPass {
     fn new() -> Self {
         Self {
-            prev_view_info: None,
+            prev_view: None,
             prev_color: None,
             prev_depth: None,
         }
@@ -271,7 +271,7 @@ impl RenderLoop for RestirRenderLoop {
         };
 
         let is_validation_frame =
-            self.sample_gen.prev_reservoir_buffer.is_some() && ((self.frame_index & 3) == 0);
+            self.sample_gen.prev_reservoir_buffer.is_some() && ((self.frame_index % 6) == 0);
 
         let has_new_sample;
         let new_sample_buffer;
@@ -509,15 +509,23 @@ impl RenderLoop for RestirRenderLoop {
         // Update frame CB (before submit)
         let exposure = 20.0;
         let sun_inten = Vec3::new(1.0, 1.0, 0.85) * exposure;
+        let jitter_info = Some(JitterInfo {
+            frame_index: self.frame_index,
+            viewport_size: main_size_vec,
+        });
         self.stream_lined.update_frame_params(FrameParams::make(
             &view_info,
-            self.taa.prev_view_info.as_ref(),
+            jitter_info.as_ref(),
             &scene.sun_dir,
             &sun_inten,
+            self.taa.prev_view.as_ref(),
         ));
 
         // only after last use of prev_view_info
-        self.taa.prev_view_info.replace(*view_info);
+        self.taa.prev_view.replace(PrevView {
+            view_info: *view_info,
+            jitter_info,
+        });
 
         // Execute render graph
         {

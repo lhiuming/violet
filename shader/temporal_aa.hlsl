@@ -104,7 +104,6 @@ float3 clip_aabb(float3 aabb_center, float3 aabb_half_extent, float3 q /*point*/
 		return q;// point inside aabb
 }
 
-
 [numthreads(8, 4, 1)]
 void main(uint2 dispatch_id : SV_DispatchThreadID) {
     // Morden TAA
@@ -175,9 +174,9 @@ void main(uint2 dispatch_id : SV_DispatchThreadID) {
         float3 position = cs_depth_to_position(closest_depth_pixcoord, buffer_size, closest_depth);
         position = cs_depth_to_position(dispatch_id, buffer_size, gbuffer_depth[dispatch_id]);
         float4 hpos = mul(frame_params.view_proj, float4(position, 1));
-        float2 ndc = hpos.xy / hpos.w;
+        float2 ndc = hpos.xy / hpos.w - frame_params.jitter.xy;
         float4 hpos_reproj = mul(frame_params.prev_view_proj, float4(position, 1));
-        float2 ndc_reproj = hpos_reproj.xy / hpos_reproj.w;
+        float2 ndc_reproj = hpos_reproj.xy / hpos_reproj.w - frame_params.jitter.zw;
         motion_vector = (ndc - ndc_reproj) * 0.5;
     }
     float2 src_uv = (float2(dispatch_id) + 0.5f) / float2(buffer_size); 
@@ -210,6 +209,7 @@ void main(uint2 dispatch_id : SV_DispatchThreadID) {
     // clip by neighborhood variance
     // [Marco Salvi 2016], suggested by Alex Tarif
     // TODO still too much ghosting, espcially not working well when chroma is changing.
+    // TODO this can possibly introduce aliasing along dark/bright edges.
     float ONE_OVER_SAMPLE_COUNT = 1.0 / 9.0;
     float GAMMA = 1.0;
     float3 m1_u = momentum1 * ONE_OVER_SAMPLE_COUNT;
@@ -223,7 +223,7 @@ void main(uint2 dispatch_id : SV_DispatchThreadID) {
     // Blending //
 
     // linear factors
-    const float BLEND_FACTOR = 0.05;
+    const float BLEND_FACTOR = 1.0 / 8.0; // NOTE: jittering is taking 8 samples too
     float src_weight = BLEND_FACTOR;
     float hist_weight = 1.0 - BLEND_FACTOR;
 
@@ -232,7 +232,7 @@ void main(uint2 dispatch_id : SV_DispatchThreadID) {
     // TODO maybe use something more akin to the display mapping transform
     {
         float3 src_compressed = source * rcp(max(max(source.r, source.g), source.b) + 1.0);
-        float3 hist_compressed = history* rcp(max(max(history.r, history.g), history.b) + 1.0);
+        float3 hist_compressed = history * rcp(max(max(history.r, history.g), history.b) + 1.0);
         float src_lumi = luminance(src_compressed);
         float hist_lumi = luminance(hist_compressed);
         src_weight *= rcp(1.0 + src_lumi);
