@@ -5,21 +5,7 @@
 	"version": "0.2.0",
 	"configurations": [
 		{
-			"name": "debug-restir-Helmet",
-			"type": "cppvsdbg",
-			"request": "launch",
-			"preLaunchTask": "rust: cargo build nightly",
-			"program": "${workspaceFolder}/target/debug/restir.exe",
-			"args": [
-				"./assets/DamagedHelmet/DamagedHelmet.gltf",
-			],
-			"stopAtEntry": false,
-			"cwd": "${workspaceFolder}",
-			"environment": [],
-			"console": "integratedTerminal"
-		},
-		{
-			"name": "debug-restir-Sponza",
+			"name": "debug-restir",
 			"type": "cppvsdbg",
 			"request": "launch",
 			"preLaunchTask": "rust: cargo build nightly",
@@ -33,7 +19,7 @@
 			"console": "integratedTerminal"
 		},
 		{
-			"name": "debug-senga-Helmet",
+			"name": "debug-senga",
 			"type": "cppvsdbg",
 			"request": "launch",
 			"preLaunchTask": "rust: cargo build nightly",
