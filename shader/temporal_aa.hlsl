@@ -28,6 +28,11 @@ float mitchell(float x) {
     return y / 6.0f;
 }
 
+float blackman_harris(float x) {
+    float x2 = x * x;
+    return exp(-2.29 * x2);
+}
+
 // modified from: https://gist.github.com/TheRealMJP/c83b8c0f46b63f3a88a5986f4fa982b1
 // Samples a texture with Catmull-Rom filtering, using 9 texture fetches instead of 16.
 // See http://vec3.ca/bicubic-filtering-in-fewer-taps/ for more details
@@ -116,6 +121,10 @@ void main(uint2 dispatch_id : SV_DispatchThreadID) {
 
     // Produce a sharpe and stable (un-jittered) image for the new frame, and calculate neighborhood variance.
 
+    // subsample offset in pixel space, due to jittering
+    // jittering moves object by `jitter.xy`, or equally, creats samples that are offseted by -jitter.xy relative to the unjittered center of the pixel.
+    float2 sample_offset_pix = - frame_params.jitter.xy * 0.5 * float2(buffer_size.xy);
+
     // TODO LDS optimization 
     float3 neighbor_accu = 0.0;
     float neighbor_weight_accu = 0.0;
@@ -132,10 +141,13 @@ void main(uint2 dispatch_id : SV_DispatchThreadID) {
             int2 pixcoord = dispatch_id + int2(x, y);
             pixcoord = clamp(pixcoord, 0, buffer_size.xy - 1);
 
+            float2 subsample_offset = float2(pixcoord - int2(dispatch_id)) + sample_offset_pix;
+
             // NOTE: Brian Karis used Blackman-Harris; Tomasz Stachowiak and Alex Tardif suggest Mitchell-Netravali.
             float3 neighbor = source_texture[pixcoord];
-            float subsample_dist = length(float2(x, y));
-            float subsample_weight = mitchell(subsample_dist);
+            float subsample_dist = length(subsample_offset);
+            //float subsample_weight = mitchell(subsample_dist);
+            float subsample_weight = blackman_harris(subsample_dist);
 
             neighbor_accu += neighbor * subsample_weight;
             neighbor_weight_accu += subsample_weight;
@@ -158,7 +170,7 @@ void main(uint2 dispatch_id : SV_DispatchThreadID) {
 
     // TODO enbale source filtering once we have jitterred subsamples
     // TODO this seems to amplify the propagating bright spot artifacts
-#if 0
+#if 1
     // filtered source pixel
     float3 source = neighbor_accu / neighbor_weight_accu;
 #else
