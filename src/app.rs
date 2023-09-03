@@ -3,6 +3,7 @@ use std::{env, f32::consts::PI};
 
 use glam::{Mat4, Vec3, Vec4};
 
+use crate::imgui;
 use crate::{
     model,
     render_device::RenderDevice,
@@ -83,6 +84,9 @@ where
             model.err().unwrap()
         );
     }
+
+    // Add ImGUI
+    let mut imgui = imgui::ImGUI::new();
 
     // Create render loop
     let mut render_loop = T::new(&rd);
@@ -232,7 +236,21 @@ where
             }
         }
 
-        render_loop.render(&mut rd, &mut shaders, &render_scene, &view_info);
+        // testing
+        imgui.begin(imgui.gather_input());
+        let panel = egui::SidePanel::left(egui::Id::new("test panel"));
+        panel.show(&imgui.egui_ctx, |ui| {
+            ui.add(egui::Label::new("Hello, world"));
+        });
+        let imgui_output = imgui.end();
+
+        render_loop.render(
+            &mut rd,
+            &mut shaders,
+            &render_scene,
+            &view_info,
+            Some(&imgui_output),
+        );
 
         if window.clicked('p') {
             render_loop.print_stat();

@@ -74,6 +74,7 @@ pub struct RenderDevice {
     pub device_entry: ash::Device,
     pub swapchain_entry: SwapchainEntry, // TODO remove this wrapping
     pub surface_entry: khr::Surface,
+    //pub extended_dynamic_state_entry: ext::ExtendedDynamicState3,
     pub raytracing_pipeline_entry: khr::RayTracingPipeline,
     pub acceleration_structure_entry: khr::AccelerationStructure,
     pub debug_utils: ext::DebugUtils,
@@ -233,6 +234,8 @@ impl RenderDevice {
             // Specify device extensions
             let enabled_extension_names = [
                 khr::Swapchain::name().as_ptr(),
+                // Dynamic states
+                //vk::ExtExtendedDynamicState3Fn::name().as_ptr(),
                 // Raytracing Extensions (and dependencies under vulkan 1.2)
                 vk::KhrRayTracingPipelineFn::name().as_ptr(),
                 vk::KhrAccelerationStructureFn::name().as_ptr(),
@@ -246,6 +249,7 @@ impl RenderDevice {
             // Get physical device supported features
             let mut vulkan12_features = vk::PhysicalDeviceVulkan12Features::default();
             let mut vulkan13_features = vk::PhysicalDeviceVulkan13Features::default();
+            //let mut extended_dynamic_state_features = vk::PhysicalDeviceExtendedDynamicState3FeaturesEXT::default();
             let mut ray_tracing_pipeline_features =
                 vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default();
             let mut acceleration_structure_features =
@@ -254,6 +258,7 @@ impl RenderDevice {
             let mut supported_features = vk::PhysicalDeviceFeatures2::builder()
                 .push_next(&mut vulkan12_features)
                 .push_next(&mut vulkan13_features)
+                //.push_next(&mut extended_dynamic_state_features)
                 .push_next(&mut ray_tracing_pipeline_features)
                 .push_next(&mut acceleration_structure_features)
                 .push_next(&mut ray_query_features)
@@ -339,6 +344,7 @@ impl RenderDevice {
             swapchain_entry.create(&device, &surface, &surface_size)
         };
 
+        //let extended_dynamic_state_entry = ext::ExtendedDynamicState3::new(&instance, &device);
         let raytracing_pipeline_entry = khr::RayTracingPipeline::new(&instance, &device);
         let acceleration_structure_entry = khr::AccelerationStructure::new(&instance, &device);
         let nv_diagnostic_checkpoints_entry =
@@ -351,6 +357,7 @@ impl RenderDevice {
             device_entry: device,
             surface_entry,
             swapchain_entry,
+            //extended_dynamic_state_entry,
             raytracing_pipeline_entry,
             acceleration_structure_entry,
             debug_utils,
@@ -381,6 +388,14 @@ impl RenderDevice {
             self.device_entry.create_semaphore(&create_info, None)
         }
         .expect("Vulkan: failed to create semaphore")
+    }
+
+    pub fn create_event(&self) -> vk::Event {
+        unsafe {
+            let create_info = vk::EventCreateInfo::builder();
+            self.device_entry.create_event(&create_info, None)
+        }
+        .expect("Vulkan: failed to create event")
     }
 
     pub fn create_command_pool(&self) -> vk::CommandPool {
@@ -665,6 +680,16 @@ pub struct BufferDesc {
     pub size: u64,
     pub usage: vk::BufferUsageFlags,
     pub memory_property: vk::MemoryPropertyFlags,
+}
+
+impl Default for BufferDesc {
+    fn default() -> Self {
+        Self {
+            size: 0,
+            usage: vk::BufferUsageFlags::empty(),
+            memory_property: vk::MemoryPropertyFlags::empty(),
+        }
+    }
 }
 
 impl BufferDesc {

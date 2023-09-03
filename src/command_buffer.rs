@@ -7,6 +7,7 @@ use crate::render_device::RenderDevice;
 
 pub struct CommandBuffer {
     pub device: ash::Device,
+    //pub extended_dyna_state: ext::ExtendedDynamicState3,
     pub raytracing_pipeline: khr::RayTracingPipeline,
     pub debug_utils: ext::DebugUtils,
     pub nv_diagnostic_checkpoints: nv::DeviceDiagnosticCheckpoints,
@@ -19,6 +20,7 @@ impl CommandBuffer {
     pub fn new(rd: &RenderDevice, command_buffer: vk::CommandBuffer) -> Self {
         Self {
             device: rd.device_entry.clone(),
+            //extended_dyna_state: rd.extended_dynamic_state_entry.clone(),
             raytracing_pipeline: rd.raytracing_pipeline_entry.clone(),
             debug_utils: rd.debug_utils.clone(),
             nv_diagnostic_checkpoints: rd.nv_diagnostic_checkpoints_entry.clone(),

@@ -5,6 +5,7 @@ use glam::Vec3;
 
 use violet::{
     command_buffer::*,
+    imgui,
     render_device::RenderDevice,
     render_graph::*,
     render_loop::{
@@ -34,6 +35,7 @@ impl RenderLoop for SengaRenderLoop {
         shaders: &mut Shaders,
         scene: &RenderScene,
         view_info: &ViewInfo,
+        _imgui: Option<&imgui::ImGUIOuput>,
     ) {
         self.stream_lined.advance_render_index();
 

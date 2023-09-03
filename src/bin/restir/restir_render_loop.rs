@@ -2,16 +2,17 @@ use ash::vk;
 use glam::{UVec2, Vec3};
 use violet::{
     command_buffer::{CommandBuffer, StencilOps},
+    imgui::ImGUIOuput,
     render_device::{
         Buffer, BufferDesc, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
     },
     render_graph::*,
     render_loop::{
-        div_round_up, rg_util, FrameParams, JitterInfo, PrevView, RenderLoop,
-        StreamLinedFrameResource, ViewInfo, FRAME_DESCRIPTOR_SET_INDEX,
+        div_round_up, imgui_pass::ImGUIPass, rg_util, FrameParams, JitterInfo, PrevView,
+        RenderLoop, StreamLinedFrameResource, ViewInfo, FRAME_DESCRIPTOR_SET_INDEX,
     },
     render_loop::{div_round_up_uvec2, gbuffer_pass::*},
-    render_scene::{RenderScene, SCENE_DESCRIPTOR_SET_INDEX},
+    render_scene::{RenderScene, UploadContext, SCENE_DESCRIPTOR_SET_INDEX},
     shader::{Shaders, ShadersConfig},
 };
 
@@ -91,6 +92,10 @@ pub struct RestirRenderLoop {
     sample_gen: SampleGenPass,
     taa: TAAPass,
 
+    imgui_pass: ImGUIPass,
+
+    upload_context: UploadContext,
+
     last_start_time: Option<std::time::Instant>,
     total_frame_duration: std::time::Duration,
     total_frame_count: u32,
@@ -108,6 +113,8 @@ impl RenderLoop for RestirRenderLoop {
             frame_index: 0,
             sample_gen: SampleGenPass::new(),
             taa: TAAPass::new(),
+            imgui_pass: ImGUIPass::new(rd),
+            upload_context: UploadContext::new(rd),
             last_start_time: None,
             total_frame_duration: std::time::Duration::ZERO,
             total_frame_count: 0,
@@ -137,6 +144,7 @@ impl RenderLoop for RestirRenderLoop {
         shaders: &mut Shaders,
         scene: &RenderScene,
         view_info: &ViewInfo,
+        imgui: Option<&ImGUIOuput>,
     ) {
         self.stream_lined.advance_render_index();
 
@@ -499,6 +507,13 @@ impl RenderLoop for RestirRenderLoop {
                 div_round_up(main_size.height, 4),
                 1,
             );
+
+        // Pass: UI
+        if let Some(imgui) = imgui {
+            let target = rg.register_texture(rd.swapchain.image[swapchain_image_index as usize]);
+            self.imgui_pass
+                .add(&mut rg, rd, &mut self.upload_context, target, imgui);
+        }
 
         // Pass: Output
         rg.present(present_target);

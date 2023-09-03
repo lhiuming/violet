@@ -3,13 +3,14 @@ use glam::Vec3;
 
 use crate::{
     command_buffer::*,
+    imgui,
     render_device::{
         Buffer, BufferDesc, RenderDevice, ShaderBindingTableFiller, Texture, TextureDesc,
         TextureView, TextureViewDesc,
     },
     render_graph,
     render_scene::*,
-    shader::{Handle, Pipeline, ShaderDefinition, Shaders, ShadersConfig},
+    shader::{Handle, Pipeline, RayTracingDesc, ShaderDefinition, Shaders, ShadersConfig},
 };
 
 use super::{RenderLoopDesciptorSets, ViewInfo, FRAME_DESCRIPTOR_SET_INDEX};
@@ -249,6 +250,7 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
         shaders: &mut Shaders,
         scene: &RenderScene,
         view_info: &ViewInfo,
+        _imgui: Option<&imgui::ImGUIOuput>,
     ) {
         let command_buffer = self.command_buffer;
         let frame_descriptor_set = self.descriptor_sets.sets[0];
@@ -262,9 +264,7 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
 
         // Stupid shader compiling hack
         let mut hack = ShadersConfig {
-            bindless_size: 1024,
             set_layout_override: std::collections::HashMap::new(),
-            ray_recursiion_depth: 4,
         };
         hack.set_layout_override
             .insert(SCENE_DESCRIPTOR_SET_INDEX, scene.descriptor_set_layout);
@@ -571,6 +571,7 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
                 "pathtraced_lighting.hlsl",
                 "closesthit",
             )),
+            &RayTracingDesc::default(),
             &hack,
         ) {
             self.pathtraced_lighting

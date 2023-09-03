@@ -14,7 +14,8 @@ use crate::render_device::{
     TextureDesc, TextureView, TextureViewDesc,
 };
 use crate::shader::{
-    self, Handle, Pipeline, PushConstantsBuilder, ShaderDefinition, Shaders, ShadersConfig,
+    self, GraphicsDesc, Handle, Pipeline, PushConstantsBuilder, RayTracingDesc, ShaderDefinition,
+    Shaders, ShadersConfig,
 };
 
 pub struct RGHandle<T> {
@@ -110,6 +111,7 @@ pub struct DepthStencilTarget {
 struct GraphicsPassData {
     vertex_shader: Option<ShaderDefinition>,
     pixel_shader: Option<ShaderDefinition>,
+    desc: GraphicsDesc,
     color_targets: Vec<ColorTarget>,
     depth_stencil: Option<DepthStencilTarget>,
 }
@@ -123,6 +125,7 @@ struct RaytracingPassData {
     raygen_shader: Option<ShaderDefinition>,
     miss_shader: Option<ShaderDefinition>,
     chit_shader: Option<ShaderDefinition>,
+    desc: RayTracingDesc,
     dimension: UVec3,
 }
 
@@ -325,6 +328,9 @@ impl<'a, 'render> GraphicsPassBuilder<'a, 'render> {
         let ty = RenderPassType::Graphics(GraphicsPassData {
             vertex_shader: None,
             pixel_shader: None,
+            desc: GraphicsDesc {
+                blend_enabled: false,
+            },
             color_targets: Vec::new(),
             depth_stencil: None,
         });
@@ -373,6 +379,11 @@ impl<'a, 'render> GraphicsPassBuilder<'a, 'render> {
 
     pub fn depth_stencil(&mut self, ds: DepthStencilTarget) -> &mut Self {
         self.gfx().depth_stencil = Some(ds);
+        self
+    }
+
+    pub fn blend_enabled(&mut self, enabled: bool) -> &mut Self {
+        self.gfx().desc.blend_enabled = enabled;
         self
     }
 }
@@ -424,6 +435,9 @@ impl<'a, 'render> RaytracingPassBuilder<'a, 'render> {
             raygen_shader: None,
             miss_shader: None,
             chit_shader: None,
+            desc: RayTracingDesc {
+                ray_recursiion_depth: 1,
+            },
             dimension: UVec3::new(0, 0, 0),
         });
         let pass = RenderPass::new(name, ty);
@@ -500,6 +514,11 @@ impl<'a, 'render> RaytracingPassBuilder<'a, 'render> {
             entry_point: entry_point,
             stage: shader::ShaderStage::ClosestHit,
         });
+        self
+    }
+
+    pub fn max_recursion_depth(&mut self, depth: u32) -> &mut Self {
+        self.rt().desc.ray_recursiion_depth = depth;
         self
     }
 
@@ -1561,6 +1580,7 @@ impl RenderGraphBuilder<'_> {
                     .create_gfx_pipeline(
                         gfx.vertex_shader.unwrap(),
                         gfx.pixel_shader.unwrap(),
+                        &gfx.desc,
                         &self.shader_config,
                     )
                     .unwrap(),
@@ -1572,6 +1592,7 @@ impl RenderGraphBuilder<'_> {
                         rt.raygen_shader.unwrap(),
                         rt.miss_shader.unwrap(),
                         rt.chit_shader,
+                        &rt.desc,
                         &self.shader_config,
                     )
                     .unwrap(),

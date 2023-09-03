@@ -3,12 +3,16 @@ use std::{mem::size_of, slice};
 use ash::vk;
 use glam::{Mat4, UVec2, Vec2, Vec3, Vec4, Vec4Swizzles};
 
-use crate::render_device::{Buffer, BufferDesc, RenderDevice};
+use crate::{
+    imgui,
+    render_device::{Buffer, BufferDesc, RenderDevice},
+};
 
 /*
  * Modules
  */
 pub mod gbuffer_pass;
+pub mod imgui_pass;
 
 pub mod pbr_loop;
 pub use pbr_loop::PhysicallyBasedRenderLoop;
@@ -26,6 +30,7 @@ pub trait RenderLoop {
         shaders: &mut crate::shader::Shaders,
         scene: &crate::render_scene::RenderScene,
         view_info: &ViewInfo,
+        imgui: Option<&imgui::ImGUIOuput>,
     );
 
     fn print_stat(&self) {}

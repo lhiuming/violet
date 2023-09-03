@@ -21,6 +21,8 @@ rkyv = "0.7"
 glam = "0.24"
 # Debugging
 renderdoc-sys = "0.7"
+# ImGUI 
+egui = "0.22"
 
 [dependencies.windows-sys]
 version = "0.28.0"

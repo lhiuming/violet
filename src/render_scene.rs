@@ -44,6 +44,8 @@ pub struct UploadContext {
     pub command_pool: vk::CommandPool,
     pub command_buffers: Vec<vk::CommandBuffer>,
     pub finished_fences: Vec<vk::Fence>,
+    pub staging_buffers: Vec<Buffer>,
+    pub staging_finished: Vec<vk::Event>,
 }
 
 impl UploadContext {
@@ -53,6 +55,8 @@ impl UploadContext {
             command_pool,
             command_buffers: Vec::new(),
             finished_fences: Vec::new(),
+            staging_buffers: Vec::new(),
+            staging_finished: Vec::new(),
         }
     }
 
@@ -106,6 +110,43 @@ impl UploadContext {
             let timeout = 1000 * 1000000; // 1s
             device.wait_for_fences(&fences, true, timeout).unwrap();
         }
+    }
+
+    // Signaled the event to return the fence back to the pool
+    pub fn borrow_staging_buffer(
+        &mut self,
+        rd: &RenderDevice,
+        buffer_size: u64,
+    ) -> (Buffer, vk::Event) {
+        // quantize the size
+        let buffer_size = buffer_size.next_power_of_two();
+        // Find reusable one
+        // TODO something better than linear search?
+        for (i, buffer) in self.staging_buffers.iter().enumerate() {
+            if buffer.desc.size == buffer_size {
+                let event = self.staging_finished[i];
+                let finished = unsafe { rd.device_entry.get_event_status(event).unwrap() };
+                if finished {
+                    // todo reset in bunch?
+                    unsafe { rd.device_entry.reset_event(event).unwrap() };
+                    return (*buffer, event);
+                }
+            }
+        }
+
+        // Crate new
+        let buffer = rd
+            .create_buffer(BufferDesc {
+                size: buffer_size,
+                usage: vk::BufferUsageFlags::TRANSFER_SRC,
+                memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
+                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+            })
+            .unwrap();
+        let event = rd.create_event();
+        self.staging_buffers.push(buffer);
+        self.staging_finished.push(event);
+        (buffer, event)
     }
 }
 

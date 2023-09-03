@@ -8,6 +8,9 @@ use spirq::{self};
 
 use crate::render_device::RenderDevice;
 
+// TODO it should be provided by user?
+const BINDLESS_SIZE: u32 = 1024;
+
 // BEGIN Handle
 
 #[derive(Eq, Hash)]
@@ -119,6 +122,7 @@ impl Shaders {
         &mut self,
         vs_def: ShaderDefinition,
         ps_def: ShaderDefinition,
+        desc: &GraphicsDesc,
         hack: &ShadersConfig,
     ) -> Option<Handle<Pipeline>> {
         // look from cache
@@ -129,7 +133,8 @@ impl Shaders {
         if !self.gfx_pipelines_map.contains_key(&key) {
             let vs = self.shader_loader.load(&self.pipeline_device, &vs_def)?;
             let ps = self.shader_loader.load(&self.pipeline_device, &ps_def)?;
-            let pipeline_created = create_graphics_pipeline(&self.pipeline_device, &vs, &ps, &hack);
+            let pipeline_created =
+                create_graphics_pipeline(&self.pipeline_device, &vs, &ps, desc, hack);
             if let Some(pipeline) = pipeline_created {
                 let handle = self.add_pipeline(pipeline);
                 self.gfx_pipelines_map.insert(key, handle.clone());
@@ -168,6 +173,7 @@ impl Shaders {
         ray_gen_def: ShaderDefinition,
         miss_def: ShaderDefinition,
         hit_def: Option<ShaderDefinition>,
+        desc: &RayTracingDesc,
         hack: &ShadersConfig,
     ) -> Option<Handle<Pipeline>> {
         let key = (ray_gen_def, miss_def, hit_def);
@@ -186,6 +192,7 @@ impl Shaders {
                 &raygen_cs,
                 &miss_cs,
                 &closest_hit,
+                desc,
                 &hack,
             );
             if let Some(pipeline) = pipeline_created {
@@ -377,17 +384,37 @@ impl ShaderDefinition {
 }
 
 pub struct ShadersConfig {
-    pub bindless_size: u32, // Used to create descriptor layout
     pub set_layout_override: HashMap<u32, vk::DescriptorSetLayout>,
+}
+
+pub struct GraphicsDesc {
+    pub blend_enabled: bool,
+}
+
+impl Default for GraphicsDesc {
+    fn default() -> Self {
+        Self {
+            blend_enabled: false,
+        }
+    }
+}
+
+pub struct RayTracingDesc {
     pub ray_recursiion_depth: u32,
+}
+
+impl Default for RayTracingDesc {
+    fn default() -> Self {
+        Self {
+            ray_recursiion_depth: 32,
+        }
+    }
 }
 
 impl Default for ShadersConfig {
     fn default() -> Self {
         Self {
-            bindless_size: 1024,
             set_layout_override: Default::default(),
-            ray_recursiion_depth: 1,
         }
     }
 }
@@ -596,7 +623,7 @@ fn create_merged_descriptor_set_layouts(
                 let count = match descriptor_info.binding_count {
                     rspirv_reflect::BindingCount::One => 1,
                     rspirv_reflect::BindingCount::StaticSized(size) => size as u32,
-                    rspirv_reflect::BindingCount::Unbounded => hack.bindless_size,
+                    rspirv_reflect::BindingCount::Unbounded => BINDLESS_SIZE,
                 };
                 // New or merge binding record (stage flags)
                 match merged_set.entry(binding_index) {
@@ -810,6 +837,7 @@ pub fn create_raytracing_pipeline(
     raygen: &CompiledShader,
     miss: &CompiledShader,
     closest_hit: &Option<CompiledShader>,
+    desc: &RayTracingDesc,
     hack: &ShadersConfig,
 ) -> Option<Pipeline> {
     let mut stages_info = vec![
@@ -903,7 +931,7 @@ pub fn create_raytracing_pipeline(
         .flags(flags)
         .stages(&stages)
         .groups(&groups)
-        .max_pipeline_ray_recursion_depth(hack.ray_recursiion_depth) // TODO rt depth
+        .max_pipeline_ray_recursion_depth(desc.ray_recursiion_depth)
         //.library_info(todo!())
         //.dynamic_state(dynamic_state)
         .layout(layout);
@@ -934,6 +962,7 @@ pub fn create_graphics_pipeline(
     device: &PipelineDevice,
     vs: &CompiledShader,
     ps: &CompiledShader,
+    desc: &GraphicsDesc,
     hack: &ShadersConfig,
 ) -> Option<Pipeline> {
     let pipeline_cache = device.pipeline_cache;
@@ -992,10 +1021,22 @@ pub fn create_graphics_pipeline(
         .rasterization_samples(vk::SampleCountFlags::TYPE_1);
     let depth_stencil =
         vk::PipelineDepthStencilStateCreateInfo::builder().depth_compare_op(vk::CompareOp::GREATER);
-    let attachment = vk::PipelineColorBlendAttachmentState::builder()
-        .color_write_mask(vk::ColorComponentFlags::from_raw(0xFFFFFFFF));
-    let attachments = [attachment.build()];
-    let color_blend = vk::PipelineColorBlendStateCreateInfo::builder().attachments(&attachments);
+    // blend-enabled and blend-equation is dynamic
+    let mut attachment = vk::PipelineColorBlendAttachmentState::builder()
+        .blend_enable(desc.blend_enabled)
+        .color_write_mask(vk::ColorComponentFlags::from_raw(0xFFFFFFFF))
+        .build();
+    if desc.blend_enabled {
+        // NOTE: currently the only use case if pre-multiplied alpha (UI)
+        attachment.src_alpha_blend_factor = vk::BlendFactor::ONE;
+        attachment.dst_alpha_blend_factor = vk::BlendFactor::ONE_MINUS_SRC_ALPHA;
+        attachment.color_blend_op = vk::BlendOp::ADD;
+        attachment.src_alpha_blend_factor = vk::BlendFactor::ONE;
+        attachment.dst_alpha_blend_factor = vk::BlendFactor::ONE_MINUS_SRC_ALPHA;
+        attachment.alpha_blend_op = vk::BlendOp::ADD;
+    }
+    let color_blend = vk::PipelineColorBlendStateCreateInfo::builder()
+        .attachments(std::slice::from_ref(&attachment));
     let dynamic_states = [
         vk::DynamicState::VIEWPORT,
         vk::DynamicState::SCISSOR,
@@ -1009,6 +1050,8 @@ pub fn create_graphics_pipeline(
         vk::DynamicState::STENCIL_COMPARE_MASK,
         vk::DynamicState::STENCIL_OP,
         vk::DynamicState::STENCIL_REFERENCE,
+        //vk::DynamicState::COLOR_BLEND_ENABLE_EXT,
+        //vk::DynamicState::COLOR_BLEND_EQUATION_EXT,
     ];
     let dynamic_state =
         vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states);
