@@ -203,6 +203,8 @@ impl RenderPassType {
     }
 }
 
+pub static DESCRIPTOR_SET_INDEX_UNUSED: u32 = u32::MAX;
+
 // Lifetime marker 'render is required becaues RenderPass::render may (unmutably) reference the RenderScene (or other things that live in the render loop call)
 pub struct RenderPass<'render> {
     name: String,
@@ -214,6 +216,7 @@ pub struct RenderPass<'render> {
     rw_buffers: Vec<(&'static str, RGHandle<Buffer>)>,
     rw_textures: Vec<(&'static str, RGHandle<TextureView>)>,
     push_constants: PushConstantsBuilder,
+    set_layout_override: Option<(u32, vk::DescriptorSetLayout)>,
     render: Option<Box<dyn 'render + FnOnce(&CommandBuffer, &Pipeline)>>,
 }
 
@@ -229,6 +232,7 @@ impl RenderPass<'_> {
             rw_buffers: Vec::new(),
             rw_textures: Vec::new(),
             push_constants: PushConstantsBuilder::new(),
+            set_layout_override: None,
             render: None,
         }
     }
@@ -242,6 +246,11 @@ pub trait PrivatePassBuilderTrait<'render> {
 
 // Common interfaces for all pass builders
 pub trait PassBuilderTrait<'render>: PrivatePassBuilderTrait<'render> {
+    fn descriptor_set_index(&mut self, index: u32) -> &mut Self {
+        self.inner().descriptor_set_index = index;
+        self
+    }
+
     // Binding texture to per-pass descriptor set
     fn texture(&mut self, name: &'static str, texture: RGHandle<TextureView>) -> &mut Self {
         self.inner().textures.push((name, texture));
@@ -279,6 +288,17 @@ pub trait PassBuilderTrait<'render>: PrivatePassBuilderTrait<'render> {
         T: Copy,
     {
         self.inner().push_constants.push_inplace::<T>(value);
+        self
+    }
+
+    fn set_layout_override(
+        &mut self,
+        index: u32,
+        set_layout: vk::DescriptorSetLayout,
+    ) -> &mut Self {
+        self.inner()
+            .set_layout_override
+            .replace((index, set_layout));
         self
     }
 
@@ -1187,7 +1207,7 @@ impl RenderGraphBuilder<'_> {
 
                 let mut builder = vk::RenderingAttachmentInfo::builder()
                     .image_view(image_view)
-                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL) // TODO read it
+                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                     .store_op(vk::AttachmentStoreOp::STORE);
 
                 builder = match target.load_op {
@@ -1576,14 +1596,23 @@ impl RenderGraphBuilder<'_> {
             let pass = &mut self.passes[pass_index];
 
             let pipeline = match &pass.ty {
-                RenderPassType::Graphics(gfx) => shaders
-                    .create_gfx_pipeline(
-                        gfx.vertex_shader.unwrap(),
-                        gfx.pixel_shader.unwrap(),
-                        &gfx.desc,
-                        &self.shader_config,
-                    )
-                    .unwrap(),
+                RenderPassType::Graphics(gfx) => {
+                    // very hack
+                    let mut hack = ShadersConfig {
+                        set_layout_override: self.shader_config.set_layout_override.clone(),
+                    };
+                    if let Some(o) = &pass.set_layout_override {
+                        hack.set_layout_override.insert(o.0, o.1);
+                    }
+                    shaders
+                        .create_gfx_pipeline(
+                            gfx.vertex_shader.unwrap(),
+                            gfx.pixel_shader.unwrap(),
+                            &gfx.desc,
+                            &hack,
+                        )
+                        .unwrap()
+                }
                 RenderPassType::Compute(compute) => shaders
                     .create_compute_pipeline(compute.shader.unwrap(), &self.shader_config)
                     .unwrap(),

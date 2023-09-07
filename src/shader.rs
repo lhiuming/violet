@@ -1021,15 +1021,14 @@ pub fn create_graphics_pipeline(
         .rasterization_samples(vk::SampleCountFlags::TYPE_1);
     let depth_stencil =
         vk::PipelineDepthStencilStateCreateInfo::builder().depth_compare_op(vk::CompareOp::GREATER);
-    // blend-enabled and blend-equation is dynamic
     let mut attachment = vk::PipelineColorBlendAttachmentState::builder()
         .blend_enable(desc.blend_enabled)
-        .color_write_mask(vk::ColorComponentFlags::from_raw(0xFFFFFFFF))
+        .color_write_mask(vk::ColorComponentFlags::RGBA)
         .build();
     if desc.blend_enabled {
         // NOTE: currently the only use case if pre-multiplied alpha (UI)
-        attachment.src_alpha_blend_factor = vk::BlendFactor::ONE;
-        attachment.dst_alpha_blend_factor = vk::BlendFactor::ONE_MINUS_SRC_ALPHA;
+        attachment.src_color_blend_factor = vk::BlendFactor::ONE;
+        attachment.dst_color_blend_factor = vk::BlendFactor::ONE_MINUS_SRC_ALPHA;
         attachment.color_blend_op = vk::BlendOp::ADD;
         attachment.src_alpha_blend_factor = vk::BlendFactor::ONE;
         attachment.dst_alpha_blend_factor = vk::BlendFactor::ONE_MINUS_SRC_ALPHA;

@@ -238,10 +238,19 @@ where
 
         // testing
         imgui.begin(imgui.gather_input());
-        let panel = egui::SidePanel::left(egui::Id::new("test panel"));
-        panel.show(&imgui.egui_ctx, |ui| {
+
+        let win = egui::Window::new("Main UI Window");
+        win.show(&imgui.egui_ctx, |ui| {
+            // label
             ui.add(egui::Label::new("Hello, world"));
+            /*
+            // button
+            if ui.add(egui::Button::new("CLICK ME😀")).clicked() {
+                println!("clicked")
+            }
+             */
         });
+
         let imgui_output = imgui.end();
 
         render_loop.render(

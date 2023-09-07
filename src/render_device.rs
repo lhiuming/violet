@@ -541,9 +541,10 @@ impl SwapchainEntry {
     fn create(&self, device: &ash::Device, surface: &Surface, extent: &vk::Extent2D) -> Swapchain {
         let mut ret = Swapchain::default();
         ret.extent = *extent;
-        //let image_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::STORAGE // compute post processing
 
-        let image_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::STORAGE;
+        let image_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT // ui overlay
+        | vk::ImageUsageFlags::STORAGE // compute post processing
+        ;
 
         let vsync = true;
         let present_mode = if vsync {
