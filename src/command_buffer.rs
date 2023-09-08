@@ -10,7 +10,6 @@ pub struct CommandBuffer {
     //pub extended_dyna_state: ext::ExtendedDynamicState3,
     pub raytracing_pipeline: khr::RayTracingPipeline,
     pub debug_utils: ext::DebugUtils,
-    pub nv_diagnostic_checkpoints: nv::DeviceDiagnosticCheckpoints,
     pub command_buffer: vk::CommandBuffer,
 
     pub enable_check_point: bool,
@@ -22,7 +21,6 @@ impl CommandBuffer {
             device: rd.device_entry.clone(),
             raytracing_pipeline: rd.raytracing_pipeline_entry.clone(),
             debug_utils: rd.debug_utils.clone(),
-            nv_diagnostic_checkpoints: rd.nv_diagnostic_checkpoints_entry.clone(),
             command_buffer,
             enable_check_point: false,
         }
@@ -371,17 +369,6 @@ impl CommandBuffer {
         unsafe {
             self.debug_utils
                 .cmd_insert_debug_utils_label(self.command_buffer, &label)
-        }
-    }
-
-    // Debugging
-    pub fn insert_checkpoint(&self) {
-        if !self.enable_check_point {
-            return;
-        }
-        unsafe {
-            self.nv_diagnostic_checkpoints
-                .cmd_set_checkpoint(self.command_buffer, 0 as _);
         }
     }
 }

@@ -641,22 +641,6 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
                     &[*submit_info],
                     self.command_buffer_finished_fence,
                 );
-                if let Err(e) = rt {
-                    match e {
-                        vk::Result::ERROR_DEVICE_LOST => {
-                            // Try nv tool
-                            let len = rd
-                                .nv_diagnostic_checkpoints_entry
-                                .get_queue_checkpoint_data_len(rd.gfx_queue);
-                            let mut cp = Vec::new();
-                            cp.resize(len, vk::CheckpointDataNV::default());
-                            rd.nv_diagnostic_checkpoints_entry
-                                .get_queue_checkpoint_data(rd.gfx_queue, &mut cp);
-                            println!("cp: {:?}", cp);
-                        }
-                        _ => {}
-                    }
-                }
                 rt.unwrap()
             }
         }

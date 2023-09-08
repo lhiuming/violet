@@ -3,7 +3,7 @@ use std::ffi::CStr;
 use std::io::Write;
 use std::os::raw::c_void;
 
-use ash::extensions::{ext, khr, nv};
+use ash::extensions::{ext, khr};
 use ash::vk;
 
 pub struct PhysicalDevice {
@@ -77,7 +77,6 @@ pub struct RenderDevice {
     pub raytracing_pipeline_entry: khr::RayTracingPipeline,
     pub acceleration_structure_entry: khr::AccelerationStructure,
     pub debug_utils: ext::DebugUtils,
-    pub nv_diagnostic_checkpoints_entry: nv::DeviceDiagnosticCheckpoints,
 
     pub gfx_queue: vk::Queue,
 
@@ -237,8 +236,6 @@ impl RenderDevice {
                 vk::KhrRayTracingPipelineFn::name().as_ptr(),
                 vk::KhrAccelerationStructureFn::name().as_ptr(),
                 vk::KhrDeferredHostOperationsFn::name().as_ptr(),
-                // DEVICE_LOST debug tools
-                vk::NvDeviceDiagnosticCheckpointsFn::name().as_ptr(),
                 // Workaround a DXC bug (causing all raytracing shader requiring ray query extensions when it is not used at all)
                 // ref: https://github.com/microsoft/DirectXShaderCompiler/commit/ce31e10902732c8cd8f6f3b5b78699110afddb2b#diff-44e37c9720575ff94b7842b9ceb70a87fe72486d2b5da2e3828512dc64a352e6R217-R222
                 vk::KhrRayQueryFn::name().as_ptr(),
@@ -428,8 +425,6 @@ impl RenderDevice {
 
         let raytracing_pipeline_entry = khr::RayTracingPipeline::new(&instance, &device);
         let acceleration_structure_entry = khr::AccelerationStructure::new(&instance, &device);
-        let nv_diagnostic_checkpoints_entry =
-            nv::DeviceDiagnosticCheckpoints::new(&instance, &device);
 
         RenderDevice {
             entry,
@@ -441,7 +436,6 @@ impl RenderDevice {
             raytracing_pipeline_entry,
             acceleration_structure_entry,
             debug_utils,
-            nv_diagnostic_checkpoints_entry,
 
             gfx_queue,
 

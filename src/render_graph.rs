@@ -1748,8 +1748,6 @@ impl RenderGraphBuilder<'_> {
             exec_context.shader_binding_tables.push(pass_sbt);
         }
 
-        command_buffer.insert_checkpoint();
-
         for pass_index in 0..self.passes.len() {
             // take the FnOnce callback before unmutable reference
             let render = self.passes[pass_index].render.take();
@@ -1761,13 +1759,10 @@ impl RenderGraphBuilder<'_> {
             // TODO analysis of the DAG and sync properly
             self.ad_hoc_transition(command_buffer, &mut exec_context, pass_index as u32);
 
-            command_buffer.insert_checkpoint();
-
             // Begin render pass (if graphics)
             let is_graphic = pass.ty.is_graphics();
             if is_graphic {
                 self.begin_graphics(&exec_context, command_buffer, pass);
-                command_buffer.insert_checkpoint();
             }
 
             let pipeline = shaders.get_pipeline(exec_context.pipelines[pass_index]);
@@ -1787,7 +1782,6 @@ impl RenderGraphBuilder<'_> {
                 &pass,
                 exec_context.descriptor_sets[pass_index],
             );
-            command_buffer.insert_checkpoint();
 
             // Push Constant (if pushed)
             let pc_data = pass.push_constants.build();
@@ -1829,7 +1823,6 @@ impl RenderGraphBuilder<'_> {
             if let Some(render) = render {
                 if let Some(pipeline) = pipeline {
                     render(command_buffer, pipeline);
-                    command_buffer.insert_checkpoint();
                 } else {
                     println!("Error[RenderGraph]: render callback is ignored because not valid pipeline.");
                 }
@@ -1879,7 +1872,6 @@ impl RenderGraphBuilder<'_> {
             // End render pass (if graphics)
             if is_graphic {
                 self.end_graphics(command_buffer);
-                command_buffer.insert_checkpoint();
             }
 
             // Timestamp: after executing the work
@@ -1891,8 +1883,6 @@ impl RenderGraphBuilder<'_> {
 
             command_buffer.end_label();
         }
-
-        command_buffer.insert_checkpoint();
 
         // Process all textures converted to temporals
         for (handle, temporal_handle) in &self.transient_to_temporal_textures {
