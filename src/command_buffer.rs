@@ -7,7 +7,6 @@ use crate::render_device::RenderDevice;
 
 pub struct CommandBuffer {
     pub device: ash::Device,
-    //pub extended_dyna_state: ext::ExtendedDynamicState3,
     pub raytracing_pipeline: khr::RayTracingPipeline,
     pub debug_utils: ext::DebugUtils,
     pub command_buffer: vk::CommandBuffer,
