@@ -72,7 +72,7 @@ pub struct RenderDevice {
 
     // Entry wrappers
     pub device_entry: ash::Device,
-    pub swapchain_entry: SwapchainEntry, // TODO remove this wrapping
+    pub swapchain_entry: khr::Swapchain,
     pub surface_entry: khr::Surface,
     //pub extended_dynamic_state_entry: ext::ExtendedDynamicState3,
     pub raytracing_pipeline_entry: khr::RayTracingPipeline,
@@ -309,9 +309,10 @@ impl RenderDevice {
         // Get quques
         let gfx_queue = unsafe { device.get_device_queue(gfx_queue_family_index, 0) };
 
-        // Create surface
         let surface_entry = khr::Surface::new(&entry, &&instance);
         let win_surface_entry = khr::Win32Surface::new(&entry, &instance);
+
+        // Create surface
         let surface: Surface = {
             // Create platform surface
             let create_info = vk::Win32SurfaceCreateInfoKHR::builder()
@@ -337,11 +338,95 @@ impl RenderDevice {
             }
         };
 
+        let swapchain_entry = khr::Swapchain::new(&instance, &device);
+
         // Create swapchain
-        let swapchain_entry = SwapchainEntry::new(&instance, &device);
         let swapchain = {
-            let surface_size = surface.query_size(&surface_entry, &physical_device.handle);
-            swapchain_entry.create(&device, &surface, &surface_size)
+            let surface_extent = surface.query_size(&surface_entry, &physical_device.handle);
+
+            // UI Overlay (color_attachment) and Compute PostProcessing (storage)
+            let image_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::STORAGE;
+
+            let vsync = true;
+            let present_mode = if vsync {
+                vk::PresentModeKHR::FIFO
+            } else {
+                vk::PresentModeKHR::IMMEDIATE
+            };
+
+            // Create swapchain object
+            let create_info = {
+                vk::SwapchainCreateInfoKHR::builder()
+                    .flags(vk::SwapchainCreateFlagsKHR::empty())
+                    .surface(surface.handle)
+                    .min_image_count(2)
+                    .image_format(surface.format.format)
+                    .image_color_space(surface.format.color_space)
+                    .image_extent(surface_extent)
+                    .image_array_layers(1)
+                    .image_usage(image_usage)
+                    .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
+                    .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+                    .present_mode(present_mode)
+            };
+            let swapchain_handle = unsafe { swapchain_entry.create_swapchain(&create_info, None) }
+                .expect("Vulkan: Swapchain creatino failed???");
+
+            // Get images/textures
+            let textures = {
+                let mut images =
+                    unsafe { swapchain_entry.get_swapchain_images(swapchain_handle) }.unwrap();
+                images
+                    .drain(0..)
+                    .map(|image| {
+                        let desc = TextureDesc::new_2d(
+                            surface_extent.width,
+                            surface_extent.height,
+                            surface.format.format,
+                            image_usage,
+                        );
+                        Texture {
+                            desc,
+                            image,
+                            memory: vk::DeviceMemory::null(), // TODO really?
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            };
+
+            // Create image views / texture views
+            let sub_res_range = vk::ImageSubresourceRange::builder()
+                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                .layer_count(1)
+                .level_count(1);
+            let texture_views = textures
+                .iter()
+                .map(|texture| {
+                    let image_view = unsafe {
+                        let create_info = vk::ImageViewCreateInfo::builder()
+                            .image(texture.image)
+                            .view_type(vk::ImageViewType::TYPE_2D)
+                            .format(surface.format.format)
+                            .subresource_range(*sub_res_range);
+                        device
+                            .create_image_view(&create_info, None)
+                            .expect("Vulkan: failed to create image view for swapchain")
+                    };
+                    let desc = TextureViewDesc::auto(&texture.desc);
+                    TextureView {
+                        texture: *texture,
+                        desc,
+                        image_view,
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            Swapchain {
+                extent: surface_extent,
+                handle: swapchain_handle,
+                textures,
+                texture_views,
+            }
         };
 
         //let extended_dynamic_state_entry = ext::ExtendedDynamicState3::new(&instance, &device);
@@ -502,139 +587,8 @@ impl Surface {
 pub struct Swapchain {
     pub extent: vk::Extent2D,
     pub handle: vk::SwapchainKHR,
-    pub num_image: u32,
-    //pub image: [vk::Image; 8],
-    //pub image_view: [vk::ImageView; 8],
-    // TODO use array vec
-    pub image: Vec<Texture>,
-    pub image_view: Vec<TextureView>,
-}
-
-impl Swapchain {
-    fn default() -> Swapchain {
-        Swapchain {
-            extent: vk::Extent2D {
-                width: 0,
-                height: 0,
-            },
-            handle: vk::SwapchainKHR::default(),
-            num_image: 0,
-            //image: [vk::Image::default(); 8],
-            //image_view: [vk::ImageView::default(); 8],
-            image: Vec::new(),
-            image_view: Vec::new(),
-        }
-    }
-}
-
-pub struct SwapchainEntry {
-    pub entry: khr::Swapchain,
-}
-
-impl SwapchainEntry {
-    fn new(instance: &ash::Instance, device: &ash::Device) -> SwapchainEntry {
-        SwapchainEntry {
-            entry: khr::Swapchain::new(instance, device),
-        }
-    }
-
-    fn create(&self, device: &ash::Device, surface: &Surface, extent: &vk::Extent2D) -> Swapchain {
-        let mut ret = Swapchain::default();
-        ret.extent = *extent;
-
-        let image_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT // ui overlay
-        | vk::ImageUsageFlags::STORAGE // compute post processing
-        ;
-
-        let vsync = true;
-        let present_mode = if vsync {
-            vk::PresentModeKHR::FIFO
-        } else {
-            vk::PresentModeKHR::IMMEDIATE
-        };
-
-        // Create swapchain object
-        let create_info = {
-            vk::SwapchainCreateInfoKHR::builder()
-                .flags(vk::SwapchainCreateFlagsKHR::empty())
-                .surface(surface.handle)
-                .min_image_count(2)
-                .image_format(surface.format.format)
-                .image_color_space(surface.format.color_space)
-                .image_extent(*extent)
-                .image_array_layers(1)
-                .image_usage(image_usage)
-                .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
-                .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-                .present_mode(present_mode)
-        };
-        ret.handle = unsafe { self.entry.create_swapchain(&create_info, None) }
-            .expect("Vulkan: Swapchain creatino failed???");
-
-        // Get images
-        {
-            let images = unsafe { self.entry.get_swapchain_images(ret.handle) }.unwrap_or(vec![]);
-            ret.num_image = images.len() as u32;
-
-            // Add ret
-            for image in images {
-                let desc = TextureDesc::new_2d(
-                    extent.width,
-                    extent.height,
-                    surface.format.format,
-                    image_usage,
-                );
-                ret.image.push(Texture {
-                    desc,
-                    image,
-                    memory: vk::DeviceMemory::null(), // TODO is this ok?
-                });
-            }
-        }
-
-        // Create image views
-        let sub_res_range = vk::ImageSubresourceRange::builder()
-            .aspect_mask(vk::ImageAspectFlags::COLOR)
-            .layer_count(1)
-            .level_count(1);
-        for img_index in 0..ret.num_image as usize {
-            let texture = ret.image[img_index];
-            let image_view = unsafe {
-                let create_info = vk::ImageViewCreateInfo::builder()
-                    .image(texture.image)
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(surface.format.format)
-                    .subresource_range(*sub_res_range);
-                device
-                    .create_image_view(&create_info, None)
-                    .expect("Vulkan: failed to create image view for swapchain")
-            };
-            let desc = TextureViewDesc::auto(&texture.desc);
-            ret.image_view.push(TextureView {
-                texture,
-                desc,
-                image_view,
-            });
-        }
-
-        ret
-    }
-
-    /*
-    fn detroy(&self, device: &ash::Device, swapchain: &mut Swapchain) {
-        for image_index in 0..swapchain.num_image as usize {
-            let image_view = swapchain.image_view[image_index];
-            unsafe {
-                device.destroy_image_view(image_view, None);
-            }
-        }
-        unsafe {
-            self.entry.destroy_swapchain(swapchain.handle, None);
-        }
-        swapchain.handle = vk::SwapchainKHR::default();
-        swapchain.num_image = 0;
-    }
-    */
+    pub textures: Vec<Texture>,
+    pub texture_views: Vec<TextureView>,
 }
 
 impl RenderDevice {
@@ -654,7 +608,6 @@ impl RenderDevice {
 
         let (index, is_suboptimal) = unsafe {
             self.swapchain_entry
-                .entry
                 .acquire_next_image(
                     self.swapchain.handle,
                     std::u64::MAX,

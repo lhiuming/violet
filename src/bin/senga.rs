@@ -66,8 +66,9 @@ impl RenderLoop for SengaRenderLoop {
         // Acquire swapchain image
         let swapchain_image_index = self.stream_lined.acquire_next_swapchain_image(rd);
 
-        let final_color =
-            { rg.register_texture_view(rd.swapchain.image_view[swapchain_image_index as usize]) };
+        let final_color = {
+            rg.register_texture_view(rd.swapchain.texture_views[swapchain_image_index as usize])
+        };
 
         // Pass: Image-Based Line-Drawing
         rg.new_compute("IBLD")

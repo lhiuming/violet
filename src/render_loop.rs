@@ -516,7 +516,6 @@ impl StreamLinedFrameResource {
                 .build();
             unsafe {
                 rd.swapchain_entry
-                    .entry
                     .queue_present(rd.gfx_queue, &present_info)
                     .unwrap();
             }

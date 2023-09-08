@@ -273,7 +273,7 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
 
         // Acquire target image
         let (image_index, b_image_suboptimal) = unsafe {
-            rd.swapchain_entry.entry.acquire_next_image(
+            rd.swapchain_entry.acquire_next_image(
                 rd.swapchain.handle,
                 u64::MAX,
                 vk::Semaphore::null(),
@@ -420,7 +420,8 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
         add_gbuffer_pass(&mut rg, &rd, hack, &common_sets, scene, &gbuffer);
         */
 
-        let final_color = rg.register_texture_view(rd.swapchain.image_view[image_index as usize]);
+        let final_color =
+            rg.register_texture_view(rd.swapchain.texture_views[image_index as usize]);
 
         /*
         // Draw (procedure) Sky
@@ -613,7 +614,7 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
 
         // Insert output pass
         let swapchain_view_handle =
-            rg.register_texture_view(rd.swapchain.image_view[image_index as usize]);
+            rg.register_texture_view(rd.swapchain.texture_views[image_index as usize]);
         rg.present(swapchain_view_handle);
 
         // Run render graph and fianlize
@@ -670,7 +671,6 @@ impl RenderLoop for PhysicallyBasedRenderLoop {
             present_info.p_image_indices = &image_index;
             unsafe {
                 rd.swapchain_entry
-                    .entry
                     .queue_present(rd.gfx_queue, &present_info)
                     .unwrap_or_else(|e| panic!("Failed to present: {:?}", e));
             }

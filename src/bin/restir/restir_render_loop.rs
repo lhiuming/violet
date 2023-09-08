@@ -494,7 +494,7 @@ impl RenderLoop for RestirRenderLoop {
             .acquire_next_swapchain_image_with_duration(rd);
         self.total_acquire_duration += acquire_swapchain_duratiaon;
         let present_target =
-            rg.register_texture_view(rd.swapchain.image_view[swapchain_image_index as usize]);
+            rg.register_texture_view(rd.swapchain.texture_views[swapchain_image_index as usize]);
 
         // Pass: Post Processing (write to swapchain)
         rg.new_compute("Post Processing")
@@ -510,7 +510,7 @@ impl RenderLoop for RestirRenderLoop {
 
         // Pass: UI
         if let Some(imgui) = imgui {
-            let target = rg.register_texture(rd.swapchain.image[swapchain_image_index as usize]);
+            let target = rg.register_texture(rd.swapchain.textures[swapchain_image_index as usize]);
             self.imgui_pass
                 .add(&mut rg, rd, &mut self.upload_context, target, imgui);
         }
