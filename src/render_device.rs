@@ -74,7 +74,6 @@ pub struct RenderDevice {
     pub device_entry: ash::Device,
     pub swapchain_entry: khr::Swapchain,
     pub surface_entry: khr::Surface,
-    //pub extended_dynamic_state_entry: ext::ExtendedDynamicState3,
     pub raytracing_pipeline_entry: khr::RayTracingPipeline,
     pub acceleration_structure_entry: khr::AccelerationStructure,
     pub debug_utils: ext::DebugUtils,
@@ -234,8 +233,6 @@ impl RenderDevice {
             // Specify device extensions
             let enabled_extension_names = [
                 khr::Swapchain::name().as_ptr(),
-                // Dynamic states
-                //vk::ExtExtendedDynamicState3Fn::name().as_ptr(),
                 // Raytracing Extensions (and dependencies under vulkan 1.2)
                 vk::KhrRayTracingPipelineFn::name().as_ptr(),
                 vk::KhrAccelerationStructureFn::name().as_ptr(),
@@ -429,7 +426,6 @@ impl RenderDevice {
             }
         };
 
-        //let extended_dynamic_state_entry = ext::ExtendedDynamicState3::new(&instance, &device);
         let raytracing_pipeline_entry = khr::RayTracingPipeline::new(&instance, &device);
         let acceleration_structure_entry = khr::AccelerationStructure::new(&instance, &device);
         let nv_diagnostic_checkpoints_entry =
@@ -442,7 +438,6 @@ impl RenderDevice {
             device_entry: device,
             surface_entry,
             swapchain_entry,
-            //extended_dynamic_state_entry,
             raytracing_pipeline_entry,
             acceleration_structure_entry,
             debug_utils,
