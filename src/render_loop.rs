@@ -14,9 +14,6 @@ use crate::{
 pub mod gbuffer_pass;
 pub mod imgui_pass;
 
-pub mod pbr_loop;
-pub use pbr_loop::PhysicallyBasedRenderLoop;
-
 /*
  * Basic Traits
  */

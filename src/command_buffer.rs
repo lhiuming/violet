@@ -1,6 +1,6 @@
 use std::ffi::CStr;
 
-use ash::extensions::{ext, khr, nv};
+use ash::extensions::{ext, khr};
 use ash::vk::{self};
 
 use crate::render_device::RenderDevice;
