@@ -64,15 +64,15 @@ impl<Pipeline> PartialEq for Handle<Pipeline> {
 
 pub struct PipelineDevice {
     device: ash::Device,
-    raytracing_entry: khr::RayTracingPipeline,
+    raytracing_entry: Option<khr::RayTracingPipeline>,
     pipeline_cache: vk::PipelineCache,
 }
 
 impl PipelineDevice {
     pub fn new(rd: &RenderDevice) -> PipelineDevice {
         PipelineDevice {
-            device: rd.device_entry.clone(),
-            raytracing_entry: rd.raytracing_pipeline_entry.clone(),
+            device: rd.device.clone(),
+            raytracing_entry: rd.khr_ray_tracing_pipeline.clone(),
             pipeline_cache: vk::PipelineCache::null(),
         }
     }
@@ -840,6 +840,8 @@ pub fn create_raytracing_pipeline(
     desc: &RayTracingDesc,
     hack: &ShadersConfig,
 ) -> Option<Pipeline> {
+    let raytracing_entry = device.raytracing_entry.as_ref()?;
+
     let mut stages_info = vec![
         (
             vk::ShaderStageFlags::RAYGEN_KHR,
@@ -937,8 +939,7 @@ pub fn create_raytracing_pipeline(
         .layout(layout);
 
     let pipeline = unsafe {
-        device
-            .raytracing_entry
+        raytracing_entry
             .create_ray_tracing_pipelines(
                 vk::DeferredOperationKHR::null(), // not using deferred creation
                 device.pipeline_cache,
@@ -1016,7 +1017,8 @@ pub fn create_graphics_pipeline(
     let viewport = vk::PipelineViewportStateCreateInfo::builder()
         .viewport_count(1) // actual state is dynamic
         .scissor_count(1); // actual dynamic
-    let raster = vk::PipelineRasterizationStateCreateInfo::builder();
+    let raster = vk::PipelineRasterizationStateCreateInfo::builder().line_width(1.0) // default
+    ;
     let multisample = vk::PipelineMultisampleStateCreateInfo::builder()
         .rasterization_samples(vk::SampleCountFlags::TYPE_1);
     let depth_stencil =

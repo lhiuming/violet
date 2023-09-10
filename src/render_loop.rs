@@ -18,8 +18,8 @@ pub mod imgui_pass;
  * Basic Traits
  */
 
-pub trait RenderLoop {
-    fn new(rd: &RenderDevice) -> Self;
+pub trait RenderLoop: Sized {
+    fn new(rd: &RenderDevice) -> Option<Self>;
 
     fn render(
         &mut self,
@@ -178,7 +178,7 @@ impl RenderLoopDesciptorSets {
                 .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
                 .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
                 .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
-            rd.device_entry.create_sampler(&create_info, None).unwrap()
+            rd.device.create_sampler(&create_info, None).unwrap()
         };
         let sampler_linear_wrap = unsafe {
             let create_info = vk::SamplerCreateInfo::builder()
@@ -187,7 +187,7 @@ impl RenderLoopDesciptorSets {
                 .address_mode_u(vk::SamplerAddressMode::REPEAT)
                 .address_mode_v(vk::SamplerAddressMode::REPEAT)
                 .address_mode_w(vk::SamplerAddressMode::REPEAT);
-            rd.device_entry.create_sampler(&create_info, None).unwrap()
+            rd.device.create_sampler(&create_info, None).unwrap()
         };
 
         // Define set layout
@@ -212,19 +212,14 @@ impl RenderLoopDesciptorSets {
             let bindings = [*cbuffer, *sampler_lc, *sampler_lw];
             let create_info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
             unsafe {
-                rd.device_entry
+                rd.device
                     .create_descriptor_set_layout(&create_info, None)
                     .expect("Failed to create scene descriptor set layout")
             }
         };
 
         // Frame parameter constant buffer
-        let frame_params_align_mask = rd
-            .physical_device
-            .properties
-            .limits
-            .min_uniform_buffer_offset_alignment as u32
-            - 1;
+        let frame_params_align_mask = rd.min_uniform_buffer_offset_alignment() as u32 - 1;
         let frame_params_stride =
             (size_of::<FrameParams>() as u32 + frame_params_align_mask) & !frame_params_align_mask;
         let frame_params_cb = rd
@@ -245,7 +240,7 @@ impl RenderLoopDesciptorSets {
                     .descriptor_pool(descriptor_pool)
                     .set_layouts(&layouts);
                 let descriptor_set = unsafe {
-                    rd.device_entry
+                    rd.device
                         .allocate_descriptor_sets(&create_info)
                         .expect("Failed to create descriptor set for scene")[0]
                 };
@@ -263,8 +258,7 @@ impl RenderLoopDesciptorSets {
                     .buffer_info(slice::from_ref(&cbuffer_info))
                     .build();
                 unsafe {
-                    rd.device_entry
-                        .update_descriptor_sets(&[write_cbuffer], &[]);
+                    rd.device.update_descriptor_sets(&[write_cbuffer], &[]);
                 }
 
                 descriptor_set
@@ -388,7 +382,7 @@ impl StreamLinedFrameResource {
         let timeout = 5000 * 1000_000; // 5s
         let wait_begin = std::time::Instant::now();
         match unsafe {
-            rd.device_entry
+            rd.device
                 .wait_for_fences(slice::from_ref(&fence), true, timeout)
         } {
             Ok(_) => {
@@ -420,10 +414,8 @@ impl StreamLinedFrameResource {
         // Reset after use
         let command_buffer = self.command_buffers[self.render_index as usize];
         unsafe {
-            rd.device_entry
-                .reset_fences(slice::from_ref(&fence))
-                .unwrap();
-            rd.device_entry
+            rd.device.reset_fences(slice::from_ref(&fence)).unwrap();
+            rd.device
                 .reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())
                 .unwrap();
         }
@@ -441,7 +433,7 @@ impl StreamLinedFrameResource {
         let timeout = 5000 * 1000_000; // 5s
         let wait_begin = std::time::Instant::now();
         match unsafe {
-            rd.device_entry
+            rd.device
                 .wait_for_fences(slice::from_ref(&fence), true, timeout)
         } {
             Ok(_) => {
@@ -466,9 +458,7 @@ impl StreamLinedFrameResource {
 
         // Reset after use
         unsafe {
-            rd.device_entry
-                .reset_fences(slice::from_ref(&fence))
-                .unwrap();
+            rd.device.reset_fences(slice::from_ref(&fence)).unwrap();
         }
 
         wait_begin.elapsed()
@@ -496,7 +486,7 @@ impl StreamLinedFrameResource {
                 .build();
             let cb_finish_fence = self.command_buffer_finished_fences[self.render_index as usize];
             unsafe {
-                rd.device_entry
+                rd.device
                     .queue_submit(rd.gfx_queue, slice::from_ref(&submit_info), cb_finish_fence)
                     .unwrap();
             }
@@ -511,11 +501,7 @@ impl StreamLinedFrameResource {
                 .swapchains(slice::from_ref(&rd.swapchain.handle))
                 .image_indices(slice::from_ref(&image_index))
                 .build();
-            unsafe {
-                rd.swapchain_entry
-                    .queue_present(rd.gfx_queue, &present_info)
-                    .unwrap();
-            }
+            rd.queue_present(&present_info);
 
             present_begin.elapsed()
         };

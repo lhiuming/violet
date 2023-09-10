@@ -590,11 +590,8 @@ struct PassShaderBindingTable {
 
 impl PassShaderBindingTable {
     fn new(rd: &RenderDevice) -> Self {
-        let handle_size = rd.physical_device.shader_group_handle_size() as u64;
-        let stride = std::cmp::max(
-            handle_size,
-            rd.physical_device.shader_group_base_alignment() as u64,
-        );
+        let handle_size = rd.shader_group_handle_size() as u64;
+        let stride = std::cmp::max(handle_size, rd.shader_group_base_alignment() as u64);
 
         let sbt = rd
             .create_buffer(BufferDesc {
@@ -640,8 +637,11 @@ impl PassShaderBindingTable {
     ) {
         // TODO check shader change
         let group_count = if has_hit { 3 } else { 2 };
-        let handle_data = rd.get_ray_tracing_shader_group_handles(pipeline.handle, 0, group_count);
-        let mut filler = ShaderBindingTableFiller::new(&rd.physical_device, self.sbt.data);
+        let handle_data = rd.get_shader_group_handles(pipeline.handle, 0, group_count);
+        let mut filler = ShaderBindingTableFiller::new(
+            &rd.physical.ray_tracing_pipeline_properties,
+            self.sbt.data,
+        );
         filler.write_handles(&handle_data, 0, 1);
         filler.start_group();
         filler.write_handles(&handle_data, 1, 1);
@@ -711,7 +711,7 @@ impl RenderGraphCache {
             .descriptor_pool(self.vk_descriptor_pool)
             .set_layouts(&layouts);
         unsafe {
-            match rd.device_entry.allocate_descriptor_sets(&create_info) {
+            match rd.device.allocate_descriptor_sets(&create_info) {
                 Ok(sets) => sets[0],
                 Err(e) => {
                     panic!("Failed to allocate descriptor set: {:?}", e);
@@ -729,7 +729,7 @@ impl RenderGraphCache {
         if self.free_vk_descriptor_sets.len() > buffer_limit {
             let old_sets = &self.free_vk_descriptor_sets[0..release_heuristic];
             unsafe {
-                rd.device_entry
+                rd.device
                     .free_descriptor_sets(self.vk_descriptor_pool, &old_sets)
                     .expect("Failed to free descriptor set");
             }
@@ -1331,7 +1331,7 @@ impl RenderGraphBuilder<'_> {
             );
             if !writes.is_empty() {
                 unsafe {
-                    rd.device_entry.update_descriptor_sets(&writes, &[]);
+                    rd.device.update_descriptor_sets(&writes, &[]);
                 }
             }
 
@@ -1461,7 +1461,7 @@ impl RenderGraphBuilder<'_> {
             let view = self.get_texture_view(ctx, handle);
             transition_to(
                 view.texture.image,
-                view.desc.make_subresource_range(),
+                view.desc.make_subresource_range(true),
                 layout,
             );
         };

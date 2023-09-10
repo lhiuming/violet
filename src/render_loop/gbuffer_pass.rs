@@ -2,7 +2,7 @@ use ash::vk;
 
 use crate::{
     command_buffer::StencilOps,
-    render_device::{RenderDevice, Texture, TextureDesc, TextureView},
+    render_device::{texture, RenderDevice, Texture, TextureDesc, TextureView},
     render_graph::*,
     render_scene::RenderScene,
     shader::PushConstantsBuilder,
@@ -20,7 +20,7 @@ pub struct GBuffer {
 pub fn create_gbuffer_textures(rg: &mut RenderGraphBuilder, size: vk::Extent2D) -> GBuffer {
     // helper
     let mut create_gbuffer = |format: vk::Format| {
-        let is_depth = crate::render_device::format_has_depth(format);
+        let is_depth = texture::format_has_depth(format);
         let usage: vk::ImageUsageFlags = if is_depth {
             vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
         } else {

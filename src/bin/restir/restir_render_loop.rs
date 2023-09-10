@@ -105,8 +105,12 @@ pub struct RestirRenderLoop {
 }
 
 impl RenderLoop for RestirRenderLoop {
-    fn new(rd: &RenderDevice) -> Self {
-        Self {
+    fn new(rd: &RenderDevice) -> Option<Self> {
+        if !rd.support_raytracing {
+            return None;
+        }
+
+        Some(Self {
             render_graph_cache: RenderGraphCache::new(rd),
             stream_lined: StreamLinedFrameResource::new(rd),
             default_res: DefaultResources::new(rd),
@@ -121,7 +125,7 @@ impl RenderLoop for RestirRenderLoop {
             total_acquire_duration: std::time::Duration::ZERO,
             total_wait_duration: std::time::Duration::ZERO,
             total_present_duration: std::time::Duration::ZERO,
-        }
+        })
     }
 
     fn print_stat(&self) {
@@ -545,21 +549,13 @@ impl RenderLoop for RestirRenderLoop {
         // Execute render graph
         {
             // Begin
-            let begin_info = vk::CommandBufferBeginInfo::builder()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            unsafe {
-                rd.device_entry
-                    .begin_command_buffer(command_buffer, &begin_info)
-                    .unwrap();
-            }
+            rd.begin_command_buffer(command_buffer);
 
             let cb = CommandBuffer::new(rd, command_buffer);
             rg.execute(rd, &cb, shaders, &mut self.render_graph_cache);
 
             // End
-            unsafe {
-                rd.device_entry.end_command_buffer(command_buffer).unwrap();
-            }
+            rd.end_command_buffer(command_buffer);
         }
 
         // Submit, Present and stuff

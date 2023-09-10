@@ -41,11 +41,7 @@ impl QueryPool {
         let create_info = vk::QueryPoolCreateInfo::builder()
             .query_count(query_count)
             .query_type(vk::QueryType::TIMESTAMP);
-        let query_pool = unsafe {
-            rd.device_entry
-                .create_query_pool(&create_info, None)
-                .unwrap()
-        };
+        let query_pool = unsafe { rd.device.create_query_pool(&create_info, None).unwrap() };
 
         Self {
             query_pool,
@@ -200,7 +196,7 @@ impl NamedProfiling {
         self.finish_batch();
 
         // tick period in nanoseconds
-        let period = rd.physical_device.properties.limits.timestamp_period as f64;
+        let period = rd.timestamp_period() as f64;
 
         let mut keep_pending_queries = Vec::new();
         let mut data_buffer = Vec::<[u64; 2]>::new(); // reused buffer
@@ -210,7 +206,7 @@ impl NamedProfiling {
             let query_count = batch.timers.len() as u32 * 2;
             data_buffer.resize(query_count as usize, [0u64; 2]);
             let vk_not_ready = unsafe {
-                match rd.device_entry.get_query_pool_results(
+                match rd.device.get_query_pool_results(
                     batch.queries.pool,
                     first_query,
                     query_count,

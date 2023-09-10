@@ -7,7 +7,7 @@ use crate::render_device::RenderDevice;
 
 pub struct CommandBuffer {
     pub device: ash::Device,
-    pub raytracing_pipeline: khr::RayTracingPipeline,
+    pub raytracing_pipeline: Option<khr::RayTracingPipeline>,
     pub debug_utils: ext::DebugUtils,
     pub command_buffer: vk::CommandBuffer,
 
@@ -17,9 +17,9 @@ pub struct CommandBuffer {
 impl CommandBuffer {
     pub fn new(rd: &RenderDevice, command_buffer: vk::CommandBuffer) -> Self {
         Self {
-            device: rd.device_entry.clone(),
-            raytracing_pipeline: rd.raytracing_pipeline_entry.clone(),
-            debug_utils: rd.debug_utils.clone(),
+            device: rd.device.clone(),
+            raytracing_pipeline: rd.khr_ray_tracing_pipeline.clone(),
+            debug_utils: rd.ext_debug_utils.clone(),
             command_buffer,
             enable_check_point: false,
         }
@@ -122,7 +122,7 @@ impl CommandBuffer {
         depth: u32,
     ) {
         unsafe {
-            self.raytracing_pipeline.cmd_trace_rays(
+            self.raytracing_pipeline.as_ref().unwrap().cmd_trace_rays(
                 self.command_buffer,
                 raygen_sbt,
                 miss_sbt,

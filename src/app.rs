@@ -63,7 +63,8 @@ where
     // TODO implement Drop for Window
     let window = Window::new(1280, 720, "Rusty Violet");
 
-    let mut rd = RenderDevice::create(Window::system_handle_for_module(), window.system_handle());
+    let mut rd =
+        RenderDevice::create(Window::system_handle_for_module(), window.system_handle()).unwrap();
 
     // Initialize shaders
     let mut shaders = Shaders::new(&rd);
@@ -85,11 +86,16 @@ where
         );
     }
 
+    // Create render loop
+    let mut render_loop = match T::new(&rd) {
+        Some(rl) => rl,
+        None => {
+            panic!("Renderloop is not supported.");
+        }
+    };
+
     // Add ImGUI
     let mut imgui = imgui::ImGUI::new();
-
-    // Create render loop
-    let mut render_loop = T::new(&rd);
 
     // Init camera
     // NOTE:

@@ -64,10 +64,10 @@ impl UploadContext {
         // Find an existing command buffer that's ready to be used
         for i in 0..self.command_buffers.len() {
             let fence = self.finished_fences[i];
-            let finished = unsafe { rd.device_entry.get_fence_status(fence) }.unwrap();
+            let finished = unsafe { rd.device.get_fence_status(fence) }.unwrap();
             if finished {
                 let fences = [fence];
-                unsafe { rd.device_entry.reset_fences(&fences) }.unwrap();
+                unsafe { rd.device.reset_fences(&fences) }.unwrap();
                 return (self.command_buffers[i], fence);
             }
         }
@@ -87,7 +87,7 @@ impl UploadContext {
         F: FnOnce(vk::CommandBuffer),
     {
         // TODO we will need semaphore to sync with rendering which will depends on operation here
-        let device = &rd.device_entry;
+        let device = &rd.device;
         let (command_buffer, finished_fence) = self.pick_command_buffer(rd);
 
         let begin_info = vk::CommandBufferBeginInfo::builder()
@@ -125,10 +125,10 @@ impl UploadContext {
         for (i, buffer) in self.staging_buffers.iter().enumerate() {
             if buffer.desc.size == buffer_size {
                 let event = self.staging_finished[i];
-                let finished = unsafe { rd.device_entry.get_event_status(event).unwrap() };
+                let finished = unsafe { rd.device.get_event_status(event).unwrap() };
                 if finished {
                     // todo reset in bunch?
-                    unsafe { rd.device_entry.reset_event(event).unwrap() };
+                    unsafe { rd.device.reset_event(event).unwrap() };
                     return (*buffer, event);
                 }
             }
@@ -336,7 +336,7 @@ impl RenderScene {
                 .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL) // for bindless
                 .push_next(&mut flags_create_info);
             unsafe {
-                rd.device_entry
+                rd.device
                     .create_descriptor_set_layout(&create_info, None)
                     .expect("Failed to create scene descriptor set layout")
             }
@@ -347,7 +347,7 @@ impl RenderScene {
                 .descriptor_pool(descriptor_pool)
                 .set_layouts(&layouts);
             unsafe {
-                rd.device_entry
+                rd.device
                     .allocate_descriptor_sets(&create_info)
                     .expect("Failed to create descriptor set for scene")[0]
             }
@@ -390,7 +390,7 @@ impl RenderScene {
                 .buffer_info(slice::from_ref(&mesh_buffer_info))
                 .build();
             unsafe {
-                rd.device_entry.update_descriptor_sets(
+                rd.device.update_descriptor_sets(
                     &[
                         write_vbuffer,
                         write_ibuffer,
@@ -485,7 +485,7 @@ impl RenderScene {
                             base_array_layer: 0,
                             layer_count: 1,
                         });
-                    rd.device_entry.cmd_pipeline_barrier(
+                    rd.device.cmd_pipeline_barrier(
                         command_buffer,
                         vk::PipelineStageFlags::TOP_OF_PIPE,
                         vk::PipelineStageFlags::TRANSFER,
@@ -515,7 +515,7 @@ impl RenderScene {
                     });
                 let regions = [*region];
                 unsafe {
-                    rd.device_entry.cmd_copy_buffer_to_image(
+                    rd.device.cmd_copy_buffer_to_image(
                         command_buffer,
                         staging_buffer.handle,
                         texture.image,
@@ -539,7 +539,7 @@ impl RenderScene {
                             base_array_layer: 0,
                             layer_count: 1,
                         });
-                    rd.device_entry.cmd_pipeline_barrier(
+                    rd.device.cmd_pipeline_barrier(
                         command_buffer,
                         vk::PipelineStageFlags::TRANSFER,
                         vk::PipelineStageFlags::FRAGMENT_SHADER,
@@ -631,7 +631,7 @@ impl RenderScene {
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                 .image_info(&image_infos);
             unsafe {
-                rd.device_entry.update_descriptor_sets(&[*write], &[]);
+                rd.device.update_descriptor_sets(&[*write], &[]);
             }
         }
 
@@ -755,7 +755,7 @@ impl RenderScene {
         }
 
         // Build BLAS for all added meshes
-        {
+        if let Some(khr_accel_struct) = rd.khr_accel_struct.as_ref() {
             // Get build size
             // NOTE: actual buffer addresses in blas_geometrys are ignored
             let build_size_info = unsafe {
@@ -765,12 +765,11 @@ impl RenderScene {
                     .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
                     .geometries(&blas_geometries)
                     .build();
-                rd.acceleration_structure_entry
-                    .get_acceleration_structure_build_sizes(
-                        vk::AccelerationStructureBuildTypeKHR::DEVICE,
-                        &build_info,
-                        &max_primitive_counts,
-                    )
+                khr_accel_struct.get_acceleration_structure_build_sizes(
+                    vk::AccelerationStructureBuildTypeKHR::DEVICE,
+                    &build_info,
+                    &max_primitive_counts,
+                )
             };
 
             // Create buffer
@@ -818,12 +817,11 @@ impl RenderScene {
                     .build();
                 let blas_range_infos = blas_range_infos.as_slice();
                 unsafe {
-                    rd.acceleration_structure_entry
-                        .cmd_build_acceleration_structures(
-                            cb,
-                            slice::from_ref(&geo_info),
-                            slice::from_ref(&blas_range_infos),
-                        )
+                    khr_accel_struct.cmd_build_acceleration_structures(
+                        cb,
+                        slice::from_ref(&geo_info),
+                        slice::from_ref(&blas_range_infos),
+                    )
                 };
             });
 
@@ -831,7 +829,9 @@ impl RenderScene {
         }
     }
 
-    pub fn rebuild_top_level_accel_struct(&mut self, rd: &RenderDevice) {
+    pub fn rebuild_top_level_accel_struct(&mut self, rd: &RenderDevice) -> Option<()> {
+        let khr_accel_struct = rd.khr_accel_struct.as_ref()?;
+
         // Create instance buffer
         let num_blas = self.mesh_bottom_level_accel_structs.len();
         let instance_buffer = rd
@@ -903,12 +903,11 @@ impl RenderScene {
                 .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
                 .geometries(slice::from_ref(&instances_geo))
                 .build();
-            rd.acceleration_structure_entry
-                .get_acceleration_structure_build_sizes(
-                    vk::AccelerationStructureBuildTypeKHR::DEVICE,
-                    &build_info,
-                    &slice::from_ref(&max_primitive_count),
-                )
+            khr_accel_struct.get_acceleration_structure_build_sizes(
+                vk::AccelerationStructureBuildTypeKHR::DEVICE,
+                &build_info,
+                &slice::from_ref(&max_primitive_count),
+            )
         };
 
         // Create buffer
@@ -961,15 +960,16 @@ impl RenderScene {
                 .build();
             let range_infos = slice::from_ref(&range_info);
             unsafe {
-                rd.acceleration_structure_entry
-                    .cmd_build_acceleration_structures(
-                        cb,
-                        slice::from_ref(&geo_info),
-                        slice::from_ref(&range_infos),
-                    )
+                khr_accel_struct.cmd_build_acceleration_structures(
+                    cb,
+                    slice::from_ref(&geo_info),
+                    slice::from_ref(&range_infos),
+                )
             };
         });
 
         self.scene_top_level_accel_struct.replace(accel_struct);
+
+        Some(())
     }
 }

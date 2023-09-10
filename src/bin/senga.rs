@@ -1,6 +1,5 @@
 use std::f32::consts::PI;
 
-use ash::vk;
 use glam::Vec3;
 
 use violet::{
@@ -22,11 +21,11 @@ pub struct SengaRenderLoop {
 }
 
 impl RenderLoop for SengaRenderLoop {
-    fn new(rd: &RenderDevice) -> Self {
-        Self {
+    fn new(rd: &RenderDevice) -> Option<Self> {
+        Some(Self {
             render_graph_cache: RenderGraphCache::new(rd),
             stream_lined: StreamLinedFrameResource::new(rd),
-        }
+        })
     }
 
     fn render(
@@ -102,21 +101,13 @@ impl RenderLoop for SengaRenderLoop {
         // Execute the render graph, writing into command buffer
         {
             // Begin
-            let begin_info = vk::CommandBufferBeginInfo::builder()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            unsafe {
-                rd.device_entry
-                    .begin_command_buffer(command_buffer, &begin_info)
-                    .unwrap();
-            }
+            rd.begin_command_buffer(command_buffer);
 
             let cb = CommandBuffer::new(rd, command_buffer);
             rg.execute(rd, &cb, shaders, &mut self.render_graph_cache);
 
             // End
-            unsafe {
-                rd.device_entry.end_command_buffer(command_buffer).unwrap();
-            }
+            rd.end_command_buffer(command_buffer);
         }
 
         // Wait for swapchain ready, submit, and present

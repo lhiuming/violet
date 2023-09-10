@@ -90,7 +90,7 @@ impl ImGUIPass {
                 .flags(vk::DescriptorSetLayoutCreateFlags::UPDATE_AFTER_BIND_POOL)
                 .push_next(&mut flags_create_info);
             unsafe {
-                rd.device_entry
+                rd.device
                     .create_descriptor_set_layout(&create_info, None)
                     .unwrap()
             }
@@ -99,9 +99,7 @@ impl ImGUIPass {
             let allocate_info = vk::DescriptorSetAllocateInfo::builder()
                 .descriptor_pool(descriptor_set_pool)
                 .set_layouts(std::slice::from_ref(&set_layout));
-            rd.device_entry
-                .allocate_descriptor_sets(&allocate_info)
-                .unwrap()[0]
+            rd.device.allocate_descriptor_sets(&allocate_info).unwrap()[0]
         };
         {
             let buffer_info = vk::DescriptorBufferInfo::builder()
@@ -116,8 +114,7 @@ impl ImGUIPass {
                 .buffer_info(std::slice::from_ref(&buffer_info))
                 .build()];
             unsafe {
-                rd.device_entry
-                    .update_descriptor_sets(&descriptor_writes, &[]);
+                rd.device.update_descriptor_sets(&descriptor_writes, &[]);
             }
         }
 
@@ -380,7 +377,7 @@ impl ImGUIPass {
                 })
                 .collect();
             unsafe {
-                rd.device_entry.update_descriptor_sets(&writes, &[]);
+                rd.device.update_descriptor_sets(&writes, &[]);
             }
         }
 
@@ -410,7 +407,7 @@ impl ImGUIPass {
                         );
                     }
                     unsafe {
-                        rd.device_entry.cmd_pipeline_barrier(
+                        rd.device.cmd_pipeline_barrier(
                             command_buffer,
                             vk::PipelineStageFlags::ALL_GRAPHICS,
                             vk::PipelineStageFlags::TRANSFER,
@@ -425,7 +422,7 @@ impl ImGUIPass {
                 // copy from staging to target
                 unsafe {
                     if index_data_size > 0 {
-                        rd.device_entry.cmd_copy_buffer(
+                        rd.device.cmd_copy_buffer(
                             command_buffer,
                             ind_staging_buffer.handle,
                             self.index_buffer.handle,
@@ -438,7 +435,7 @@ impl ImGUIPass {
                     }
 
                     if vertex_data_size > 0 {
-                        rd.device_entry.cmd_copy_buffer(
+                        rd.device.cmd_copy_buffer(
                             command_buffer,
                             vert_staging_buffer.handle,
                             self.vertex_buffer.handle,
@@ -451,7 +448,7 @@ impl ImGUIPass {
                     }
 
                     for (dst_image, _old_layout, region) in &copy_buffer_to_images {
-                        rd.device_entry.cmd_copy_buffer_to_image(
+                        rd.device.cmd_copy_buffer_to_image(
                             command_buffer,
                             image_staging_buffer.handle,
                             *dst_image,
@@ -480,7 +477,7 @@ impl ImGUIPass {
                         .offset(0)
                         .size(vk::WHOLE_SIZE);
                     let buffer_memory_barriers = [index_bmb.build(), vertex_bmb.build()];
-                    rd.device_entry.cmd_pipeline_barrier(
+                    rd.device.cmd_pipeline_barrier(
                         command_buffer,
                         vk::PipelineStageFlags::TRANSFER,
                         vk::PipelineStageFlags::ALL_GRAPHICS,
@@ -514,7 +511,7 @@ impl ImGUIPass {
                         );
                     }
                     unsafe {
-                        rd.device_entry.cmd_pipeline_barrier(
+                        rd.device.cmd_pipeline_barrier(
                             command_buffer,
                             vk::PipelineStageFlags::TRANSFER,
                             vk::PipelineStageFlags::ALL_GRAPHICS,
@@ -530,17 +527,17 @@ impl ImGUIPass {
                 // TODO is this used corretly? any sync required?
                 // TODO share the staging buffer?
                 unsafe {
-                    rd.device_entry.cmd_set_event(
+                    rd.device.cmd_set_event(
                         command_buffer,
                         ind_staging_event,
                         vk::PipelineStageFlags::TRANSFER,
                     );
-                    rd.device_entry.cmd_set_event(
+                    rd.device.cmd_set_event(
                         command_buffer,
                         vert_staging_event,
                         vk::PipelineStageFlags::TRANSFER,
                     );
-                    rd.device_entry.cmd_set_event(
+                    rd.device.cmd_set_event(
                         command_buffer,
                         image_staging_event,
                         vk::PipelineStageFlags::TRANSFER,
