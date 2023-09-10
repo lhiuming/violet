@@ -4,6 +4,7 @@ use ash::vk;
 use glam::Vec2;
 
 use crate::{
+    command_buffer::StencilOps,
     imgui::ImGUIOuput,
     render_device::{
         Buffer, BufferDesc, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
@@ -136,6 +137,7 @@ impl ImGUIPass {
         upload_context: &mut UploadContext,
         target: RGHandle<Texture>,
         imgui: &ImGUIOuput,
+        clear: Option<vk::ClearColorValue>,
     ) {
         // TODO calculate this properly
         let (index_data_size, vertex_data_size) = {
@@ -556,6 +558,19 @@ impl ImGUIPass {
             let index_buffer_handle = self.index_buffer.handle;
             let imgui_descriptor_set = self.descriptor_set;
             let target_view = rg.create_texture_view(target, None);
+            let load_op = match clear {
+                Some(color) => ColorLoadOp::Clear(color),
+                None => ColorLoadOp::Load,
+            };
+
+            /*
+            // check
+            let target_format = rg.get_texture_desc(target).format;
+            if !rd.format_support_blending(target_format) {
+                panic!("ImGUI: target format {:?} does not support blending; GUI may not composed corecctly.", target_format);
+            }
+            */
+
             rg.new_graphics("ImGUI")
                 .vertex_shader_with_ep("imgui_vsps.hlsl", "vs_main")
                 .pixel_shader_with_ep("imgui_vsps.hlsl", "ps_main")
@@ -563,7 +578,7 @@ impl ImGUIPass {
                 .descriptor_set_index(DESCRIPTOR_SET_INDEX_UNUSED)
                 .color_targets(&[ColorTarget {
                     view: target_view,
-                    load_op: ColorLoadOp::Load,
+                    load_op,
                 }])
                 .blend_enabled(true)
                 .render(move |cb, pipeline| {
@@ -583,7 +598,12 @@ impl ImGUIPass {
 
                     // TODO make into gfx config
                     cb.set_depth_test_enable(false);
+                    cb.set_depth_write_enable(false);
                     cb.set_stencil_test_enable(false);
+                    cb.set_stencil_op(
+                        vk::StencilFaceFlags::FRONT,
+                        StencilOps::only_compare(vk::CompareOp::ALWAYS),
+                    );
 
                     cb.bind_descriptor_set(
                         vk::PipelineBindPoint::GRAPHICS,

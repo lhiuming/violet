@@ -90,8 +90,8 @@ impl super::RenderDevice {
         // Physical Device
         let physical = PhysicalDevice::new(&instance);
 
-        let supported_features = physical.get_supported_features(&instance);
-        let supported_extentions = physical.get_supported_device_extensions(&instance);
+        let supported_features = physical.get_supported_features();
+        let supported_extentions = physical.get_supported_device_extensions();
 
         // Check raytracing supports
         let support_raytracing = raytracing::DEVICE_EXTENSIONS.iter().all(|name| {
@@ -196,20 +196,9 @@ impl super::RenderDevice {
         }
 
         // Create surface and swapchain
-        let surface = swapchain::create_surface(
-            &khr_win32_surface,
-            &khr_surface,
-            physical.handle,
-            app_handle,
-            window_handle,
-        );
-        let swapchain = swapchain::create_swapchain(
-            &khr_surface,
-            &khr_swapchain,
-            &device,
-            physical.handle,
-            &surface,
-        );
+        let surface = swapchain::create_surface(&khr_win32_surface, app_handle, window_handle);
+        let swapchain =
+            swapchain::create_swapchain(&khr_surface, &khr_swapchain, &device, &physical, &surface);
 
         Some(Self {
             entry,

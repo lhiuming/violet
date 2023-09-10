@@ -4,6 +4,7 @@ use std::ffi::{CStr, CString};
 use ash::vk;
 
 pub struct PhysicalDevice {
+    instance: ash::Instance, // keep a copy, for convinience
     pub handle: vk::PhysicalDevice,
     pub properties: vk::PhysicalDeviceProperties,
     pub ray_tracing_pipeline_properties: vk::PhysicalDeviceRayTracingPipelinePropertiesKHR,
@@ -49,6 +50,7 @@ impl PhysicalDevice {
             unsafe { instance.get_physical_device_memory_properties(physical_device_handle) };
 
         Self {
+            instance: instance.clone(),
             handle: physical_device_handle,
             properties: properties2.properties,
             ray_tracing_pipeline_properties,
@@ -56,10 +58,10 @@ impl PhysicalDevice {
         }
     }
 
-    pub fn get_supported_device_extensions(&self, instance: &ash::Instance) -> HashSet<CString> {
+    pub fn get_supported_device_extensions(&self) -> HashSet<CString> {
         // Get supported device extensions (for debug info)
         unsafe {
-            instance
+            self.instance
                 .enumerate_device_extension_properties(self.handle)
                 .unwrap()
                 .iter()
@@ -101,6 +103,13 @@ impl PhysicalDevice {
             property_flags, support_properties
         );
         return None;
+    }
+
+    pub fn get_format_properties(&self, format: vk::Format) -> vk::FormatProperties {
+        unsafe {
+            self.instance
+                .get_physical_device_format_properties(self.handle, format)
+        }
     }
 }
 
@@ -158,10 +167,11 @@ impl PhysicalDeviceFeatures {
 
 impl PhysicalDevice {
     // Get physical device supported features
-    pub fn get_supported_features(&self, instance: &ash::Instance) -> PhysicalDeviceFeatures {
+    pub fn get_supported_features(&self) -> PhysicalDeviceFeatures {
         let mut features = PhysicalDeviceFeatures::default();
         unsafe {
-            instance.get_physical_device_features2(self.handle, features.chain());
+            self.instance
+                .get_physical_device_features2(self.handle, features.chain());
         };
 
         features.unchain()

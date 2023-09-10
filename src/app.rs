@@ -72,18 +72,20 @@ where
     // Set up the scene
     let mut render_scene = RenderScene::new(&rd);
 
-    println!("Loading model: {}", &args[1]);
-    let model = model::load(Path::new(&args[1]));
-    if let Ok(model) = model {
-        println!("Uploading to GPU ...");
-        render_scene.add(&rd, &model);
-        render_scene.rebuild_top_level_accel_struct(&rd);
-    } else {
-        println!(
-            "Failed to load model ({}): {:?}",
-            &args[1],
-            model.err().unwrap()
-        );
+    if args.len() > 1 {
+        println!("Loading model: {}", &args[1]);
+        let model = model::load(Path::new(&args[1]));
+        if let Ok(model) = model {
+            println!("Uploading to GPU ...");
+            render_scene.add(&rd, &model);
+            render_scene.rebuild_top_level_accel_struct(&rd);
+        } else {
+            println!(
+                "Failed to load model ({}): {:?}",
+                &args[1],
+                model.err().unwrap()
+            );
+        }
     }
 
     // Create render loop

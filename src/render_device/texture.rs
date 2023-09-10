@@ -231,7 +231,7 @@ impl super::RenderDevice {
                 self.physical.handle,
                 desc.format,
                 vk::ImageType::TYPE_2D,
-                vk::ImageTiling::default(),
+                vk::ImageTiling::OPTIMAL,
                 desc.usage,
                 vk::ImageCreateFlags::default(),
             )
@@ -249,6 +249,7 @@ impl super::RenderDevice {
         let create_info = vk::ImageCreateInfo::builder()
             .image_type(vk::ImageType::TYPE_2D)
             .format(desc.format)
+            .tiling(vk::ImageTiling::OPTIMAL)
             .extent(vk::Extent3D {
                 width: desc.width,
                 height: desc.height,

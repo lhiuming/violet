@@ -1,3 +1,5 @@
+use ash::vk;
+
 pub mod buffer;
 pub mod core;
 pub mod debug_utils;
@@ -43,5 +45,13 @@ impl RenderDevice {
         self.physical
             .ray_tracing_pipeline_properties
             .shader_group_base_alignment
+    }
+
+    #[inline]
+    pub fn format_support_blending(&self, format: vk::Format) -> bool {
+        let prop = self.physical.get_format_properties(format);
+        // NOTE: currently all image are created as VK_IMAGE_TILING_OPTIMAL (including swapchain)
+        prop.optimal_tiling_features
+            .contains(vk::FormatFeatureFlags::COLOR_ATTACHMENT_BLEND)
     }
 }

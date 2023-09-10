@@ -26,6 +26,21 @@
 			"program": "${workspaceFolder}/target/debug/senga.exe",
 			"args": [
 				"./assets/DamagedHelmet/DamagedHelmet.gltf",
+				"--renderdoc"
+			],
+			"stopAtEntry": false,
+			"cwd": "${workspaceFolder}",
+			"environment": [],
+			"console": "integratedTerminal"
+		},
+		{
+			"name": "debug-imgui",
+			"type": "cppvsdbg",
+			"request": "launch",
+			"preLaunchTask": "rust: cargo build nightly",
+			"program": "${workspaceFolder}/target/debug/imgui_demo.exe",
+			"args": [
+				"--nrenderdoc"
 			],
 			"stopAtEntry": false,
 			"cwd": "${workspaceFolder}",

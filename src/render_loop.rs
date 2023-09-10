@@ -189,6 +189,15 @@ impl RenderLoopDesciptorSets {
                 .address_mode_w(vk::SamplerAddressMode::REPEAT);
             rd.device.create_sampler(&create_info, None).unwrap()
         };
+        let sampler_nearest_clamp = unsafe {
+            let create_info = vk::SamplerCreateInfo::builder()
+                .min_filter(vk::Filter::NEAREST)
+                .mag_filter(vk::Filter::NEAREST)
+                .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
+            rd.device.create_sampler(&create_info, None).unwrap()
+        };
 
         // Define set layout
         let set_layout = {
@@ -209,7 +218,13 @@ impl RenderLoopDesciptorSets {
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::ALL)
                 .immutable_samplers(std::slice::from_ref(&sampler_linear_wrap));
-            let bindings = [*cbuffer, *sampler_lc, *sampler_lw];
+            let sampler_nc = vk::DescriptorSetLayoutBinding::builder()
+                .binding(SAMPLER_BINDING_INDEX_BEGIN + 2)
+                .descriptor_type(vk::DescriptorType::SAMPLER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::ALL)
+                .immutable_samplers(std::slice::from_ref(&sampler_nearest_clamp));
+            let bindings = [*cbuffer, *sampler_lc, *sampler_lw, *sampler_nc];
             let create_info = vk::DescriptorSetLayoutCreateInfo::builder().bindings(&bindings);
             unsafe {
                 rd.device

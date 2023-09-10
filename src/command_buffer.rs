@@ -57,6 +57,8 @@ impl CommandBuffer {
     pub fn transition_image_layout(
         &self,
         image: vk::Image,
+        src_access_mask: vk::AccessFlags,
+        dst_access_mask: vk::AccessFlags,
         src_stage_mask: vk::PipelineStageFlags,
         dst_stage_mask: vk::PipelineStageFlags,
         old_layout: vk::ImageLayout,
@@ -66,6 +68,8 @@ impl CommandBuffer {
         let image_barrier = vk::ImageMemoryBarrier::builder()
             .old_layout(old_layout)
             .new_layout(new_layout)
+            .src_access_mask(src_access_mask)
+            .dst_access_mask(dst_access_mask)
             .subresource_range(subresource_range)
             .image(image);
         self.pipeline_barrier(

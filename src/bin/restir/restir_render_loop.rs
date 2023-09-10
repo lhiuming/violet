@@ -497,15 +497,17 @@ impl RenderLoop for RestirRenderLoop {
             .stream_lined
             .acquire_next_swapchain_image_with_duration(rd);
         self.total_acquire_duration += acquire_swapchain_duratiaon;
-        let present_target =
-            rg.register_texture_view(rd.swapchain.texture_views[swapchain_image_index as usize]);
+        let present_target = (
+            rg.register_texture(rd.swapchain.textures[swapchain_image_index as usize]),
+            rg.register_texture_view(rd.swapchain.texture_views[swapchain_image_index as usize]),
+        );
 
         // Pass: Post Processing (write to swapchain)
         rg.new_compute("Post Processing")
             .compute_shader("post_processing.hlsl")
             .texture("src_color_texture", post_taa_color.1)
             .texture("debug_texture", debug_texture.1)
-            .rw_texture("rw_target_buffer", present_target)
+            .rw_texture("rw_target_buffer", present_target.1)
             .group_count(
                 div_round_up(main_size.width, 8),
                 div_round_up(main_size.height, 4),
@@ -514,13 +516,18 @@ impl RenderLoop for RestirRenderLoop {
 
         // Pass: UI
         if let Some(imgui) = imgui {
-            let target = rg.register_texture(rd.swapchain.textures[swapchain_image_index as usize]);
-            self.imgui_pass
-                .add(&mut rg, rd, &mut self.upload_context, target, imgui);
+            self.imgui_pass.add(
+                &mut rg,
+                rd,
+                &mut self.upload_context,
+                present_target.0,
+                imgui,
+                None,
+            );
         }
 
         // Pass: Output
-        rg.present(present_target);
+        rg.present(present_target.0);
 
         // Prepare command buffer
         let command_buffer = self.stream_lined.wait_and_reset_command_buffer(rd);

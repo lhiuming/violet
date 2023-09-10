@@ -4,17 +4,14 @@
 
 use ash::{extensions::khr, vk};
 
-use super::{Texture, TextureDesc, TextureView, TextureViewDesc};
+use super::{PhysicalDevice, Texture, TextureDesc, TextureView, TextureViewDesc};
 
 pub struct Surface {
     pub handle: vk::SurfaceKHR,
-    pub format: vk::SurfaceFormatKHR,
 }
 
 pub fn create_surface(
     win32_surface: &khr::Win32Surface,
-    surface: &khr::Surface,
-    physical_device: vk::PhysicalDevice,
     app_handle: u64,
     window_handle: u64,
 ) -> Surface {
@@ -27,20 +24,8 @@ pub fn create_surface(
             .create_win32_surface(&create_info, None)
             .expect("Vulkan: failed to crate win32 surface")
     };
-    // Query format
-    let formats =
-        unsafe { surface.get_physical_device_surface_formats(physical_device, vk_surface) }
-            .unwrap();
-    assert!(formats.len() > 0);
-    // Debug
-    println!("Vulkan surface supported formats:");
-    for format in formats.iter() {
-        println!("\t{:?}: {:?}", format.format, format.color_space);
-    }
-    Surface {
-        handle: vk_surface,
-        format: formats[0],
-    }
+
+    Surface { handle: vk_surface }
 }
 
 pub struct Swapchain {
@@ -54,19 +39,53 @@ pub fn create_swapchain(
     khr_surface: &khr::Surface,
     khr_swapchain: &khr::Swapchain,
     device: &ash::Device,
-    physical_device: vk::PhysicalDevice,
+    pd: &PhysicalDevice,
     surface: &Surface,
 ) -> Swapchain {
-    let surface_extent = {
-        let cap = unsafe {
-            khr_surface.get_physical_device_surface_capabilities(physical_device, surface.handle)
-        }
-        .unwrap();
-        cap.current_extent
+    let cap = unsafe {
+        khr_surface
+            .get_physical_device_surface_capabilities(pd.handle, surface.handle)
+            .unwrap()
     };
+    let supported_present_modes = unsafe {
+        khr_surface
+            .get_physical_device_surface_present_modes(pd.handle, surface.handle)
+            .unwrap()
+    };
+
+    // Debug info
+    println!("Vulkan: surface capabilities: {:?}", cap);
+    println!(
+        "Vulkan: surface present modes: {:?}",
+        supported_present_modes
+    );
 
     // UI Overlay (color_attachment) and Compute PostProcessing (storage)
     let image_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::STORAGE;
+
+    // TODO handle failure?
+    assert!(cap.supported_usage_flags.contains(image_usage));
+
+    // Query surface format
+    let surface_formats = unsafe {
+        khr_surface
+            .get_physical_device_surface_formats(pd.handle, surface.handle)
+            .unwrap()
+    };
+    assert!(surface_formats.len() > 0);
+
+    // Debug
+    println!("Vulkan surface supported formats:");
+    for format in surface_formats.iter() {
+        let props = pd.get_format_properties(format.format);
+        println!(
+            "\t({:?}, {:?}), features: {:?}",
+            format.format, format.color_space, props.optimal_tiling_features
+        );
+    }
+
+    // TODO pick a proper image format
+    let surface_format = surface_formats[0];
 
     let vsync = true;
     let present_mode = if vsync {
@@ -74,15 +93,19 @@ pub fn create_swapchain(
     } else {
         vk::PresentModeKHR::IMMEDIATE
     };
+    assert!(supported_present_modes.contains(&present_mode));
+
+    let min_image_count = cap.min_image_count.max(2); // 2 should be enough
+    let surface_extent = cap.current_extent;
 
     // Create swapchain object
     let create_info = {
         vk::SwapchainCreateInfoKHR::builder()
             .flags(vk::SwapchainCreateFlagsKHR::empty())
             .surface(surface.handle)
-            .min_image_count(2)
-            .image_format(surface.format.format)
-            .image_color_space(surface.format.color_space)
+            .min_image_count(min_image_count)
+            .image_format(surface_format.format)
+            .image_color_space(surface_format.color_space)
             .image_extent(surface_extent)
             .image_array_layers(1)
             .image_usage(image_usage)
@@ -90,19 +113,28 @@ pub fn create_swapchain(
             .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
             .present_mode(present_mode)
     };
-    let swapchain_handle = unsafe { khr_swapchain.create_swapchain(&create_info, None) }
-        .expect("Vulkan: Swapchain creatino failed???");
+    let swapchain_handle = unsafe {
+        khr_swapchain
+            .create_swapchain(&create_info, None)
+            .expect("Vulkan: Swapchain creatino failed???")
+    };
 
     // Get images/textures
+    // NOTE: swapchain image has (fixed) equivalent image properties.
+    // see: https://registry.khronos.org/vulkan/specs/1.3-khr-extensions/html/chap30.html#_wsi_swapchain
     let textures = {
-        let mut images = unsafe { khr_swapchain.get_swapchain_images(swapchain_handle) }.unwrap();
+        let mut images = unsafe {
+            khr_swapchain
+                .get_swapchain_images(swapchain_handle)
+                .unwrap()
+        };
         images
             .drain(0..)
             .map(|image| {
                 let desc = TextureDesc::new_2d(
                     surface_extent.width,
                     surface_extent.height,
-                    surface.format.format,
+                    surface_format.format,
                     image_usage,
                 );
                 Texture {
@@ -115,7 +147,7 @@ pub fn create_swapchain(
     };
 
     // Create image views / texture views
-    let sub_res_range = vk::ImageSubresourceRange::builder()
+    let subresource_range = vk::ImageSubresourceRange::builder()
         .aspect_mask(vk::ImageAspectFlags::COLOR)
         .layer_count(1)
         .level_count(1);
@@ -125,8 +157,8 @@ pub fn create_swapchain(
             let create_info = vk::ImageViewCreateInfo::builder()
                 .image(texture.image)
                 .view_type(vk::ImageViewType::TYPE_2D)
-                .format(surface.format.format)
-                .subresource_range(*sub_res_range);
+                .format(surface_format.format)
+                .subresource_range(*subresource_range);
             let image_view = unsafe {
                 device
                     .create_image_view(&create_info, None)

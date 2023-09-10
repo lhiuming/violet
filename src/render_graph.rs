@@ -130,7 +130,7 @@ struct RaytracingPassData {
 }
 
 struct PresentData {
-    texture: RGHandle<TextureView>,
+    texture: RGHandle<Texture>,
 }
 
 enum RenderPassType {
@@ -1128,8 +1128,8 @@ impl<'a> RenderGraphBuilder<'a> {
         RaytracingPassBuilder::new(self, name)
     }
 
-    pub fn present(&mut self, texture: RGHandle<TextureView>) {
-        let present_data = PresentData { texture: texture };
+    pub fn present(&mut self, texture: RGHandle<Texture>) {
+        let present_data = PresentData { texture };
         let pass = RenderPass::new("Present", RenderPassType::Present(present_data));
         self.passes.push(pass);
     }
@@ -1389,7 +1389,7 @@ impl RenderGraphBuilder<'_> {
         let get_last_access = |image: vk::Image,
                                aspect: vk::ImageAspectFlags,
                                end_pass_index: u32|
-         -> Option<(u32, vk::ImageLayout)> {
+         -> Option<(u32, vk::AccessFlags, vk::ImageLayout)> {
             for pass_index in (0..end_pass_index).rev() {
                 let pass = &self.passes[pass_index as usize];
                 // Check all mutating view
@@ -1397,14 +1397,32 @@ impl RenderGraphBuilder<'_> {
                     for rt in &gfx.color_targets {
                         let rt_view = self.get_texture_view(ctx, rt.view);
                         if (rt_view.texture.image == image) && (rt_view.desc.aspect == aspect) {
-                            return Some((pass_index, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL));
+                            // TODO RenderPass Load ops?
+                            let mut access = vk::AccessFlags::COLOR_ATTACHMENT_WRITE;
+                            if gfx.desc.blend_enabled {
+                                access |= vk::AccessFlags::COLOR_ATTACHMENT_READ;
+                            }
+                            // TODO DEBUG
+                            access |= vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE;
+                            return Some((
+                                pass_index,
+                                access,
+                                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                            ));
                         }
                     }
                     if let Some(rt) = gfx.depth_stencil {
                         let rt_view = self.get_texture_view(ctx, rt.view);
                         if (rt_view.texture.image == image) && (rt_view.desc.aspect == aspect) {
+                            // TODO RenderPass Load ops?
+                            let mut access = vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE;
+                            // TODO READ only with depth/stencil test is enabled
+                            access |= vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ;
+                            // TODO DEBUG
+                            access |= vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE;
                             return Some((
                                 pass_index,
+                                access,
                                 vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                             ));
                         }
@@ -1413,14 +1431,20 @@ impl RenderGraphBuilder<'_> {
                 for rw in &pass.rw_textures {
                     let rw_view = self.get_texture_view(ctx, rw.1);
                     if (rw_view.texture.image == image) && (rw_view.desc.aspect == aspect) {
-                        return Some((pass_index, vk::ImageLayout::GENERAL));
+                        // TODO render pass can specify write-only
+                        let access = vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::SHADER_READ;
+                        return Some((pass_index, access, vk::ImageLayout::GENERAL));
                     }
                 }
                 // Check all sampling view
                 for tex_view in &pass.textures {
                     let tex_view = self.get_texture_view(ctx, tex_view.1);
                     if (tex_view.texture.image == image) && (tex_view.desc.aspect == aspect) {
-                        return Some((pass_index, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL));
+                        return Some((
+                            pass_index,
+                            vk::AccessFlags::SHADER_READ,
+                            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        ));
                     }
                 }
             }
@@ -1429,59 +1453,85 @@ impl RenderGraphBuilder<'_> {
 
         let pass = &self.passes[pass_index as usize];
 
-        let transition_to =
-            |image: vk::Image, range: vk::ImageSubresourceRange, new_layout: vk::ImageLayout| {
-                if let Some((last_pass_index, last_layout)) =
-                    get_last_access(image, vk::ImageAspectFlags::COLOR, pass_index)
-                {
-                    if last_layout != new_layout {
-                        command_buffer.transition_image_layout(
-                            image,
-                            map_stage_mask(&self.passes[last_pass_index as usize]),
-                            map_stage_mask(pass),
-                            last_layout,
-                            new_layout,
-                            range,
-                        )
-                    }
-                } else {
-                    // TODO support temporal resource
-                    command_buffer.transition_image_layout(
-                        image,
-                        vk::PipelineStageFlags::TOP_OF_PIPE,
-                        map_stage_mask(pass),
-                        vk::ImageLayout::UNDEFINED,
-                        new_layout,
-                        range,
-                    )
-                };
+        let transition_to = |image: vk::Image,
+                             range: vk::ImageSubresourceRange,
+                             dst_access_mask: vk::AccessFlags,
+                             new_layout: vk::ImageLayout| {
+            if let Some((last_pass_index, src_access_mask, last_layout)) =
+                get_last_access(image, vk::ImageAspectFlags::COLOR, pass_index)
+            {
+                command_buffer.transition_image_layout(
+                    image,
+                    src_access_mask,
+                    dst_access_mask,
+                    map_stage_mask(&self.passes[last_pass_index as usize]),
+                    map_stage_mask(pass),
+                    last_layout,
+                    new_layout,
+                    range,
+                )
+            } else {
+                // TODO support temporal resource
+                command_buffer.transition_image_layout(
+                    image,
+                    vk::AccessFlags::empty(),
+                    dst_access_mask,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    map_stage_mask(pass),
+                    vk::ImageLayout::UNDEFINED,
+                    new_layout,
+                    range,
+                )
             };
+        };
 
-        let transition_view_to = |handle: RGHandle<TextureView>, layout: vk::ImageLayout| {
+        let transition_view_to = |handle: RGHandle<TextureView>,
+                                  dst_access_mask: vk::AccessFlags,
+                                  layout: vk::ImageLayout| {
             let view = self.get_texture_view(ctx, handle);
             transition_to(
                 view.texture.image,
                 view.desc.make_subresource_range(true),
+                dst_access_mask,
                 layout,
             );
         };
 
         for (_name, handle) in &pass.textures {
-            transition_view_to(*handle, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+            transition_view_to(
+                *handle,
+                vk::AccessFlags::SHADER_READ,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            );
         }
 
         for (_name, handle) in &pass.rw_textures {
-            transition_view_to(*handle, vk::ImageLayout::GENERAL);
+            let dst_access_mask = vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE;
+            transition_view_to(*handle, dst_access_mask, vk::ImageLayout::GENERAL);
         }
 
         if let Some(gfx) = pass.ty.gfx() {
             for (_rt_index, rt) in gfx.color_targets.iter().enumerate() {
-                transition_view_to(rt.view, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL);
+                let mut dst_access_mask = vk::AccessFlags::COLOR_ATTACHMENT_WRITE;
+                if gfx.desc.blend_enabled {
+                    dst_access_mask |= vk::AccessFlags::COLOR_ATTACHMENT_READ;
+                }
+                // TODO DEBUG
+                dst_access_mask |= vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE;
+                transition_view_to(
+                    rt.view,
+                    dst_access_mask,
+                    vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                );
             }
 
             if let Some(ds) = gfx.depth_stencil {
+                // TODO check depth test enabled
+                let dst_access_mask = vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE;
                 transition_view_to(
                     ds.view,
+                    dst_access_mask,
                     vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL, // TODO finer grain for depth-stencil access
                 );
             }
@@ -1489,8 +1539,19 @@ impl RenderGraphBuilder<'_> {
 
         // Special: check present, transition after last access
         if let Some(present) = pass.ty.present() {
-            let present_tex = present.texture;
-            transition_view_to(present_tex, vk::ImageLayout::PRESENT_SRC_KHR);
+            let present_tex = self.get_texture(ctx, present.texture);
+            transition_to(
+                present_tex.image,
+                vk::ImageSubresourceRange {
+                    aspect_mask: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: 0,
+                    layer_count: 1,
+                },
+                vk::AccessFlags::NONE, // seems suggest by Vulkan-Doc
+                vk::ImageLayout::PRESENT_SRC_KHR,
+            );
         }
 
         // Buffers
@@ -1558,6 +1619,13 @@ impl RenderGraphBuilder<'_> {
             transition_to(
                 self.get_buffer(ctx, *handle).handle,
                 vk::AccessFlags::SHADER_WRITE,
+            );
+        }
+
+        for (_name, handle) in &pass.accel_structs {
+            transition_to(
+                self.get_accel_struct(*handle).buffer.handle,
+                vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR,
             );
         }
     }

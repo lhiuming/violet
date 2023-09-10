@@ -25,6 +25,7 @@ struct FrameParams
 #define SAMPLER_BINDING_INDEX_BEGIN 1
 [[vk::binding(SAMPLER_BINDING_INDEX_BEGIN + 0, FRAME_DESCRIPTOR_SET_INDEX)]] SamplerState sampler_linear_clamp;
 [[vk::binding(SAMPLER_BINDING_INDEX_BEGIN + 1, FRAME_DESCRIPTOR_SET_INDEX)]] SamplerState sampler_linear_wrap;
+[[vk::binding(SAMPLER_BINDING_INDEX_BEGIN + 2, FRAME_DESCRIPTOR_SET_INDEX)]] SamplerState sampler_nearest_clamp;
 
 struct ViewParams {
     // TODO may be in seperate set

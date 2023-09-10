@@ -66,14 +66,19 @@ impl RenderLoop for SengaRenderLoop {
         let swapchain_image_index = self.stream_lined.acquire_next_swapchain_image(rd);
 
         let final_color = {
-            rg.register_texture_view(rd.swapchain.texture_views[swapchain_image_index as usize])
+            (
+                rg.register_texture(rd.swapchain.textures[swapchain_image_index as usize]),
+                rg.register_texture_view(
+                    rd.swapchain.texture_views[swapchain_image_index as usize],
+                ),
+            )
         };
 
         // Pass: Image-Based Line-Drawing
         rg.new_compute("IBLD")
             .compute_shader("image_based_line_drawing.hlsl")
             .texture("gbuffer_depth", gbuffer.depth.1)
-            .rw_texture("rwcolor", final_color)
+            .rw_texture("rwcolor", final_color.1)
             .group_count(
                 div_round_up(gbuffer.size.width, 8),
                 div_round_up(gbuffer.size.height, 8),
@@ -81,7 +86,7 @@ impl RenderLoop for SengaRenderLoop {
             );
 
         // Pass: Output
-        rg.present(final_color);
+        rg.present(final_color.0);
 
         // Prepare command buffer
         let command_buffer = self.stream_lined.wait_and_reset_command_buffer(rd);
