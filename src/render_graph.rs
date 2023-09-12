@@ -348,9 +348,7 @@ impl<'a, 'render> GraphicsPassBuilder<'a, 'render> {
         let ty = RenderPassType::Graphics(GraphicsPassData {
             vertex_shader: None,
             pixel_shader: None,
-            desc: GraphicsDesc {
-                blend_enabled: false,
-            },
+            desc: GraphicsDesc::default(),
             color_targets: Vec::new(),
             depth_stencil: None,
         });
@@ -392,12 +390,27 @@ impl<'a, 'render> GraphicsPassBuilder<'a, 'render> {
     }
 
     pub fn color_targets(&mut self, rts: &[ColorTarget]) -> &mut Self {
+        assert!(rts.len() < u8::MAX as usize);
+        self.gfx().desc.color_attachment_count = rts.len() as u8;
+        for i in 0..rts.len() {
+            // TODO get rid of 'view' indirection?
+            let format = self
+                .render_graph
+                .get_texture_desc_from_view(rts[i].view)
+                .format;
+            self.gfx().desc.color_attachments[i] = format;
+        }
+
         self.gfx().color_targets.clear();
         self.gfx().color_targets.extend_from_slice(rts);
         self
     }
 
     pub fn depth_stencil(&mut self, ds: DepthStencilTarget) -> &mut Self {
+        // TODO get rid of 'view' indirection?
+        let foramt = self.render_graph.get_texture_desc_from_view(ds.view).format;
+        self.gfx().desc.depth_attachment.replace(foramt);
+        self.gfx().desc.stencil_attachment.replace(foramt);
         self.gfx().depth_stencil = Some(ds);
         self
     }
@@ -1402,8 +1415,6 @@ impl RenderGraphBuilder<'_> {
                             if gfx.desc.blend_enabled {
                                 access |= vk::AccessFlags::COLOR_ATTACHMENT_READ;
                             }
-                            // TODO DEBUG
-                            access |= vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE;
                             return Some((
                                 pass_index,
                                 access,
@@ -1418,8 +1429,6 @@ impl RenderGraphBuilder<'_> {
                             let mut access = vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE;
                             // TODO READ only with depth/stencil test is enabled
                             access |= vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ;
-                            // TODO DEBUG
-                            access |= vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE;
                             return Some((
                                 pass_index,
                                 access,
@@ -1516,8 +1525,6 @@ impl RenderGraphBuilder<'_> {
                 if gfx.desc.blend_enabled {
                     dst_access_mask |= vk::AccessFlags::COLOR_ATTACHMENT_READ;
                 }
-                // TODO DEBUG
-                dst_access_mask |= vk::AccessFlags::MEMORY_READ | vk::AccessFlags::MEMORY_WRITE;
                 transition_view_to(
                     rt.view,
                     dst_access_mask,

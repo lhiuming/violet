@@ -388,12 +388,20 @@ pub struct ShadersConfig {
 }
 
 pub struct GraphicsDesc {
+    pub color_attachment_count: u8,
+    pub color_attachments: [vk::Format; 4],
+    pub depth_attachment: Option<vk::Format>,
+    pub stencil_attachment: Option<vk::Format>,
     pub blend_enabled: bool,
 }
 
 impl Default for GraphicsDesc {
     fn default() -> Self {
         Self {
+            color_attachment_count: 0,
+            color_attachments: [vk::Format::UNDEFINED; 4],
+            depth_attachment: None,
+            stencil_attachment: None,
             blend_enabled: false,
         }
     }
@@ -1057,12 +1065,14 @@ pub fn create_graphics_pipeline(
     let dynamic_state =
         vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states);
 
-    // Extention: PipelineRendering
+    // Extention: PipelineRendering (dynamic_rendering)
+    // NOTE: color_attachment_count here must be the same with that in PipelineColorBlendStateCreateInfo, if has fragment output
+    // NOTE: even with dynamic rendering, color_attachment_formats must be equal those specified in RenderingInfo when calling CmdBeginRendering.
     let mut pipeline_rendering = vk::PipelineRenderingCreateInfo::builder()
-    .depth_attachment_format(vk::Format::D24_UNORM_S8_UINT)
-    .stencil_attachment_format(vk::Format::D24_UNORM_S8_UINT)
-    //.color_attachment_formats(&[vk::Format::R8G8B8A8_UNORM])
-    ;
+        .view_mask(0) // not using multi-view
+        .color_attachment_formats(&desc.color_attachments[0..desc.color_attachment_count as usize])
+        .depth_attachment_format(desc.depth_attachment.unwrap_or(vk::Format::UNDEFINED))
+        .stencil_attachment_format(desc.stencil_attachment.unwrap_or(vk::Format::UNDEFINED));
 
     let create_info = vk::GraphicsPipelineCreateInfo::builder()
         .stages(&stage_infos)
