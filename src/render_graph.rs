@@ -1267,6 +1267,22 @@ impl RenderGraphBuilder<'_> {
         };
 
         command_buffer.begin_rendering(&rendering_info);
+
+        // Extra auto setups
+        // Full viewport
+        command_buffer.set_viewport_0(vk::Viewport {
+            x: 0.0,
+            y: 0.0,
+            width: size.width as f32,
+            height: size.height as f32,
+            min_depth: 0.0,
+            max_depth: 1.0,
+        });
+        // Full scissor
+        command_buffer.set_scissor_0(vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: size,
+        });
     }
 
     fn end_graphics(&mut self, command_buffer: &CommandBuffer) {

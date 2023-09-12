@@ -582,20 +582,6 @@ impl ImGUIPass {
                 }])
                 .blend_enabled(true)
                 .render(move |cb, pipeline| {
-                    // setup raster state
-                    cb.set_viewport_0(vk::Viewport {
-                        x: 0.0,
-                        y: 0.0,
-                        width: viewport_extent.width as f32,
-                        height: viewport_extent.height as f32,
-                        min_depth: 0.0,
-                        max_depth: 1.0,
-                    });
-                    cb.set_scissor_0(vk::Rect2D {
-                        offset: vk::Offset2D { x: 0, y: 0 },
-                        extent: viewport_extent,
-                    });
-
                     // TODO make into gfx config
                     cb.set_depth_test_enable(false);
                     cb.set_depth_write_enable(false);
