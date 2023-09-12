@@ -155,7 +155,7 @@ impl super::RenderDevice {
                 enabled_extension_names.extend_from_slice(&raytracing::DEVICE_EXTENSIONS);
             }
 
-            // Finally, create the device, with all supproted feature enabled (for simplicity)
+            // Finally, create the device
             let create_info = vk::DeviceCreateInfo::builder()
                 .queue_create_infos(&queue_create_infos)
                 .enabled_extension_names(&enabled_extension_names)
@@ -169,7 +169,10 @@ impl super::RenderDevice {
                         vk::Result::ERROR_EXTENSION_NOT_PRESENT => {
                             for name in enabled_extension_names.iter() {
                                 let name = CStr::from_ptr(*name);
-                                println!("Error[Vulkan]: extension not present: {:?}", name);
+                                println!(
+                                    "Error[Vulkan]: extension maybe is not presented: {:?}",
+                                    name
+                                );
                             }
                             println!("NOTE: extensions supported may be limited if device is create under debugging layers, e.g. VK_LAYER_RENDERDOC_Capture");
                         }
