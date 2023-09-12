@@ -122,13 +122,15 @@ impl super::RenderDevice {
             let prop = &queue_family_props[i];
             if prop.queue_flags.contains(vk::QueueFlags::GRAPHICS) {
                 found_gfx_queue_family_index = Some(i as u32);
+                /* Verbose info
                 println!(
                         "Vulkan: found graphics queue family index: index {}, prop: flags {:?}, count {}",
                         i, prop.queue_flags, prop.queue_count
                     );
+                */
                 continue;
             }
-            // Print info
+            /* Verbose info
             if prop.queue_flags.contains(vk::QueueFlags::COMPUTE) {
                 println!(
                     "Vulkan: found compute queue family index: index {}, flags {:?}, count {}",
@@ -136,6 +138,7 @@ impl super::RenderDevice {
                 );
                 continue;
             }
+            */
         }
         let gfx_queue_family_index =
             found_gfx_queue_family_index.expect("Vulkan: didn't found any graphics queue family?!");

@@ -53,12 +53,14 @@ pub fn create_swapchain(
             .unwrap()
     };
 
-    // Debug info
+    /*
+    // Verbose info
     println!("Vulkan: surface capabilities: {:?}", cap);
     println!(
         "Vulkan: surface present modes: {:?}",
         supported_present_modes
     );
+    */
 
     // UI Overlay (color_attachment) and Compute PostProcessing (storage)
     let image_usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::STORAGE;
@@ -74,7 +76,8 @@ pub fn create_swapchain(
     };
     assert!(surface_formats.len() > 0);
 
-    // Debug
+    /*
+    // Verbose info
     println!("Vulkan surface supported formats:");
     for format in surface_formats.iter() {
         let props = pd.get_format_properties(format.format);
@@ -83,6 +86,7 @@ pub fn create_swapchain(
             format.format, format.color_space, props.optimal_tiling_features
         );
     }
+    */
 
     // TODO pick a proper image format
     let surface_format = surface_formats[0];
