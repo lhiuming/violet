@@ -1,7 +1,8 @@
+use std::any::type_name;
 use std::path::Path;
 use std::{env, f32::consts::PI};
 
-use glam::{Mat4, Vec3, Vec4};
+use glam::{Mat4, UVec2, Vec3, Vec4};
 
 use crate::imgui;
 use crate::{
@@ -61,7 +62,8 @@ where
 
     // Create a system window
     // TODO implement Drop for Window
-    let window = Window::new(1280, 720, "Rusty Violet");
+    let window_size = UVec2::new(1280, 720);
+    let mut window = Window::new(window_size, "Rusty Violet");
 
     let mut rd =
         RenderDevice::create(Window::system_handle_for_module(), window.system_handle()).unwrap();
@@ -115,6 +117,11 @@ where
     let mut sun_dir_theta = -0.271f32;
     let mut sun_dir_phi = 0.524f32;
 
+    // UI
+    let mut toggle = false;
+
+    // Render loop
+    println!("Start RenderLoop: {:?}", type_name::<T>());
     while !window.should_close() {
         window.poll_events();
 
@@ -245,29 +252,34 @@ where
         }
 
         // testing
-        imgui.begin(imgui.gather_input());
+        imgui.begin(imgui.gather_input(window_size, &window));
 
         let win = egui::Window::new("Main UI Window");
         win.show(&imgui.egui_ctx, |ui| {
             // label
             ui.add(egui::Label::new("Hello, world"));
-            /*
             // button
             if ui.add(egui::Button::new("CLICK ME😀")).clicked() {
+                toggle = !toggle;
                 println!("clicked")
             }
-             */
+            if toggle {
+                ui.add(egui::Label::new("Yo"));
+            }
         });
 
         let imgui_output = imgui.end();
 
-        render_loop.render(
-            &mut rd,
-            &mut shaders,
-            &render_scene,
-            &view_info,
-            Some(&imgui_output),
-        );
+        // Render if swapchain is not changed; save a lot troubles :)
+        if !window.minimized() {
+            render_loop.render(
+                &mut rd,
+                &mut shaders,
+                &render_scene,
+                &view_info,
+                Some(&imgui_output),
+            );
+        }
 
         if window.clicked('p') {
             render_loop.print_stat();

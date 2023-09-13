@@ -51,7 +51,7 @@ float4 ps_main(float4 color: COLOR0, float2 uv: TEXCOORD0) : SV_Target0 {
         tex_color = alpha.rrrr;
     }
     //return float4(0, 0, 0, 0);
-    return float4(0, 0.5, 0.8, 1.0) * 0.5;
+    //return float4(0, 0.5, 0.8, 1.0) * 0.5;
     //return tex_color.aaaa;
     return color * tex_color;
 }

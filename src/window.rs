@@ -1,7 +1,8 @@
-use std::cell::RefCell;
 use std::os::windows::prelude::OsStrExt;
-use std::rc::Rc;
 use std::{ffi, mem, ptr};
+
+use glam::UVec2;
+
 use windows_sys::Win32::{
     Foundation::*, System::LibraryLoader::*, System::Memory::*, UI::Input::KeyboardAndMouse::*,
     UI::WindowsAndMessaging::*,
@@ -19,7 +20,7 @@ static K_WINDOW_CLASS_NAME: &str = "Violet";
 static K_WINDOW_INSTANCE_PROP_NAME: &str = "VioletWindowInstance";
 static K_MSGBOX_ERROR_CAPTION: &str = "Error";
 
-static mut S_MESSAGE_HANDLER: Option<Rc<RefCell<MessageHandler>>> = None;
+static mut S_MESSAGE_HANDLER: Option<Box<MessageHandler>> = None;
 
 fn report_last_error() {
     unsafe {
@@ -103,11 +104,41 @@ fn ensure_register_window_class() {
     }
 }
 
+pub enum Message {
+    // Key presed or released
+    Key {
+        // Only support ASCII keys
+        char: u8,
+        // Preased or released?
+        pressed: bool,
+    },
+    // Mouse movement
+    MouseMove {
+        x: i16,
+        y: i16,
+    },
+    // Mouse button (left or right, presed or not)
+    MouseButton {
+        x: i16,
+        y: i16,
+        left: bool,
+        pressed: bool,
+    },
+}
+
 #[allow(non_snake_case)]
 struct MessageHandler {
-    pub hwnd: HWND, // Copied this from Window, for validation porpose
-    // TODO move these kind of logic to app side
+    // Copied this from Window, for validation porpose
+    pub hwnd: HWND,
+
+    // Message generate in last poll, in order.
+    pub msg_stream: Vec<Message>,
+
+    // Windows states
     pub should_close: bool,
+    pub minimized: bool,
+
+    // TODO move these kind of logic to app side
     pub mouse_pos: (i16, i16),    // most up-to-dated mouse pos
     pub mouse_right_button: bool, // most up-to-dated right-button down
     pub curr_drag_beg_mouse_pos: Option<(i16, i16)>, // current frame init mouse pos with right-button down
@@ -120,7 +151,9 @@ impl MessageHandler {
     pub fn new(hwnd: HWND) -> MessageHandler {
         MessageHandler {
             hwnd,
+            msg_stream: Vec::new(),
             should_close: false,
+            minimized: false,
             mouse_pos: (0, 0),
             mouse_right_button: false,
             curr_drag_beg_mouse_pos: None,
@@ -131,6 +164,7 @@ impl MessageHandler {
     }
 
     pub fn new_frame(&mut self) {
+        self.msg_stream.clear();
         // Continue last frame unrelease drag
         self.curr_drag_beg_mouse_pos = if self.mouse_right_button {
             Some(self.mouse_pos)
@@ -166,7 +200,7 @@ unsafe extern "system" fn wnd_callback(
     w_param: WPARAM,
     l_param: LPARAM,
 ) -> LRESULT {
-    let handler = match &S_MESSAGE_HANDLER {
+    let handler = match S_MESSAGE_HANDLER.as_mut() {
         Some(handler) => handler,
         None => {
             //println!("Win32 message: no handler");
@@ -174,7 +208,7 @@ unsafe extern "system" fn wnd_callback(
         }
     };
 
-    assert!(hwnd == handler.borrow().hwnd);
+    assert!(hwnd == handler.hwnd);
 
     let decode_cursor_pos = || -> (i16, i16) {
         assert!(mem::size_of_val(&l_param) >= 4); // at least contain 2 short integers
@@ -185,44 +219,78 @@ unsafe extern "system" fn wnd_callback(
 
     match msg {
         WM_CLOSE => {
-            handler.borrow_mut().should_close = true;
-            0
+            handler.should_close = true;
         }
-        WM_RBUTTONDOWN => {
+        WM_SIZE => {
+            if w_param as u32 == SIZE_MINIMIZED {
+                handler.minimized = true;
+            } else {
+                handler.minimized = false;
+                return DefWindowProcW(hwnd, msg, w_param, l_param);
+            }
+        }
+        WM_LBUTTONDOWN => {
             SetCapture(hwnd);
             let (x, y) = decode_cursor_pos();
+            handler.msg_stream.push(Message::MouseButton {
+                x,
+                y,
+                left: true,
+                pressed: true,
+            });
+        }
+        WM_LBUTTONUP => {
+            ReleaseCapture();
+            let (x, y) = decode_cursor_pos();
+            handler.msg_stream.push(Message::MouseButton {
+                x,
+                y,
+                left: true,
+                pressed: false,
+            });
+        }
+        WM_RBUTTONDOWN => {
+            ReleaseCapture();
+            let (x, y) = decode_cursor_pos();
+            handler.msg_stream.push(Message::MouseButton {
+                x,
+                y,
+                left: true,
+                pressed: true,
+            });
+            let (x, y) = decode_cursor_pos();
             {
-                let mut handler = handler.borrow_mut();
                 handler.mouse_pos = (x, y);
                 handler.mouse_right_button = true;
                 if handler.curr_drag_beg_mouse_pos.is_none() {
                     handler.curr_drag_beg_mouse_pos = Some((x, y));
                 }
             }
-            //println!("Win32 message: right button down");
-            0
         }
         WM_RBUTTONUP => {
             ReleaseCapture();
             let (x, y) = decode_cursor_pos();
+            handler.msg_stream.push(Message::MouseButton {
+                x,
+                y,
+                left: false,
+                pressed: false,
+            });
+            let (x, y) = decode_cursor_pos();
             {
-                let mut handler = handler.borrow_mut();
                 handler.mouse_pos = (x, y);
                 handler.mouse_right_button = false;
                 handler.curr_drag_end_mouse_pos = Some((x, y));
             }
             //println!("Win32 message: right button up");
-            0
         }
         WM_MOUSEMOVE => {
             let rb_down = (w_param as u32) == MK_RBUTTON;
             let (x, y) = decode_cursor_pos();
-            {
-                let mut handler = handler.borrow_mut();
-                handler.mouse_pos = (x, y);
-                if rb_down {
-                    handler.curr_drag_end_mouse_pos = Some((x, y));
-                }
+            handler.msg_stream.push(Message::MouseMove { x, y });
+            handler.mouse_pos = (x, y);
+            if rb_down {
+                handler.curr_drag_end_mouse_pos = Some((x, y));
             }
             /*
             println!(
@@ -230,12 +298,15 @@ unsafe extern "system" fn wnd_callback(
                 x, y, rb_down
             );
             */
-            0
         }
         WM_KEYDOWN => {
             let vk_code = w_param as u16;
             if let Some(vk_to_u8) = virtual_key_to_u8(vk_code) {
-                handler.borrow_mut().push_states[vk_to_u8 as usize] = true;
+                handler.msg_stream.push(Message::Key {
+                    char: vk_to_u8,
+                    pressed: true,
+                });
+                handler.push_states[vk_to_u8 as usize] = true;
             } else {
                 //println!("Win32 message: unhandle key down {}", vk_code);
                 return DefWindowProcW(hwnd, msg, w_param, l_param);
@@ -248,13 +319,17 @@ unsafe extern "system" fn wnd_callback(
                 vk_code, repeat_count, is_prev_down
             );
             */
-            0
         }
         WM_KEYUP => {
             let vk_code = w_param as u16;
             if let Some(vk_to_u8) = virtual_key_to_u8(vk_code) {
-                handler.borrow_mut().push_states[vk_to_u8 as usize] = false;
-                handler.borrow_mut().click_states[vk_to_u8 as usize] = true;
+                handler.msg_stream.push(Message::Key {
+                    char: vk_to_u8,
+                    pressed: false,
+                });
+
+                handler.push_states[vk_to_u8 as usize] = false;
+                handler.click_states[vk_to_u8 as usize] = true;
             } else {
                 //println!("Win32 message: unhandle key up {}", vk_code);
                 return DefWindowProcW(hwnd, msg, w_param, l_param);
@@ -266,23 +341,23 @@ unsafe extern "system" fn wnd_callback(
                 vk_code, repeat_count
             );
             */
-            0
         }
         _ => {
             //println!("Win32 message: unhandled");
-            DefWindowProcW(hwnd, msg, w_param, l_param)
+            return DefWindowProcW(hwnd, msg, w_param, l_param);
         }
     }
+    return 0;
 }
 
 pub struct Window {
     system_handle: u64,
-    message_handler: Rc<RefCell<MessageHandler>>,
+    message_handler: Option<Box<MessageHandler>>,
 }
 
 impl Window {
     // General constructor
-    pub fn new(init_width: u32, init_height: u32, title: &str) -> Box<Window> {
+    pub fn new(init_size: UVec2, title: &str) -> Box<Window> {
         // Check if we have reigster window class (wnd_callback)
         ensure_register_window_class();
 
@@ -308,8 +383,8 @@ impl Window {
             let mut rect = RECT {
                 left: 0,
                 top: 0,
-                right: init_width as i32,
-                bottom: init_height as i32,
+                right: init_size.x as i32,
+                bottom: init_size.y as i32,
             };
             let cal_size = AdjustWindowRectEx(std::ptr::addr_of_mut!(rect), style, 0, ex_style);
             if cal_size == 0 {
@@ -340,15 +415,15 @@ impl Window {
             report_last_error();
         }
 
-        // A ref-count message handler, to pass message from global call back to this window instance
-        let message_handler = Rc::new(RefCell::new(MessageHandler::new(hwnd)));
+        // A message handler, on heap, to receive message from global call back
+        let message_handler = Some(Box::new(MessageHandler::new(hwnd)));
 
         // Allocate the window object first, because this pointer is passed to windows system via SetPropW
         let result = {
             std::assert!(mem::size_of_val(&hwnd) >= mem::size_of::<HWND>());
             let temp = Window {
                 system_handle: hwnd as u64,
-                message_handler: message_handler.clone(),
+                message_handler: message_handler,
             };
             Box::new(temp)
         };
@@ -388,17 +463,18 @@ impl Window {
             }
         }
 
-        // Register message handler to global state
-        unsafe {
-            S_MESSAGE_HANDLER = Some(message_handler);
-        }
-
         result
     }
 
-    pub fn poll_events(&self) {
+    pub fn poll_events(&mut self) {
         // Cache last frame info
-        self.message_handler.borrow_mut().new_frame();
+        self.message_handler.as_mut().unwrap().new_frame();
+
+        // Pass to glabal state
+        unsafe {
+            assert!(S_MESSAGE_HANDLER.is_none());
+            S_MESSAGE_HANDLER = self.message_handler.take();
+        }
 
         unsafe {
             let mut msg: MSG = mem::zeroed();
@@ -414,6 +490,11 @@ impl Window {
                 DispatchMessageW(&msg);
             }
         }
+
+        // Clear global state
+        unsafe {
+            self.message_handler = S_MESSAGE_HANDLER.take();
+        }
     }
 
     pub fn system_handle(&self) -> u64 {
@@ -426,12 +507,20 @@ impl Window {
     }
 
     pub fn should_close(&self) -> bool {
-        self.message_handler.borrow().should_close
+        self.message_handler.as_ref().unwrap().should_close
+    }
+
+    pub fn minimized(&self) -> bool {
+        self.message_handler.as_ref().unwrap().minimized
+    }
+
+    pub fn msg_stream(&self) -> &Vec<Message> {
+        &self.message_handler.as_ref().unwrap().msg_stream
     }
 
     // Forward, Right, Up
     pub fn nav_dir(&self) -> (f32, f32, f32) {
-        let handler = self.message_handler.borrow();
+        let handler = self.message_handler.as_ref().unwrap();
         let make_dir = |positive, negative| -> f32 {
             let mut ret = 0.0;
             if positive {
@@ -451,7 +540,7 @@ impl Window {
 
     // Drag start pos, darg end pos
     pub fn effective_darg(&self) -> Option<(i16, i16, i16, i16)> {
-        let handler = self.message_handler.borrow();
+        let handler = self.message_handler.as_ref().unwrap();
         if let Some((end_x, end_y)) = handler.curr_drag_end_mouse_pos {
             if let Some((beg_x, beg_y)) = handler.curr_drag_beg_mouse_pos {
                 Some((beg_x, beg_y, end_x, end_y))
@@ -465,10 +554,10 @@ impl Window {
     }
 
     pub fn pushed(&self, key: char) -> bool {
-        self.message_handler.borrow().pushed(key)
+        self.message_handler.as_ref().unwrap().pushed(key)
     }
 
     pub fn clicked(&self, key: char) -> bool {
-        self.message_handler.borrow().clicked(key)
+        self.message_handler.as_ref().unwrap().clicked(key)
     }
 }
