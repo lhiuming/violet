@@ -249,12 +249,11 @@ where
         }
 
         // Show GUI
-        imgui.begin(imgui.gather_input(window_size, &window));
-        let win = egui::Window::new("Render Loop");
-        win.show(&imgui.egui_ctx, |ui| {
-            render_loop.ui(ui);
+        let imgui_output = imgui.run(window_size, &window, |ctx| {
+            imgui::Window::new("Render Loop").show(ctx, |ui| {
+                render_loop.ui(ui);
+            });
         });
-        let imgui_output = imgui.end();
 
         // Render if swapchain is not changed; save a lot troubles :)
         if !window.minimized() {

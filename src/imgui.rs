@@ -5,9 +5,10 @@ Integration of egui.
 use egui::{Event, Key, *};
 use glam::UVec2;
 
-use crate::window::{Message, Window};
+use crate::window;
+use crate::window::Message;
 
-pub use egui::Ui;
+pub use egui::{TopBottomPanel, Ui, Window};
 
 pub struct ImGUI {
     pub egui_ctx: egui::Context,
@@ -45,7 +46,7 @@ impl ImGUI {
     }
 
     // Gather input (mouse, touches, keyboard, screen size, etc):
-    pub fn gather_input(&self, window_size: UVec2, window: &Window) -> egui::RawInput {
+    pub fn gather_input(&self, window_size: UVec2, window: &window::Window) -> egui::RawInput {
         let mut raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect {
                 min: egui::Pos2 { x: 0.0, y: 0.0 },
@@ -109,5 +110,18 @@ impl ImGUI {
             textures_delta: full_output.textures_delta,
             clipped_primitives,
         }
+    }
+
+    // Instead of gather_input, begin, end, just call this.
+    #[inline]
+    pub fn run(
+        &mut self,
+        window_size: UVec2,
+        window: &window::Window,
+        add_ui: impl FnOnce(&egui::Context),
+    ) -> ImGUIOuput {
+        self.begin(self.gather_input(window_size, window));
+        add_ui(&self.egui_ctx);
+        self.end()
     }
 }
