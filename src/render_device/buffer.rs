@@ -147,6 +147,16 @@ impl super::RenderDevice {
         })
     }
 
+    pub fn destroy_buffer(&self, buffer: Buffer) {
+        unsafe {
+            if buffer.data != std::ptr::null_mut::<u8>() {
+                self.device.unmap_memory(buffer.memory);
+            }
+            self.device.free_memory(buffer.memory, None);
+            self.device.destroy_buffer(buffer.handle, None);
+        }
+    }
+
     pub fn create_buffer_view(
         &self,
         buffer: vk::Buffer,

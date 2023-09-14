@@ -7,6 +7,8 @@ use glam::UVec2;
 
 use crate::window::{Message, Window};
 
+pub use egui::Ui;
+
 pub struct ImGUI {
     pub egui_ctx: egui::Context,
 }

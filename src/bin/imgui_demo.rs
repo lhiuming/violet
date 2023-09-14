@@ -10,7 +10,7 @@ use violet::{
 };
 
 pub struct ImGUIDemoRenderLoop {
-    streamlined: StreamLinedFrameResource,
+    stream_lined: StreamLinedFrameResource,
     render_graph_cache: RenderGraphCache,
 
     imgui_pass: ImGUIPass,
@@ -21,7 +21,7 @@ pub struct ImGUIDemoRenderLoop {
 impl RenderLoop for ImGUIDemoRenderLoop {
     fn new(rd: &RenderDevice) -> Option<Self> {
         Some(Self {
-            streamlined: StreamLinedFrameResource::new(rd),
+            stream_lined: StreamLinedFrameResource::new(rd),
             render_graph_cache: RenderGraphCache::new(rd),
             imgui_pass: ImGUIPass::new(rd),
             upload_context: UploadContext::new(rd),
@@ -36,20 +36,20 @@ impl RenderLoop for ImGUIDemoRenderLoop {
         _view_info: &ViewInfo,
         imgui: Option<&ImGUIOuput>,
     ) {
-        self.streamlined.advance_render_index();
+        self.stream_lined.advance_render_index();
 
         let mut shader_config = ShadersConfig::default();
         shader_config.set_layout_override.insert(
             FRAME_DESCRIPTOR_SET_INDEX,
-            self.streamlined.get_set_layout(),
+            self.stream_lined.get_set_layout(),
         );
         let mut rg = RenderGraphBuilder::new_with_shader_config(shader_config);
         rg.add_global_descriptor_sets(&[(
             FRAME_DESCRIPTOR_SET_INDEX,
-            self.streamlined.get_frame_desciptor_set(),
+            self.stream_lined.get_frame_desciptor_set(),
         )]);
 
-        let swapchain_image_index = self.streamlined.acquire_next_swapchain_image(rd);
+        let swapchain_image_index = self.stream_lined.acquire_next_swapchain_image(rd);
         let target = rg.register_texture(rd.swapchain.textures[swapchain_image_index as usize]);
 
         // Draw ImGUI
@@ -60,6 +60,7 @@ impl RenderLoop for ImGUIDemoRenderLoop {
             self.imgui_pass.add(
                 &mut rg,
                 rd,
+                &mut self.stream_lined,
                 &mut self.upload_context,
                 target,
                 imgui,
@@ -72,7 +73,7 @@ impl RenderLoop for ImGUIDemoRenderLoop {
 
         // Execute render graph
         {
-            let vk_command_buffer = self.streamlined.wait_and_reset_command_buffer(rd);
+            let vk_command_buffer = self.stream_lined.wait_and_reset_command_buffer(rd);
 
             let command_buffer = CommandBuffer::new(rd, vk_command_buffer);
             rd.begin_command_buffer(command_buffer.command_buffer);
@@ -83,7 +84,7 @@ impl RenderLoop for ImGUIDemoRenderLoop {
         }
 
         // Present
-        self.streamlined
+        self.stream_lined
             .wait_and_submit_and_present(rd, swapchain_image_index);
     }
 }

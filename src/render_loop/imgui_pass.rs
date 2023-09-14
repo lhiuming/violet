@@ -17,12 +17,14 @@ use crate::{
     shader::PushConstantsBuilder,
 };
 
+use super::StreamLinedFrameResource;
+
 // see also: imgui_vsps.hlsl
 static IMGUI_DESCRIPTOR_SET_INDEX: u32 = 0;
 
 pub struct ImGUIPass {
-    index_buffer: Buffer,
-    vertex_buffer: Buffer,
+    index_buffer: Option<Buffer>,
+    vertex_buffer: Option<Buffer>,
     ui_textures: Vec<Texture>,
     ui_texture_views: Vec<TextureView>,
     tex_id_to_slot: HashMap<u64, u32>,
@@ -33,22 +35,6 @@ pub struct ImGUIPass {
 
 impl ImGUIPass {
     pub fn new(rd: &RenderDevice) -> Self {
-        let index_buffer = rd
-            .create_buffer(BufferDesc {
-                size: 1024 * 8, // TODO growing?
-                usage: vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-                memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            })
-            .unwrap();
-        let vertex_buffer = rd
-            .create_buffer(BufferDesc {
-                size: 1024 * 16, // TODO growing?
-                usage: vk::BufferUsageFlags::STORAGE_BUFFER | // sampled as raw buffer
-                vk::BufferUsageFlags::TRANSFER_DST,
-                memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            })
-            .unwrap();
-
         let descriptor_set_pool = rd.create_descriptor_pool(
             vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND,
             1,
@@ -96,32 +82,17 @@ impl ImGUIPass {
                     .unwrap()
             }
         };
+
         let descriptor_set = unsafe {
             let allocate_info = vk::DescriptorSetAllocateInfo::builder()
                 .descriptor_pool(descriptor_set_pool)
                 .set_layouts(std::slice::from_ref(&set_layout));
             rd.device.allocate_descriptor_sets(&allocate_info).unwrap()[0]
         };
-        {
-            let buffer_info = vk::DescriptorBufferInfo::builder()
-                .buffer(vertex_buffer.handle)
-                .offset(0)
-                .range(vk::WHOLE_SIZE)
-                .build();
-            let descriptor_writes = [vk::WriteDescriptorSet::builder()
-                .dst_set(descriptor_set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(std::slice::from_ref(&buffer_info))
-                .build()];
-            unsafe {
-                rd.device.update_descriptor_sets(&descriptor_writes, &[]);
-            }
-        }
 
         Self {
-            index_buffer,
-            vertex_buffer,
+            index_buffer: None,
+            vertex_buffer: None,
             ui_textures: Vec::new(),
             ui_texture_views: Vec::new(),
             tex_id_to_slot: HashMap::new(),
@@ -130,10 +101,73 @@ impl ImGUIPass {
         }
     }
 
+    fn preapre_buffers(
+        &mut self,
+        rd: &RenderDevice,
+        stream_lined: &mut StreamLinedFrameResource,
+        index_bytesize: u64,
+        vertec_bytesize: u64,
+    ) {
+        if let Some(buffer) = self.index_buffer {
+            if buffer.desc.size < index_bytesize {
+                self.index_buffer.take();
+                stream_lined.delay_release_buffer(buffer);
+            }
+        }
+
+        if let Some(buffer) = self.vertex_buffer {
+            if buffer.desc.size < vertec_bytesize {
+                self.vertex_buffer.take();
+                stream_lined.delay_release_buffer(buffer);
+            }
+        }
+
+        if self.index_buffer.is_none() {
+            let size = index_bytesize.next_power_of_two();
+            let buffer = rd
+                .create_buffer(BufferDesc {
+                    size,
+                    usage: vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                    memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                })
+                .unwrap();
+
+            self.index_buffer = Some(buffer);
+        }
+
+        if self.vertex_buffer.is_none() {
+            let size = vertec_bytesize.next_power_of_two();
+            let buffer = rd
+                .create_buffer(BufferDesc {
+                    size,
+                    usage: vk::BufferUsageFlags::STORAGE_BUFFER | // sampled as raw buffer
+                vk::BufferUsageFlags::TRANSFER_DST,
+                    memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                })
+                .unwrap();
+
+            let buffer_info = vk::DescriptorBufferInfo::builder()
+                .buffer(buffer.handle)
+                .offset(0)
+                .range(vk::WHOLE_SIZE)
+                .build();
+            let descriptor_writes = [vk::WriteDescriptorSet::builder()
+                .dst_set(self.descriptor_set)
+                .dst_binding(0)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(std::slice::from_ref(&buffer_info))
+                .build()];
+            rd.update_descriptor_sets(&descriptor_writes, &[]);
+
+            self.vertex_buffer = Some(buffer);
+        }
+    }
+
     pub fn add(
         &mut self,
         rg: &mut RenderGraphBuilder,
         rd: &RenderDevice,
+        stream_lined: &mut StreamLinedFrameResource,
         upload_context: &mut UploadContext,
         target: RGHandle<Texture>,
         imgui: &ImGUIOuput,
@@ -158,9 +192,8 @@ impl ImGUIPass {
             (index_data_size as u64, vertex_data_size as u64)
         };
 
-        // TOOD grow the buffers?
-        assert!(index_data_size <= self.index_buffer.desc.size);
-        assert!(vertex_data_size <= self.vertex_buffer.desc.size);
+        // Prepare GPU buffers (grow if necessary)
+        self.preapre_buffers(rd, stream_lined, index_data_size, vertex_data_size);
 
         // Upload buffer / texture-delta to GPU
 
@@ -383,6 +416,9 @@ impl ImGUIPass {
             }
         }
 
+        let index_buffer = self.index_buffer.unwrap();
+        let vertex_buffer = self.vertex_buffer.unwrap();
+
         // Copy from staging buffer to rendering buffers/textures
         // TODO dont need to wait submit done; just sync before the ui draw
         if (index_data_size > 0) || (vertex_data_size > 0) || (copy_buffer_to_images.len() > 0) {
@@ -427,7 +463,7 @@ impl ImGUIPass {
                         rd.device.cmd_copy_buffer(
                             command_buffer,
                             ind_staging_buffer.handle,
-                            self.index_buffer.handle,
+                            index_buffer.handle,
                             std::slice::from_ref(&vk::BufferCopy {
                                 src_offset: 0,
                                 dst_offset: 0,
@@ -440,7 +476,7 @@ impl ImGUIPass {
                         rd.device.cmd_copy_buffer(
                             command_buffer,
                             vert_staging_buffer.handle,
-                            self.vertex_buffer.handle,
+                            vertex_buffer.handle,
                             std::slice::from_ref(&vk::BufferCopy {
                                 src_offset: 0,
                                 dst_offset: 0,
@@ -467,7 +503,7 @@ impl ImGUIPass {
                         .dst_access_mask(vk::AccessFlags::SHADER_READ)
                         .src_queue_family_index(0)
                         .dst_queue_family_index(0) // same
-                        .buffer(self.index_buffer.handle)
+                        .buffer(index_buffer.handle)
                         .offset(0)
                         .size(vk::WHOLE_SIZE);
                     let vertex_bmb = vk::BufferMemoryBarrier::builder()
@@ -475,7 +511,7 @@ impl ImGUIPass {
                         .dst_access_mask(vk::AccessFlags::SHADER_READ)
                         .src_queue_family_index(0)
                         .dst_queue_family_index(0) // same
-                        .buffer(self.vertex_buffer.handle)
+                        .buffer(vertex_buffer.handle)
                         .offset(0)
                         .size(vk::WHOLE_SIZE);
                     let buffer_memory_barriers = [index_bmb.build(), vertex_bmb.build()];
@@ -555,7 +591,7 @@ impl ImGUIPass {
                 1.0 / viewport_extent.width as f32,
                 1.0 / viewport_extent.height as f32,
             );
-            let index_buffer_handle = self.index_buffer.handle;
+            let index_buffer_handle = index_buffer.handle;
             let imgui_descriptor_set = self.descriptor_set;
             let target_view = rg.create_texture_view(target, None);
             let load_op = match clear {

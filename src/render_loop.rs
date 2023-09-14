@@ -21,6 +21,8 @@ pub mod imgui_pass;
 pub trait RenderLoop: Sized {
     fn new(rd: &RenderDevice) -> Option<Self>;
 
+    fn ui(&mut self, _ui: &mut imgui::Ui) {}
+
     fn render(
         &mut self,
         rd: &mut RenderDevice,
@@ -303,19 +305,31 @@ impl RenderLoopDesciptorSets {
 
 pub const MAX_FRAMES_ON_THE_FLY: u32 = 2;
 
+pub enum ResourceType {
+    //Texture(Texture),
+    Buffer(Buffer),
+}
+
 // Common resources to help render loop to support multi on-the-fly frames.
 pub struct StreamLinedFrameResource {
     //command_pool: vk::CommandPool, // TODO destroy it
 
-    // Per-render resource that is accessed by render index.
+    // Index to access per-frame resources
+    render_index: u32,
+
+    // Per-frame resource that is accessed by render index.
     desciptor_sets: RenderLoopDesciptorSets,
     command_buffers: Vec<vk::CommandBuffer>,
     command_buffer_finished_fences: Vec<vk::Fence>,
     present_finished_fences: Vec<vk::Fence>,
     present_ready_semaphores: Vec<vk::Semaphore>,
 
-    // Index to access per-frame resources
-    render_index: u32,
+    // Index to acess per-frame resources, but in double period
+    double_render_index: u32,
+
+    /// Resrouce that is released after MAX_FRAMES_ON_THE_FLY frames.
+    /// Accessed by double render index (push: +MAX_FRAMES_ON_THE_FLY)
+    delayed_release: Vec<Vec<ResourceType>>,
 }
 
 impl StreamLinedFrameResource {
@@ -334,21 +348,28 @@ impl StreamLinedFrameResource {
             present_ready_semaphores.push(rd.create_semaphore());
         }
 
+        let mut delayed_release = Vec::new();
+        for _ in 0..MAX_FRAMES_ON_THE_FLY * 2 {
+            delayed_release.push(Vec::new());
+        }
+
         Self {
             //command_pool,
+            render_index: 0,
             desciptor_sets,
             command_buffers,
             command_buffer_finished_fences,
             present_finished_fences,
             present_ready_semaphores,
-
-            render_index: 0,
+            double_render_index: 0,
+            delayed_release,
         }
     }
 
     // Index into per-render resource arrays (command_buffer, constant_buffer slot, etc.)
     pub fn advance_render_index(&mut self) -> u32 {
         self.render_index = (self.render_index + 1) % (MAX_FRAMES_ON_THE_FLY);
+        self.double_render_index = (self.double_render_index + 1) % (MAX_FRAMES_ON_THE_FLY * 2);
         self.render_index
     }
 
@@ -388,8 +409,29 @@ impl StreamLinedFrameResource {
         (index, elapsed)
     }
 
+    fn delay_release_buffer(&mut self, buffer: Buffer) {
+        self.delay_release(ResourceType::Buffer(buffer));
+    }
+
+    fn delay_release(&mut self, res: ResourceType) {
+        let future_index =
+            (self.double_render_index + MAX_FRAMES_ON_THE_FLY) % (MAX_FRAMES_ON_THE_FLY * 2);
+        self.delayed_release[future_index as usize].push(res);
+    }
+
+    fn release_resources(&mut self, rd: &RenderDevice) {
+        let resources = &mut self.delayed_release[self.double_render_index as usize];
+        for resource in resources.drain(0..) {
+            match resource {
+                ResourceType::Buffer(buffer) => {
+                    rd.destroy_buffer(buffer);
+                }
+            }
+        }
+    }
+
     // Wait for command buffer finished and reset it for recording.
-    pub fn wait_and_reset_command_buffer(&self, rd: &RenderDevice) -> vk::CommandBuffer {
+    pub fn wait_and_reset_command_buffer(&mut self, rd: &RenderDevice) -> vk::CommandBuffer {
         // Fence to make sure previous submit command buffer is finished
         let fence = self.command_buffer_finished_fences[self.render_index as usize];
 
@@ -434,6 +476,9 @@ impl StreamLinedFrameResource {
                 .reset_command_buffer(command_buffer, vk::CommandBufferResetFlags::empty())
                 .unwrap();
         }
+
+        // Good time to release resource if command buffer is finished
+        self.release_resources(rd);
 
         command_buffer
     }

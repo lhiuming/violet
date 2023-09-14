@@ -2,7 +2,7 @@ use ash::vk;
 use glam::{UVec2, Vec3};
 use violet::{
     command_buffer::{CommandBuffer, StencilOps},
-    imgui::ImGUIOuput,
+    imgui::{ImGUIOuput, Ui},
     render_device::{
         Buffer, BufferDesc, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
     },
@@ -82,6 +82,16 @@ impl TAAPass {
     }
 }
 
+pub struct RenderConfig {
+    taa: bool,
+}
+
+impl Default for RenderConfig {
+    fn default() -> Self {
+        Self { taa: true }
+    }
+}
+
 pub struct RestirRenderLoop {
     render_graph_cache: RenderGraphCache,
     stream_lined: StreamLinedFrameResource,
@@ -102,6 +112,8 @@ pub struct RestirRenderLoop {
     total_acquire_duration: std::time::Duration,
     total_wait_duration: std::time::Duration,
     total_present_duration: std::time::Duration,
+
+    config: RenderConfig,
 }
 
 impl RenderLoop for RestirRenderLoop {
@@ -125,7 +137,13 @@ impl RenderLoop for RestirRenderLoop {
             total_acquire_duration: std::time::Duration::ZERO,
             total_wait_duration: std::time::Duration::ZERO,
             total_present_duration: std::time::Duration::ZERO,
+            config: Default::default(),
         })
+    }
+
+    fn ui(&mut self, ui: &mut Ui) {
+        let config = &mut self.config;
+        ui.toggle_value(&mut config.taa, "TAA");
     }
 
     fn print_stat(&self) {
@@ -238,7 +256,7 @@ impl RenderLoop for RestirRenderLoop {
         let scene_tlas = rg.register_accel_struct(scene.scene_top_level_accel_struct.unwrap());
 
         let has_prev_frame: u32;
-        let prev_color = match self.taa.prev_color {
+        let prev_color = match self.taa.prev_color.take() {
             Some(tex) => {
                 has_prev_frame = 1;
                 let tex = rg.convert_to_transient(tex);
@@ -249,7 +267,7 @@ impl RenderLoop for RestirRenderLoop {
                 rg.register_texture_view(self.default_res.dummy_texture.1)
             }
         };
-        let prev_depth = match self.taa.prev_depth {
+        let prev_depth = match self.taa.prev_depth.take() {
             Some(tex) => {
                 let tex = rg.convert_to_transient(tex);
                 rg.create_texture_view(tex, None)
@@ -459,19 +477,21 @@ impl RenderLoop for RestirRenderLoop {
         }
 
         // Pass: TAA
-        let post_taa_color = {
-            let desc = TextureDesc::new_2d(
-                main_size.width,
-                main_size.height,
-                vk::Format::B10G11R11_UFLOAT_PACK32,
-                vk::ImageUsageFlags::STORAGE // compute TAA
+        let post_taa_color;
+        if self.config.taa {
+            post_taa_color = {
+                let desc = TextureDesc::new_2d(
+                    main_size.width,
+                    main_size.height,
+                    vk::Format::B10G11R11_UFLOAT_PACK32,
+                    vk::ImageUsageFlags::STORAGE // compute TAA
                     | vk::ImageUsageFlags::SAMPLED, // history and post
-            );
-            let texture = rg.create_texutre(desc);
-            let view = rg.create_texture_view(texture, None);
-            (texture, view)
-        };
-        {
+                );
+                let texture = rg.create_texutre(desc);
+                let view = rg.create_texture_view(texture, None);
+                (texture, view)
+            };
+
             rg.new_compute("Temporal AA")
                 .compute_shader("temporal_aa.hlsl")
                 .texture("gbuffer_depth", gbuffer.depth.1)
@@ -484,15 +504,19 @@ impl RenderLoop for RestirRenderLoop {
                     div_round_up(main_size.height, 4),
                     1,
                 );
-
-            self.taa
-                .prev_color
-                .replace(rg.convert_to_temporal(&mut self.render_graph_cache, post_taa_color.0));
-            self.taa
-                .prev_depth
-                .replace(rg.convert_to_temporal(&mut self.render_graph_cache, gbuffer.depth.0));
+        } else {
+            post_taa_color = scene_color;
         }
 
+        // Cache scene buffer for next frame (TAA, temporal restir, etc.)
+        self.taa
+            .prev_color
+            .replace(rg.convert_to_temporal(&mut self.render_graph_cache, post_taa_color.0));
+        self.taa
+            .prev_depth
+            .replace(rg.convert_to_temporal(&mut self.render_graph_cache, gbuffer.depth.0));
+
+        // Wait swapchain image
         let (swapchain_image_index, acquire_swapchain_duratiaon) = self
             .stream_lined
             .acquire_next_swapchain_image_with_duration(rd);
@@ -519,6 +543,7 @@ impl RenderLoop for RestirRenderLoop {
             self.imgui_pass.add(
                 &mut rg,
                 rd,
+                &mut self.stream_lined,
                 &mut self.upload_context,
                 present_target.0,
                 imgui,
@@ -535,10 +560,14 @@ impl RenderLoop for RestirRenderLoop {
         // Update frame CB (before submit)
         let exposure = 20.0;
         let sun_inten = Vec3::new(1.0, 1.0, 0.85) * exposure;
-        let jitter_info = Some(JitterInfo {
-            frame_index: self.frame_index,
-            viewport_size: main_size_vec,
-        });
+        let jitter_info = if self.config.taa {
+            Some(JitterInfo {
+                frame_index: self.frame_index,
+                viewport_size: main_size_vec,
+            })
+        } else {
+            None
+        };
         self.stream_lined.update_frame_params(FrameParams::make(
             &view_info,
             jitter_info.as_ref(),

@@ -117,9 +117,6 @@ where
     let mut sun_dir_theta = -0.271f32;
     let mut sun_dir_phi = 0.524f32;
 
-    // UI
-    let mut toggle = false;
-
     // Render loop
     println!("Start RenderLoop: {:?}", type_name::<T>());
     while !window.should_close() {
@@ -251,23 +248,12 @@ where
             }
         }
 
-        // testing
+        // Show GUI
         imgui.begin(imgui.gather_input(window_size, &window));
-
-        let win = egui::Window::new("Main UI Window");
+        let win = egui::Window::new("Render Loop");
         win.show(&imgui.egui_ctx, |ui| {
-            // label
-            ui.add(egui::Label::new("Hello, world"));
-            // button
-            if ui.add(egui::Button::new("CLICK ME😀")).clicked() {
-                toggle = !toggle;
-                println!("clicked")
-            }
-            if toggle {
-                ui.add(egui::Label::new("Yo"));
-            }
+            render_loop.ui(ui);
         });
-
         let imgui_output = imgui.end();
 
         // Render if swapchain is not changed; save a lot troubles :)

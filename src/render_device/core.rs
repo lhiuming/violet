@@ -311,4 +311,15 @@ impl super::RenderDevice {
         unsafe { self.device.create_descriptor_pool(&create_info, None) }
             .expect("Vulkan: failed to create descriptor pool?!")
     }
+
+    pub fn update_descriptor_sets(
+        &self,
+        descriptor_writes: &[vk::WriteDescriptorSet],
+        descriptor_copies: &[vk::CopyDescriptorSet],
+    ) {
+        unsafe {
+            self.device
+                .update_descriptor_sets(descriptor_writes, descriptor_copies)
+        }
+    }
 }
