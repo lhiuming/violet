@@ -623,9 +623,10 @@ impl PassShaderBindingTable {
     fn new(rd: &RenderDevice) -> Self {
         // Device properties
         let handle_size = rd.shader_group_handle_size() as u64;
-        let handle_alignment = rd.shader_group_base_alignment() as u64;
+        let handle_alignment = rd.shader_group_handle_alignment() as u64;
         let base_alignment = rd.shader_group_base_alignment() as u64;
 
+        // routine to align address/stride
         let base_align =
             |offset: u64| ((offset + base_alignment - 1) / base_alignment) * base_alignment;
         let handle_align =
@@ -708,19 +709,20 @@ impl PassShaderBindingTable {
             dst.copy_from_slice(src);
         };
 
-        // copy one by one (due to possible hanele_size (e.g. 32) != handle_alignment (e.g. 64))
-        let buffer_addr = self.sbt.device_address.unwrap();
+        // Copy shader handle to the buffer
+        let base_device_address = self.sbt.device_address.unwrap();
         // raygen
-        let raygen_offset = self.raygen_region.device_address - buffer_addr;
+        let raygen_offset = self.raygen_region.device_address - base_device_address;
         copy_handle(0, raygen_offset);
         // miss
-        let miss_offset = self.miss_region.device_address - buffer_addr;
+        // TODO this one-by-one copy can be just memcpy when shader_group_handle_size == shader_group_handle_alignment
+        let miss_offset = self.miss_region.device_address - base_device_address;
         for i in 0..num_miss {
             copy_handle(1 + i, miss_offset + self.miss_region.stride * i as u64);
         }
         // hit
         if has_hit {
-            let hit_offset = self.hit_region.device_address - self.raygen_region.device_address;
+            let hit_offset = self.hit_region.device_address - base_device_address;
             copy_handle(1 + num_miss, hit_offset);
         }
     }
