@@ -10,8 +10,8 @@ use glam::UVec3;
 use crate::command_buffer::CommandBuffer;
 use crate::gpu_profiling::NamedProfiling;
 use crate::render_device::{
-    AccelerationStructure, Buffer, BufferDesc, RenderDevice, ShaderBindingTableFiller, Texture,
-    TextureDesc, TextureView, TextureViewDesc,
+    AccelerationStructure, Buffer, BufferDesc, RenderDevice, Texture, TextureDesc, TextureView,
+    TextureViewDesc,
 };
 use crate::shader::{
     self, GraphicsDesc, Handle, Pipeline, PushConstantsBuilder, RayTracingDesc, ShaderDefinition,
@@ -123,7 +123,8 @@ struct ComputePassData {
 
 struct RaytracingPassData {
     raygen_shader: Option<ShaderDefinition>,
-    miss_shader: Option<ShaderDefinition>,
+    //miss_shader: Option<ShaderDefinition>,
+    miss_shaders: Vec<ShaderDefinition>,
     chit_shader: Option<ShaderDefinition>,
     desc: RayTracingDesc,
     dimension: UVec3,
@@ -466,7 +467,7 @@ impl<'a, 'render> RaytracingPassBuilder<'a, 'render> {
     pub fn new(render_graph: &'a mut RenderGraphBuilder<'render>, name: &str) -> Self {
         let ty = RenderPassType::RayTracing(RaytracingPassData {
             raygen_shader: None,
-            miss_shader: None,
+            miss_shaders: Vec::new(),
             chit_shader: None,
             desc: RayTracingDesc {
                 ray_recursiion_depth: 1,
@@ -507,11 +508,24 @@ impl<'a, 'render> RaytracingPassBuilder<'a, 'render> {
     }
 
     pub fn miss_shader(&mut self, path: &'static str) -> &mut Self {
-        self.rt().miss_shader.replace(ShaderDefinition {
+        self.rt().miss_shaders.clear();
+        self.rt().miss_shaders.push(ShaderDefinition {
             virtual_path: path,
             entry_point: "main",
             stage: shader::ShaderStage::Miss,
         });
+        self
+    }
+
+    pub fn miss_shaders(&mut self, paths: &[&'static str]) -> &mut Self {
+        self.rt().miss_shaders = paths
+            .iter()
+            .map(|path| ShaderDefinition {
+                virtual_path: path,
+                entry_point: "main",
+                stage: shader::ShaderStage::Miss,
+            })
+            .collect();
         self
     }
 
@@ -520,7 +534,8 @@ impl<'a, 'render> RaytracingPassBuilder<'a, 'render> {
         path: &'static str,
         entry_point: &'static str,
     ) -> &mut Self {
-        self.rt().miss_shader.replace(ShaderDefinition {
+        self.rt().miss_shaders.clear();
+        self.rt().miss_shaders.push(ShaderDefinition {
             virtual_path: path,
             entry_point,
             stage: shader::ShaderStage::Miss,
@@ -592,6 +607,9 @@ where
     }
 }
 
+static MAX_NUM_MISS_SHADERS: u32 = 2;
+//static MAX_NUM_MISS_SHADERS: u32 = 1;
+
 // An internal resource type for ray tracing passes.
 // This kind of passes have just a few shander handles, and no extra data in shader binding tables.
 struct PassShaderBindingTable {
@@ -603,12 +621,30 @@ struct PassShaderBindingTable {
 
 impl PassShaderBindingTable {
     fn new(rd: &RenderDevice) -> Self {
+        // Device properties
         let handle_size = rd.shader_group_handle_size() as u64;
-        let stride = std::cmp::max(handle_size, rd.shader_group_base_alignment() as u64);
+        let handle_alignment = rd.shader_group_base_alignment() as u64;
+        let base_alignment = rd.shader_group_base_alignment() as u64;
+
+        let base_align =
+            |offset: u64| ((offset + base_alignment - 1) / base_alignment) * base_alignment;
+        let handle_align =
+            |stride: u64| ((stride + handle_alignment - 1) / handle_alignment) * handle_alignment;
+
+        // Sub allocate offsets
+        let raygen_size = handle_size;
+        let miss_offset = base_align(raygen_size);
+        let miss_stride = handle_align(handle_size);
+        let miss_size = handle_size + miss_stride * (MAX_NUM_MISS_SHADERS - 1) as u64;
+        let hit_offset = base_align(miss_offset + miss_size);
+        let hit_stride = handle_align(handle_size);
+        let hit_size = handle_size;
+
+        let buffer_size = hit_offset + hit_size;
 
         let sbt = rd
             .create_buffer(BufferDesc {
-                size: handle_size + stride * 2,
+                size: buffer_size,
                 usage: vk::BufferUsageFlags::SHADER_BINDING_TABLE_KHR
                     | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                 memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
@@ -618,20 +654,20 @@ impl PassShaderBindingTable {
 
         let raygen_region = vk::StridedDeviceAddressRegionKHR {
             device_address: sbt.device_address.unwrap(),
-            stride: handle_size,
-            size: handle_size,
+            stride: raygen_size, // required by spec
+            size: raygen_size,
         };
 
         let miss_region = vk::StridedDeviceAddressRegionKHR {
-            device_address: sbt.device_address.unwrap() + stride,
-            stride: handle_size,
-            size: handle_size,
+            device_address: sbt.device_address.unwrap() + miss_offset,
+            stride: miss_stride,
+            size: miss_size,
         };
 
         let hit_region = vk::StridedDeviceAddressRegionKHR {
-            device_address: sbt.device_address.unwrap() + stride * 2,
-            stride: handle_size,
-            size: handle_size,
+            device_address: sbt.device_address.unwrap() + hit_offset,
+            stride: hit_stride,
+            size: hit_size,
         };
 
         Self {
@@ -646,21 +682,46 @@ impl PassShaderBindingTable {
         &mut self,
         rd: &RenderDevice,
         pipeline: &Pipeline,
+        num_miss: u32,
         has_hit: bool,
     ) {
+        assert!(num_miss > 0);
+        assert!(num_miss <= MAX_NUM_MISS_SHADERS);
+
         // TODO check shader change
-        let group_count = if has_hit { 3 } else { 2 };
+        let group_count = 1 + num_miss + if has_hit { 1 } else { 0 };
         let handle_data = rd.get_shader_group_handles(pipeline.handle, 0, group_count);
-        let mut filler = ShaderBindingTableFiller::new(
-            &rd.physical.ray_tracing_pipeline_properties,
-            self.sbt.data,
-        );
-        filler.write_handles(&handle_data, 0, 1);
-        filler.start_group();
-        filler.write_handles(&handle_data, 1, 1);
+
+        // procedure to copy a shader handle
+        let handle_size = rd.shader_group_handle_size();
+        let copy_handle = |handle_index: u32, dst_offset: u64| unsafe {
+            let src = std::slice::from_raw_parts(
+                handle_data
+                    .as_ptr()
+                    .offset((handle_size * handle_index) as isize),
+                handle_size as usize,
+            );
+            let dst = std::slice::from_raw_parts_mut(
+                self.sbt.data.offset(dst_offset as isize),
+                handle_size as usize,
+            );
+            dst.copy_from_slice(src);
+        };
+
+        // copy one by one (due to possible hanele_size (e.g. 32) != handle_alignment (e.g. 64))
+        let buffer_addr = self.sbt.device_address.unwrap();
+        // raygen
+        let raygen_offset = self.raygen_region.device_address - buffer_addr;
+        copy_handle(0, raygen_offset);
+        // miss
+        let miss_offset = self.miss_region.device_address - buffer_addr;
+        for i in 0..num_miss {
+            copy_handle(1 + i, miss_offset + self.miss_region.stride * i as u64);
+        }
+        // hit
         if has_hit {
-            filler.start_group();
-            filler.write_handles(&handle_data, 2, 1);
+            let hit_offset = self.hit_region.device_address - self.raygen_region.device_address;
+            copy_handle(1 + num_miss, hit_offset);
         }
     }
 }
@@ -1710,7 +1771,7 @@ impl RenderGraphBuilder<'_> {
                 RenderPassType::RayTracing(rt) => shaders
                     .create_raytracing_pipeline(
                         rt.raygen_shader.unwrap(),
-                        rt.miss_shader.unwrap(),
+                        &rt.miss_shaders,
                         rt.chit_shader,
                         &rt.desc,
                         &self.shader_config,
@@ -1826,11 +1887,12 @@ impl RenderGraphBuilder<'_> {
 
                     // update anyway :)
                     // TODO using frame index % 3 to void cpu-write-on-GPU-read; should do it with proper synchronization
+                    let num_miss = rt.miss_shaders.len() as u32;
                     let has_hit = rt.chit_shader.is_some();
                     let pipeline = shaders
                         .get_pipeline(exec_context.pipelines[pass_index])
                         .unwrap();
-                    sbt.update_shader_group_handles(rd, pipeline, has_hit);
+                    sbt.update_shader_group_handles(rd, pipeline, num_miss, has_hit);
 
                     Some(sbt)
                 }

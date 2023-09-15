@@ -12,7 +12,7 @@ pub mod texture;
 pub use self::buffer::{Buffer, BufferDesc};
 pub use self::core::RenderDevice;
 pub use self::physical::PhysicalDevice;
-pub use self::raytracing::{AccelerationStructure, ShaderBindingTableFiller};
+pub use self::raytracing::AccelerationStructure;
 pub use self::swapchain::{Surface, Swapchain};
 pub use self::texture::{Texture, TextureDesc, TextureView, TextureViewDesc};
 
@@ -38,6 +38,13 @@ impl RenderDevice {
         self.physical
             .ray_tracing_pipeline_properties
             .shader_group_handle_size
+    }
+
+    #[inline]
+    pub fn shader_group_handle_alignment(&self) -> u32 {
+        self.physical
+            .ray_tracing_pipeline_properties
+            .shader_group_handle_alignment
     }
 
     #[inline]

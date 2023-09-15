@@ -90,8 +90,15 @@ pub struct Shaders {
     pipeline_device: PipelineDevice,
     gfx_pipelines_map: HashMap<(ShaderDefinition, ShaderDefinition), Handle<Pipeline>>,
     compute_pipelines_map: HashMap<ShaderDefinition, Handle<Pipeline>>,
-    raytracing_pipelines_map:
-        HashMap<(ShaderDefinition, ShaderDefinition, Option<ShaderDefinition>), Handle<Pipeline>>,
+    // TODO trim down this monsterous 'key' type
+    raytracing_pipelines_map: HashMap<
+        (
+            ShaderDefinition,
+            Vec<ShaderDefinition>,
+            Option<ShaderDefinition>,
+        ),
+        Handle<Pipeline>,
+    >,
     shader_loader: ShaderLoader,
 
     pipelines: Vec<Pipeline>,
@@ -171,18 +178,23 @@ impl Shaders {
     pub fn create_raytracing_pipeline(
         &mut self,
         ray_gen_def: ShaderDefinition,
-        miss_def: ShaderDefinition,
+        miss_def: &[ShaderDefinition],
         hit_def: Option<ShaderDefinition>,
         desc: &RayTracingDesc,
         hack: &ShadersConfig,
     ) -> Option<Handle<Pipeline>> {
-        let key = (ray_gen_def, miss_def, hit_def);
+        assert!(miss_def.len() > 0);
+
+        let key = (ray_gen_def, miss_def.to_vec(), hit_def);
 
         if !self.raytracing_pipelines_map.contains_key(&key) {
             let raygen_cs = self
                 .shader_loader
                 .load(&self.pipeline_device, &ray_gen_def)?;
-            let miss_cs = self.shader_loader.load(&self.pipeline_device, &miss_def)?;
+            let miss_cs: Vec<_> = miss_def
+                .iter()
+                .map(|def| self.shader_loader.load(&self.pipeline_device, def).unwrap())
+                .collect();
             let closest_hit = match hit_def {
                 Some(def) => Some(self.shader_loader.load(&self.pipeline_device, &def)?),
                 None => None,
@@ -843,20 +855,25 @@ pub fn create_compute_pipeline(
 pub fn create_raytracing_pipeline(
     device: &PipelineDevice,
     raygen: &CompiledShader,
-    miss: &CompiledShader,
+    miss: &[CompiledShader],
     closest_hit: &Option<CompiledShader>,
     desc: &RayTracingDesc,
     hack: &ShadersConfig,
 ) -> Option<Pipeline> {
+    assert!(miss.len() > 0);
+
     let raytracing_entry = device.raytracing_entry.as_ref()?;
 
-    let mut stages_info = vec![
+    let mut stages_info = vec![(
+        vk::ShaderStageFlags::RAYGEN_KHR,
+        &raygen.program.reflect_module,
+    )];
+    stages_info.extend(miss.iter().map(|shader| {
         (
-            vk::ShaderStageFlags::RAYGEN_KHR,
-            &raygen.program.reflect_module,
-        ),
-        (vk::ShaderStageFlags::MISS_KHR, &miss.program.reflect_module),
-    ];
+            vk::ShaderStageFlags::MISS_KHR,
+            &shader.program.reflect_module,
+        )
+    }));
     if let Some(chit) = closest_hit {
         stages_info.push((
             vk::ShaderStageFlags::CLOSEST_HIT_KHR,
@@ -888,15 +905,20 @@ pub fn create_raytracing_pipeline(
         unsafe { device.device.create_pipeline_layout(&create_info, None) }.ok()?
     };
 
-    let raygen = vk::PipelineShaderStageCreateInfo::builder()
+    let raygen_info = vk::PipelineShaderStageCreateInfo::builder()
         .stage(vk::ShaderStageFlags::RAYGEN_KHR)
         .module(raygen.program.shader_module)
         .name(&raygen.program.entry_point_c);
-    let miss = vk::PipelineShaderStageCreateInfo::builder()
-        .stage(vk::ShaderStageFlags::MISS_KHR)
-        .module(miss.program.shader_module)
-        .name(&miss.program.entry_point_c);
-    let mut stages = vec![*raygen, *miss];
+
+    let mut stages = vec![*raygen_info];
+
+    stages.extend(miss.iter().map(|shader| {
+        vk::PipelineShaderStageCreateInfo::builder()
+            .stage(vk::ShaderStageFlags::MISS_KHR)
+            .module(shader.program.shader_module)
+            .name(&shader.program.entry_point_c)
+            .build()
+    }));
 
     if let Some(chit) = closest_hit {
         let info = vk::PipelineShaderStageCreateInfo::builder()
@@ -906,27 +928,32 @@ pub fn create_raytracing_pipeline(
         stages.push(*info);
     }
 
+    // raygen shader as first group
     let raygen_group = vk::RayTracingShaderGroupCreateInfoKHR::builder()
         .ty(vk::RayTracingShaderGroupTypeKHR::GENERAL)
         .general_shader(0)
-        .closest_hit_shader(vk::SHADER_UNUSED_KHR) // TODO
-        .any_hit_shader(vk::SHADER_UNUSED_KHR) // TODO
-        .intersection_shader(vk::SHADER_UNUSED_KHR)
-        .build();
-    let miss_group = vk::RayTracingShaderGroupCreateInfoKHR::builder()
-        .ty(vk::RayTracingShaderGroupTypeKHR::GENERAL)
-        .general_shader(1)
         .closest_hit_shader(vk::SHADER_UNUSED_KHR)
         .any_hit_shader(vk::SHADER_UNUSED_KHR)
         .intersection_shader(vk::SHADER_UNUSED_KHR)
         .build();
-    let mut groups = vec![raygen_group, miss_group];
-
+    let mut groups = vec![raygen_group];
+    // miss shaders are placed after the raygen shader
+    groups.extend((0..miss.len() as u32).map(|miss_index| {
+        vk::RayTracingShaderGroupCreateInfoKHR::builder()
+            .ty(vk::RayTracingShaderGroupTypeKHR::GENERAL)
+            .general_shader(1 + miss_index) // always one raygen before
+            .closest_hit_shader(vk::SHADER_UNUSED_KHR)
+            .any_hit_shader(vk::SHADER_UNUSED_KHR)
+            .intersection_shader(vk::SHADER_UNUSED_KHR)
+            .build()
+    }));
+    // closest hit shader place after miss shaders
     if closest_hit.is_some() {
+        let chit_index = 1 + miss.len() as u32; // one raygen and few miss shaders before
         let hit_group = vk::RayTracingShaderGroupCreateInfoKHR::builder()
             .ty(vk::RayTracingShaderGroupTypeKHR::TRIANGLES_HIT_GROUP)
             .general_shader(vk::SHADER_UNUSED_KHR) // NOTE: device lost if left as zero
-            .closest_hit_shader(2)
+            .closest_hit_shader(chit_index)
             .any_hit_shader(vk::SHADER_UNUSED_KHR)
             .intersection_shader(vk::SHADER_UNUSED_KHR)
             .build();
