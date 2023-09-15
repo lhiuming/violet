@@ -132,14 +132,24 @@ float smith_G2_over_G1_height_correlated_GGX(float NoL, float NoV, float roughne
 #endif
 }
 
+// Diffuse color for Metallic workflow 
+float3 get_diffuse_rho(float3 base_color, float metallic) {
+    return base_color.rgb * (1.0f - metallic);
+}
+
+// Specular color for Metallic workflow
+float3 get_specular_f0(float3 base_color, float metallic) {
+    return lerp((0.04f).xxx, base_color.rgb, metallic);
+}
+
 // Combined BRDF evaluation
 float3 eval_GGX_Lambertian(float3 v, float3 l, float3 n, float perceptual_roughness, float3 diffuse_rho, float3 specular_f0) {
 	float3 h = normalize(v + l);
 
     float NoV = abs(dot(n, v)) + 1e-5;
-    float NoL = clamp(dot(n, l), 0.0, 1.0);
-    float NoH = clamp(dot(n, h), 0.0, 1.0);
-    float LoH = clamp(dot(l, h), 0.0, 1.0);
+    float NoL = saturate(dot(n, l));
+    float NoH = saturate(dot(n, h));
+    float LoH = saturate(dot(l, h));
 
     // perceptually linear roughness to roughness
     float roughness = perceptual_roughness * perceptual_roughness;

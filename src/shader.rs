@@ -1,5 +1,6 @@
 use std::collections::{hash_map::Entry, BTreeMap, HashMap};
 use std::ffi::CString;
+use std::mem::size_of;
 
 use ash::extensions::khr;
 use ash::vk;
@@ -1318,8 +1319,11 @@ impl PushConstantsBuilder {
 
     pub fn push_inplace<T>(&mut self, value: &T)
     where
-        T: Copy,
+        T: Copy + Sized,
     {
+        // Push constant size must be a multiple of 4; we assume each push is a complete field.
+        assert!(size_of::<T>() % 4 == 0);
+
         let size = std::mem::size_of::<T>();
         let offset = self.data.len();
         self.data.resize(offset + size, 0);

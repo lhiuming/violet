@@ -56,12 +56,14 @@ impl DefaultResources {
 
 struct SampleGenPass {
     prev_reservoir_buffer: Option<RGTemporal<Buffer>>,
+    prev_indirect_diffuse_texture: Option<RGTemporal<Texture>>,
 }
 
 impl SampleGenPass {
     fn new() -> Self {
         Self {
             prev_reservoir_buffer: None,
+            prev_indirect_diffuse_texture: None,
         }
     }
 }
@@ -193,6 +195,7 @@ impl RenderLoop for RestirRenderLoop {
 
         let main_size = rd.swapchain.extent;
         let main_size_vec = UVec2::new(main_size.width, main_size.height);
+        let main_size_flat = main_size.width * main_size.height;
 
         let mut rg = RenderGraphBuilder::new_with_shader_config(shader_config);
 
@@ -255,18 +258,8 @@ impl RenderLoop for RestirRenderLoop {
 
         let scene_tlas = rg.register_accel_struct(scene.scene_top_level_accel_struct.unwrap());
 
-        let has_prev_frame: u32;
-        let prev_color = match self.taa.prev_color.take() {
-            Some(tex) => {
-                has_prev_frame = 1;
-                let tex = rg.convert_to_transient(tex);
-                rg.create_texture_view(tex, None)
-            }
-            None => {
-                has_prev_frame = 0;
-                rg.register_texture_view(self.default_res.dummy_texture.1)
-            }
-        };
+        // depth buffer from last frame
+        let has_prev_depth = self.taa.prev_depth.is_some();
         let prev_depth = match self.taa.prev_depth.take() {
             Some(tex) => {
                 let tex = rg.convert_to_transient(tex);
@@ -275,56 +268,53 @@ impl RenderLoop for RestirRenderLoop {
             None => rg.register_texture_view(self.default_res.dummy_texture.1),
         };
 
-        let indirect_diffuse = {
-            let desc = TextureDesc::new_2d(
-                main_size.width,
-                main_size.height,
-                vk::Format::B10G11R11_UFLOAT_PACK32,
-                vk::ImageUsageFlags::COLOR_ATTACHMENT // sky rendering
-                    | vk::ImageUsageFlags::STORAGE // compute lighting
-                    | vk::ImageUsageFlags::SAMPLED, // taa
-            );
-            let texture = rg.create_texutre(desc);
-            let view = rg.create_texture_view(texture, None);
-            (texture, view)
+        // indirect diffuse from last frame
+        let has_prev_indirect_diffuse = self.sample_gen.prev_indirect_diffuse_texture.is_some();
+        let prev_indirect_diffuse_texture =
+            match self.sample_gen.prev_indirect_diffuse_texture.take() {
+                Some(tex) => {
+                    let tex = rg.convert_to_transient(tex);
+                    rg.create_texture_view(tex, None)
+                }
+                None => rg.register_texture_view(self.default_res.dummy_texture.1),
+            };
+
+        // resercoir buffer from last frame
+        let has_prev_reservoir = self.sample_gen.prev_reservoir_buffer.is_some();
+        let prev_reservoir_buffer = match self.sample_gen.prev_reservoir_buffer {
+            Some(buffer) => rg.convert_to_transient(buffer),
+            None => rg.register_buffer(self.default_res.dummy_buffer),
         };
 
-        let main_len = main_size.width * main_size.height;
-        let temporal_reservoir_buffer =
-            rg.create_buffer(BufferDesc::compute(main_len as u64 * 24 * 4));
-
-        // bind a dummy texture if we don't have prev frame reservoir
-        let prev_reservoir_buffer = if let Some(buffer) = self.sample_gen.prev_reservoir_buffer {
-            rg.convert_to_transient(buffer)
-        } else {
-            rg.register_buffer(self.default_res.dummy_buffer)
-        };
-
-        let is_validation_frame =
-            self.sample_gen.prev_reservoir_buffer.is_some() && ((self.frame_index % 6) == 0);
-
-        let has_new_sample;
-        let new_sample_buffer;
+        let is_validation_frame = has_prev_reservoir && ((self.frame_index % 6) == 0);
 
         // Pass: Sample Generation (and temporal reusing)
+        let has_new_sample;
+        let new_sample_buffer;
         if !is_validation_frame {
             has_new_sample = 1u32;
-            new_sample_buffer = rg.create_buffer(BufferDesc::compute(main_len as u64 * 5 * 4 * 4));
+            new_sample_buffer =
+                rg.create_buffer(BufferDesc::compute(main_size_flat as u64 * 5 * 4 * 4));
+
+            let has_prev_indirect = (has_prev_depth && has_prev_indirect_diffuse) as u32;
 
             rg.new_raytracing("Sample Gen")
                 .raygen_shader("restir/sample_gen.hlsl")
-                .miss_shader("raytrace/geometry.rmiss.hlsl")
+                .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
                 .closest_hit_shader("raytrace/geometry.rchit.hlsl")
                 .accel_struct("scene_tlas", scene_tlas)
                 .texture("skycube", skycube)
-                .texture("prev_color", prev_color)
+                .texture(
+                    "prev_indirect_diffuse_texture",
+                    prev_indirect_diffuse_texture,
+                )
                 .texture("prev_depth", prev_depth)
                 .texture("gbuffer_depth", gbuffer.depth.1)
                 .texture("gbuffer_color", gbuffer.color.1)
                 .buffer("rw_new_sample_buffer", new_sample_buffer)
                 //.rw_texture("rw_debug_texture", debug_texture.1)
                 .push_constant(&self.frame_index)
-                .push_constant(&has_prev_frame)
+                .push_constant(&has_prev_indirect)
                 .dimension(main_size.width, main_size.height, 1);
         }
         // Pass: Sample Validation
@@ -334,16 +324,22 @@ impl RenderLoop for RestirRenderLoop {
 
             rg.new_raytracing("Sample Validate")
                 .raygen_shader("restir/sample_validate.hlsl")
-                .miss_shader("raytrace/geometry.rmiss.hlsl")
+                .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
                 .closest_hit_shader("raytrace/geometry.rchit.hlsl")
                 .accel_struct("scene_tlas", scene_tlas)
                 .texture("skycube", skycube)
-                .texture("prev_color", prev_color)
+                .texture(
+                    "prev_indirect_diffuse_texture",
+                    prev_indirect_diffuse_texture,
+                )
                 .texture("prev_depth", prev_depth)
                 .rw_buffer("rw_prev_reservoir_buffer", prev_reservoir_buffer)
                 //.rw_texture("rw_debug_texture", debug_texture.1)
                 .dimension(main_size.width, main_size.height, 1);
         }
+
+        let temporal_reservoir_buffer =
+            rg.create_buffer(BufferDesc::compute(main_size_flat as u64 * 24 * 4));
 
         // Pass: Temporal Resampling
         rg.new_compute("Temporal Resample")
@@ -355,12 +351,27 @@ impl RenderLoop for RestirRenderLoop {
             .buffer("prev_reservoir_buffer", prev_reservoir_buffer)
             .buffer("rw_temporal_reservoir_buffer", temporal_reservoir_buffer)
             .push_constant(&self.frame_index)
-            .push_constant(&has_prev_frame)
+            .push_constant(&(has_prev_reservoir as u32))
             .push_constant(&has_new_sample)
             .group_count_uvec3(div_round_up_uvec2(main_size_vec, UVec2::new(8, 4)).extend(1));
 
         // Pass: Spatial Resampling
+        let indirect_diffuse;
         {
+            indirect_diffuse = {
+                let desc = TextureDesc::new_2d(
+                    main_size.width,
+                    main_size.height,
+                    vk::Format::B10G11R11_UFLOAT_PACK32,
+                    vk::ImageUsageFlags::COLOR_ATTACHMENT // sky rendering
+                    | vk::ImageUsageFlags::STORAGE // compute lighting
+                    | vk::ImageUsageFlags::SAMPLED, // taa
+                );
+                let texture = rg.create_texutre(desc);
+                let view = rg.create_texture_view(texture, None);
+                (texture, view)
+            };
+
             let reservoir_buffer_desc = rg.get_buffer_desc(temporal_reservoir_buffer);
             let spatial_reservoir_buffer = rg.create_buffer(*reservoir_buffer_desc);
 
@@ -379,9 +390,12 @@ impl RenderLoop for RestirRenderLoop {
                     1,
                 );
 
-            let temporal =
-                rg.convert_to_temporal(&mut self.render_graph_cache, spatial_reservoir_buffer);
-            self.sample_gen.prev_reservoir_buffer.replace(temporal);
+            self.sample_gen.prev_reservoir_buffer.replace(
+                rg.convert_to_temporal(&mut self.render_graph_cache, spatial_reservoir_buffer),
+            );
+            self.sample_gen
+                .prev_indirect_diffuse_texture
+                .replace(rg.convert_to_temporal(&mut self.render_graph_cache, indirect_diffuse.0));
         }
 
         // Pass: Raytraced Shadow
@@ -396,8 +410,8 @@ impl RenderLoop for RestirRenderLoop {
         };
         {
             rg.new_raytracing("Raytraced Shadow")
-                .raygen_shader_with_ep("raytraced_shadow.hlsl", "raygen")
-                .miss_shader_with_ep("raytraced_shadow.hlsl", "miss")
+                .raygen_shader("raytraced_shadow.hlsl")
+                .miss_shader("raytrace/shadow.rmiss.hlsl")
                 .accel_struct("scene_tlas", scene_tlas)
                 .texture("gbuffer_depth", gbuffer.depth.1)
                 .rw_texture("rw_shadow", raytraced_shadow_mask.1)
@@ -476,6 +490,15 @@ impl RenderLoop for RestirRenderLoop {
                 );
         }
 
+        let has_prev_color = self.taa.prev_color.is_some() as u32;
+        let prev_color = match self.taa.prev_color.take() {
+            Some(tex) => {
+                let tex = rg.convert_to_transient(tex);
+                rg.create_texture_view(tex, None)
+            }
+            None => rg.register_texture_view(self.default_res.dummy_texture.1),
+        };
+
         // Pass: TAA
         let post_taa_color;
         if self.config.taa {
@@ -498,7 +521,7 @@ impl RenderLoop for RestirRenderLoop {
                 .texture("source_texture", scene_color.1)
                 .texture("history_texture", prev_color)
                 .rw_texture("rw_target", post_taa_color.1)
-                .push_constant(&has_prev_frame)
+                .push_constant(&has_prev_color)
                 .group_count(
                     div_round_up(main_size.width, 8),
                     div_round_up(main_size.height, 4),

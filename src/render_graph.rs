@@ -286,7 +286,7 @@ pub trait PassBuilderTrait<'render>: PrivatePassBuilderTrait<'render> {
 
     fn push_constant<T>(&mut self, value: &T) -> &mut Self
     where
-        T: Copy,
+        T: Copy + Sized,
     {
         self.inner().push_constants.push_inplace::<T>(value);
         self
@@ -708,6 +708,13 @@ impl PassShaderBindingTable {
             );
             dst.copy_from_slice(src);
         };
+        let empty_handle = |dst_offset: u64| unsafe {
+            let dst = std::slice::from_raw_parts_mut(
+                self.sbt.data.offset(dst_offset as isize),
+                handle_size as usize,
+            );
+            dst.fill(0);
+        };
 
         // Copy shader handle to the buffer
         let base_device_address = self.sbt.device_address.unwrap();
@@ -719,6 +726,10 @@ impl PassShaderBindingTable {
         let miss_offset = self.miss_region.device_address - base_device_address;
         for i in 0..num_miss {
             copy_handle(1 + i, miss_offset + self.miss_region.stride * i as u64);
+        }
+        // clear the remaining handle slots, for sanity
+        for i in num_miss..MAX_NUM_MISS_SHADERS {
+            empty_handle(miss_offset + self.miss_region.stride * (i + num_miss) as u64);
         }
         // hit
         if has_hit {

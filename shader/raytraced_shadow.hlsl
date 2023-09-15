@@ -1,16 +1,13 @@
 #include "scene_bindings.hlsl"
 #include "frame_bindings.hlsl"
+#include "raytrace/shadow_ray.hlsli"
 
 RaytracingAccelerationStructure scene_tlas;
 Texture2D<float> gbuffer_depth;
 RWTexture2D<float4> rw_shadow;
 
-struct Payload {
-    bool missed;
-};
-
 [shader("raygeneration")]
-void raygen() {
+void main() {
     uint3 dispatch_ray_index = DispatchRaysIndex();
     float depth = gbuffer_depth[dispatch_ray_index.xy];
 
@@ -32,7 +29,7 @@ void raygen() {
 	float4 position_ws_h = mul(view_params().inv_view_proj, float4(screen_pos * 2.0f - 1.0f, depth + depth_error, 1.0f));
 	float3 position_ws = position_ws_h.xyz / position_ws_h.w;
 
-    Payload payload;
+    ShadowRayPayload payload;
     payload.missed = false;
     RayDesc ray;
     ray.Origin = position_ws;
@@ -53,10 +50,4 @@ void raygen() {
         );
 
     rw_shadow[dispatch_ray_index.xy] = payload.missed ? 1.0f : 0.0f;
-}
-
-[shader("miss")]
-void miss(inout Payload payload)
-{
-    payload.missed = true;
 }

@@ -5,7 +5,7 @@
 #include "../sampling.hlsl"
 #include "../util.hlsl"
 
-#include "raytrace.hlsli"
+#include "raytrace.inc.hlsl"
 #include "reservoir.hlsl"
 
 Texture2D<float> gbuffer_depth;
@@ -57,7 +57,7 @@ void main()
     }
 
     // Raytrace
-    TraceResult trace_result = trace(position_ws, sample_dir, pc.has_prev_frame);
+    RadianceTraceResult trace_result = trace_radiance(position_ws, sample_dir, pc.has_prev_frame);
 
     const RestirSample new_sample = make_restir_sample(
         position_ws,

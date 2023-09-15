@@ -1,5 +1,7 @@
 #pragma once
 
+#include "brdf.hlsl"
+
 struct GBuffer
 {
     float3 color;
@@ -94,10 +96,10 @@ bool has_no_geometry(GBuffer gbuffer) {
 
 // Diffuse color
 float3 get_diffuse_rho(GBuffer gbuffer) {
-    return gbuffer.color.rgb * (1.0f - gbuffer.metallic);
+    return get_diffuse_rho(gbuffer.color.rgb, gbuffer.metallic);
 }
 
 // Specular color
 float3 get_specular_f0(GBuffer gbuffer) {
-    return lerp(0.04f.xxx, gbuffer.color.rgb, gbuffer.metallic);
+    return get_specular_f0(gbuffer.color.rgb, gbuffer.metallic);
 }

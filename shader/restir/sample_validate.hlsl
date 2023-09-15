@@ -5,7 +5,7 @@
 #include "../sampling.hlsl"
 #include "../util.hlsl"
 
-#include "raytrace.hlsli"
+#include "raytrace.inc.hlsl"
 #include "reservoir.hlsl"
 
 #define DO_VALIDATION 1
@@ -48,7 +48,7 @@ void main()
     float3 sample_dir_ws = normalize(reservoir.z.hit_pos - sample_origin_ws);
 
     // Trace for up-to-date radiance
-    TraceResult hit = trace(sample_origin_ws, sample_dir_ws, true);
+    RadianceTraceResult hit = trace_radiance(sample_origin_ws, sample_dir_ws, true);
 
     // Just replace the sample if too different
     // TODO should blend in natually
