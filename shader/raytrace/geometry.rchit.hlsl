@@ -1,7 +1,7 @@
 #include "../frame_bindings.hlsl"
 #include "../scene_bindings.hlsl"
 
-#include "geometry_ray.hlsli"
+#include "geometry_ray.inc.hlsl"
 
 // ----------------
 // Geometry loading
@@ -93,11 +93,7 @@ void main(inout GeometryRayPayload payload, in Attribute attr) {
     payload.normal_ws = normal_ws;
     payload.normal_geo_ws = normal_geo;
     payload.position_ws = position_ws;
-#if WHITE_FURNACE
-    payload.base_color = 1.0f;
-#else
     payload.base_color = base_color.xyz;
-#endif
     payload.metallic = metal_rough.b;
     payload.perceptual_roughness = metal_rough.g;
     payload.mesh_index = mesh_index;

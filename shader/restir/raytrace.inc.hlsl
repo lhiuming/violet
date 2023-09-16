@@ -2,8 +2,8 @@
 
 #include "../brdf.hlsl"
 #include "../frame_bindings.hlsl"
-#include "../raytrace/geometry_ray.hlsli"
-#include "../raytrace/shadow_ray.hlsli"
+#include "../raytrace/geometry_ray.inc.hlsl"
+#include "../raytrace/shadow_ray.inc.hlsl"
 #include "../sampling.hlsl"
 
 RaytracingAccelerationStructure scene_tlas;

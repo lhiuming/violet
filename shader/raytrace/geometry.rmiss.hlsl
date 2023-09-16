@@ -1,4 +1,4 @@
-#include "geometry_ray.hlsli"
+#include "geometry_ray.inc.hlsl"
 
 [shader("miss")]
 void main(inout GeometryRayPayload payload)

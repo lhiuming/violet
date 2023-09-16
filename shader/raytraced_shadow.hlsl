@@ -1,6 +1,6 @@
 #include "scene_bindings.hlsl"
 #include "frame_bindings.hlsl"
-#include "raytrace/shadow_ray.hlsli"
+#include "raytrace/shadow_ray.inc.hlsl"
 
 RaytracingAccelerationStructure scene_tlas;
 Texture2D<float> gbuffer_depth;
