@@ -1,4 +1,5 @@
 use ash::vk;
+use glam::UVec2;
 
 use crate::{
     command_buffer::StencilOps,
@@ -14,10 +15,10 @@ pub struct GBuffer {
     pub depth: GBufferTexture,
     pub color: GBufferTexture,
     pub color_clear: vk::ClearColorValue,
-    pub size: vk::Extent2D,
+    pub size: UVec2,
 }
 
-pub fn create_gbuffer_textures(rg: &mut RenderGraphBuilder, size: vk::Extent2D) -> GBuffer {
+pub fn create_gbuffer_textures(rg: &mut RenderGraphBuilder, size: UVec2) -> GBuffer {
     // helper
     let mut create_gbuffer = |format: vk::Format| {
         let is_depth = texture::format_has_depth(format);
@@ -26,7 +27,7 @@ pub fn create_gbuffer_textures(rg: &mut RenderGraphBuilder, size: vk::Extent2D) 
         } else {
             vk::ImageUsageFlags::COLOR_ATTACHMENT
         } | vk::ImageUsageFlags::SAMPLED;
-        let desc = TextureDesc::new_2d(size.width, size.height, format, usage);
+        let desc = TextureDesc::new_2d(size.x, size.y, format, usage);
         let texture = rg.create_texutre(desc);
         let view = rg.create_texture_view(texture, None);
 

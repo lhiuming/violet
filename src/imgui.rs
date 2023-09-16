@@ -121,6 +121,11 @@ impl ImGUI {
         add_ui: impl FnOnce(&egui::Context),
     ) -> ImGUIOuput {
         self.begin(self.gather_input(window_size, window));
+        let mut style = egui::Style::default();
+        style
+            .override_text_style
+            .replace(egui::TextStyle::Monospace);
+        self.egui_ctx.set_style(style);
         add_ui(&self.egui_ctx);
         self.end()
     }

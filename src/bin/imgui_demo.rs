@@ -19,7 +19,7 @@ pub struct ImGUIDemoRenderLoop {
 }
 
 impl RenderLoop for ImGUIDemoRenderLoop {
-    fn new(rd: &RenderDevice) -> Option<Self> {
+    fn new(rd: &mut RenderDevice) -> Option<Self> {
         Some(Self {
             stream_lined: StreamLinedFrameResource::new(rd),
             render_graph_cache: RenderGraphCache::new(rd),
@@ -43,7 +43,7 @@ impl RenderLoop for ImGUIDemoRenderLoop {
             FRAME_DESCRIPTOR_SET_INDEX,
             self.stream_lined.get_set_layout(),
         );
-        let mut rg = RenderGraphBuilder::new_with_shader_config(shader_config);
+        let mut rg = RenderGraphBuilder::new(&mut self.render_graph_cache, shader_config);
         rg.add_global_descriptor_sets(&[(
             FRAME_DESCRIPTOR_SET_INDEX,
             self.stream_lined.get_frame_desciptor_set(),

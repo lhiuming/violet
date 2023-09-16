@@ -24,12 +24,13 @@ Reference:
 RaytracingAccelerationStructure scene_tlas;
 TextureCube<float4> skycube;
 RWTexture2D<float4> rw_accumulated;
-RWTexture2D<float4> rw_lighting;
+RWTexture2D<float3> rw_lighting;
 
 struct PushConstants
 {
     uint frame_index;
     uint accumulated_count;
+    uint stop_accumuate;
 };
 [[vk::push_constant]]
 PushConstants pc;
@@ -58,6 +59,11 @@ struct Payload {
 [shader("raygeneration")]
 void raygen() {
     uint2 dispatch_id = DispatchRaysIndex().xy;
+
+    if (bool(pc.stop_accumuate)) {
+        rw_lighting[dispatch_id] = rw_accumulated[dispatch_id].xyz / pc.accumulated_count;
+        return;
+    }
 
     uint2 buffer_size;
     rw_accumulated.GetDimensions(buffer_size.x, buffer_size.y);
@@ -321,15 +327,15 @@ void raygen() {
 
     // Update accumulation buffer
     float3 accu_radiance = radiance;
-    if (pc.accumulated_count > 1)
+    if (pc.accumulated_count > 0)
     {
         accu_radiance += rw_accumulated[dispatch_id].xyz;
     }
     rw_accumulated[dispatch_id.xy] = float4(accu_radiance, 1.0f);
 
     // Write output for this frame
-    float3 avg_radiance = accu_radiance / pc.accumulated_count;
-    rw_lighting[dispatch_id.xy] = float4(avg_radiance, 1.0f);
+    float3 avg_radiance = accu_radiance / (pc.accumulated_count + 1);
+    rw_lighting[dispatch_id.xy] = avg_radiance;
 
 #if 0
     if (debug_color.a > 0.0f)

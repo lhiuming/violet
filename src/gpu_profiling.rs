@@ -255,7 +255,7 @@ impl NamedProfiling {
         println!("GPU Profiling: ({} entries)", count);
         for entry in self.entries.iter() {
             let avg_time = entry.total_time_ms / (entry.total_count as f64);
-            println!("\t{:>24}: {:.2}ms", entry.name, avg_time);
+            println!("\t{:>16}: {:.4}ms", entry.name, avg_time);
         }
     }
 }

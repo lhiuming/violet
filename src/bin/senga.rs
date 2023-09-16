@@ -1,6 +1,6 @@
 use std::f32::consts::PI;
 
-use glam::Vec3;
+use glam::{UVec2, Vec3};
 
 use violet::{
     command_buffer::*,
@@ -21,7 +21,7 @@ pub struct SengaRenderLoop {
 }
 
 impl RenderLoop for SengaRenderLoop {
-    fn new(rd: &RenderDevice) -> Option<Self> {
+    fn new(rd: &mut RenderDevice) -> Option<Self> {
         Some(Self {
             render_graph_cache: RenderGraphCache::new(rd),
             stream_lined: StreamLinedFrameResource::new(rd),
@@ -48,7 +48,7 @@ impl RenderLoop for SengaRenderLoop {
             self.stream_lined.get_set_layout(),
         );
 
-        let mut rg = RenderGraphBuilder::new_with_shader_config(shader_config);
+        let mut rg = RenderGraphBuilder::new(&mut self.render_graph_cache, shader_config);
 
         let frame_descritpr_set = self.stream_lined.get_frame_desciptor_set();
         rg.add_global_descriptor_sets(&[
@@ -57,7 +57,8 @@ impl RenderLoop for SengaRenderLoop {
         ]);
 
         // Create GBuffer
-        let gbuffer = create_gbuffer_textures(&mut rg, rd.swapchain.extent);
+        let main_size = UVec2::new(rd.swapchain.extent.width, rd.swapchain.extent.height);
+        let gbuffer = create_gbuffer_textures(&mut rg, main_size);
 
         // Pass: GBuffer
         add_gbuffer_pass(&mut rg, rd, scene, &gbuffer);
@@ -80,8 +81,8 @@ impl RenderLoop for SengaRenderLoop {
             .texture("gbuffer_depth", gbuffer.depth.1)
             .rw_texture("rwcolor", final_color.1)
             .group_count(
-                div_round_up(gbuffer.size.width, 8),
-                div_round_up(gbuffer.size.height, 8),
+                div_round_up(gbuffer.size.x, 8),
+                div_round_up(gbuffer.size.y, 8),
                 1,
             );
 

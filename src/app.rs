@@ -91,7 +91,7 @@ where
     }
 
     // Create render loop
-    let mut render_loop = match T::new(&rd) {
+    let mut render_loop = match T::new(&mut rd) {
         Some(rl) => rl,
         None => {
             panic!("Renderloop is not supported.");

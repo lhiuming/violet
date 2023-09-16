@@ -1,20 +1,23 @@
 use ash::vk;
 use glam::{UVec2, Vec3};
+
 use violet::{
-    command_buffer::{CommandBuffer, StencilOps},
+    command_buffer::CommandBuffer,
     imgui::{ImGUIOuput, Ui},
     render_device::{
-        Buffer, BufferDesc, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
+        AccelerationStructure, Buffer, BufferDesc, RenderDevice, Texture, TextureDesc, TextureView,
+        TextureViewDesc,
     },
     render_graph::*,
     render_loop::{
         div_round_up, imgui_pass::ImGUIPass, rg_util, FrameParams, JitterInfo, PrevView,
         RenderLoop, StreamLinedFrameResource, ViewInfo, FRAME_DESCRIPTOR_SET_INDEX,
     },
-    render_loop::{div_round_up_uvec2, gbuffer_pass::*},
     render_scene::{RenderScene, UploadContext, SCENE_DESCRIPTOR_SET_INDEX},
     shader::{Shaders, ShadersConfig},
 };
+
+use crate::{reference_path_tracer::ReferencePathTracer, restir_renderer::RestirRenderer};
 
 pub struct DefaultResources {
     pub dummy_buffer: Buffer,
@@ -54,56 +57,36 @@ impl DefaultResources {
     }
 }
 
-struct SampleGenPass {
-    prev_reservoir_buffer: Option<RGTemporal<Buffer>>,
-    prev_indirect_diffuse_texture: Option<RGTemporal<Texture>>,
-}
-
-impl SampleGenPass {
-    fn new() -> Self {
-        Self {
-            prev_reservoir_buffer: None,
-            prev_indirect_diffuse_texture: None,
-        }
-    }
-}
-
-struct TAAPass {
-    prev_view: Option<PrevView>,
-    prev_color: Option<RGTemporal<Texture>>,
-    prev_depth: Option<RGTemporal<Texture>>,
-}
-
-impl TAAPass {
-    fn new() -> Self {
-        Self {
-            prev_view: None,
-            prev_color: None,
-            prev_depth: None,
-        }
-    }
-}
-
 pub struct RenderConfig {
-    taa: bool,
+    reference: bool,
 }
 
 impl Default for RenderConfig {
     fn default() -> Self {
-        Self { taa: true }
+        Self { reference: false }
     }
+}
+
+pub struct SceneRendererInput<'a> {
+    pub frame_index: u32,
+    pub main_size: UVec2,
+    pub default_res: &'a DefaultResources,
+    pub sky_cube: RGHandle<TextureView>,
+    pub scene_tlas: RGHandle<AccelerationStructure>,
+    pub view_info: &'a ViewInfo,
 }
 
 pub struct RestirRenderLoop {
     render_graph_cache: RenderGraphCache,
     stream_lined: StreamLinedFrameResource,
     default_res: DefaultResources,
-
     frame_index: u32,
 
-    sample_gen: SampleGenPass,
-    taa: TAAPass,
+    config: RenderConfig,
 
+    restir_renderer: RestirRenderer,
+    reference_path_tracer: ReferencePathTracer,
+    prev_view: Option<PrevView>,
     imgui_pass: ImGUIPass,
 
     upload_context: UploadContext,
@@ -114,12 +97,10 @@ pub struct RestirRenderLoop {
     total_acquire_duration: std::time::Duration,
     total_wait_duration: std::time::Duration,
     total_present_duration: std::time::Duration,
-
-    config: RenderConfig,
 }
 
 impl RenderLoop for RestirRenderLoop {
-    fn new(rd: &RenderDevice) -> Option<Self> {
+    fn new(rd: &mut RenderDevice) -> Option<Self> {
         if !rd.support_raytracing {
             return None;
         }
@@ -129,30 +110,41 @@ impl RenderLoop for RestirRenderLoop {
             stream_lined: StreamLinedFrameResource::new(rd),
             default_res: DefaultResources::new(rd),
             frame_index: 0,
-            sample_gen: SampleGenPass::new(),
-            taa: TAAPass::new(),
+
+            config: Default::default(),
+
+            restir_renderer: RestirRenderer::new(),
+            reference_path_tracer: ReferencePathTracer::new(),
+            prev_view: None,
             imgui_pass: ImGUIPass::new(rd),
+
             upload_context: UploadContext::new(rd),
+
             last_start_time: None,
             total_frame_duration: std::time::Duration::ZERO,
             total_frame_count: 0,
             total_acquire_duration: std::time::Duration::ZERO,
             total_wait_duration: std::time::Duration::ZERO,
             total_present_duration: std::time::Duration::ZERO,
-            config: Default::default(),
         })
     }
 
     fn ui(&mut self, ui: &mut Ui) {
         let config = &mut self.config;
-        ui.toggle_value(&mut config.taa, "TAA");
+        ui.toggle_value(&mut config.reference, "Reference");
+
+        if config.reference {
+            self.reference_path_tracer.ui(ui);
+        } else {
+            self.restir_renderer.ui(ui);
+        }
     }
 
     fn print_stat(&self) {
         println!("CPU Profiling:");
         let avg_ms = |name: &str, dur: std::time::Duration| {
             let ms = dur.as_secs_f64() * 1000.0 / self.total_frame_count as f64;
-            println!("\t{:>24}: {:.2}ms", name, ms);
+            println!("\t{:>16}: {:.4}ms", name, ms);
         };
         avg_ms("[Frame]", self.total_frame_duration);
         avg_ms("Acq. Swap.", self.total_acquire_duration);
@@ -193,11 +185,10 @@ impl RenderLoop for RestirRenderLoop {
             self.stream_lined.get_set_layout(),
         );
 
-        let main_size = rd.swapchain.extent;
-        let main_size_vec = UVec2::new(main_size.width, main_size.height);
-        let main_size_flat = main_size.width * main_size.height;
+        let main_extent = rd.swapchain.extent;
+        let main_size = UVec2::new(main_extent.width, main_extent.height);
 
-        let mut rg = RenderGraphBuilder::new_with_shader_config(shader_config);
+        let mut rg = RenderGraphBuilder::new(&mut self.render_graph_cache, shader_config);
 
         // HACK: render graph should not use this; currently using it for SBT pooling
         rg.set_frame_index(self.frame_index);
@@ -213,18 +204,12 @@ impl RenderLoop for RestirRenderLoop {
         let debug_texture = rg_util::create_texture_and_view(
             &mut rg,
             TextureDesc::new_2d(
-                main_size.width,
-                main_size.height,
+                main_size.x,
+                main_size.y,
                 vk::Format::R16G16B16A16_SFLOAT,
                 vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
             ),
         );
-
-        // Create GBuffer
-        let gbuffer = create_gbuffer_textures(&mut rg, main_size);
-
-        // Pass: GBuffer
-        add_gbuffer_pass(&mut rg, rd, scene, &gbuffer);
 
         // Pass: Skycube update
         let skycube;
@@ -258,286 +243,22 @@ impl RenderLoop for RestirRenderLoop {
 
         let scene_tlas = rg.register_accel_struct(scene.scene_top_level_accel_struct.unwrap());
 
-        // depth buffer from last frame
-        let has_prev_depth = self.taa.prev_depth.is_some();
-        let prev_depth = match self.taa.prev_depth.take() {
-            Some(tex) => {
-                let tex = rg.convert_to_transient(tex);
-                rg.create_texture_view(tex, None)
-            }
-            None => rg.register_texture_view(self.default_res.dummy_texture.1),
+        // Render the scene
+        let scene_renderer_input = SceneRendererInput {
+            frame_index: self.frame_index,
+            main_size,
+            sky_cube: skycube,
+            scene_tlas: scene_tlas,
+            default_res: &self.default_res,
+            view_info,
         };
-
-        // indirect diffuse from last frame
-        let has_prev_indirect_diffuse = self.sample_gen.prev_indirect_diffuse_texture.is_some();
-        let prev_indirect_diffuse_texture =
-            match self.sample_gen.prev_indirect_diffuse_texture.take() {
-                Some(tex) => {
-                    let tex = rg.convert_to_transient(tex);
-                    rg.create_texture_view(tex, None)
-                }
-                None => rg.register_texture_view(self.default_res.dummy_texture.1),
-            };
-
-        // resercoir buffer from last frame
-        let has_prev_reservoir = self.sample_gen.prev_reservoir_buffer.is_some();
-        let prev_reservoir_buffer = match self.sample_gen.prev_reservoir_buffer {
-            Some(buffer) => rg.convert_to_transient(buffer),
-            None => rg.register_buffer(self.default_res.dummy_buffer),
-        };
-
-        let is_validation_frame = has_prev_reservoir && ((self.frame_index % 6) == 0);
-
-        // Pass: Sample Generation (and temporal reusing)
-        let has_new_sample;
-        let new_sample_buffer;
-        if !is_validation_frame {
-            has_new_sample = 1u32;
-            new_sample_buffer =
-                rg.create_buffer(BufferDesc::compute(main_size_flat as u64 * 5 * 4 * 4));
-
-            let has_prev_indirect = (has_prev_depth && has_prev_indirect_diffuse) as u32;
-
-            rg.new_raytracing("Sample Gen")
-                .raygen_shader("restir/sample_gen.hlsl")
-                .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
-                .closest_hit_shader("raytrace/geometry.rchit.hlsl")
-                .accel_struct("scene_tlas", scene_tlas)
-                .texture("skycube", skycube)
-                .texture(
-                    "prev_indirect_diffuse_texture",
-                    prev_indirect_diffuse_texture,
-                )
-                .texture("prev_depth", prev_depth)
-                .texture("gbuffer_depth", gbuffer.depth.1)
-                .texture("gbuffer_color", gbuffer.color.1)
-                .buffer("rw_new_sample_buffer", new_sample_buffer)
-                //.rw_texture("rw_debug_texture", debug_texture.1)
-                .push_constant(&self.frame_index)
-                .push_constant(&has_prev_indirect)
-                .dimension(main_size.width, main_size.height, 1);
-        }
-        // Pass: Sample Validation
-        else {
-            has_new_sample = 0u32;
-            new_sample_buffer = rg.register_buffer(self.default_res.dummy_buffer);
-
-            rg.new_raytracing("Sample Validate")
-                .raygen_shader("restir/sample_validate.hlsl")
-                .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
-                .closest_hit_shader("raytrace/geometry.rchit.hlsl")
-                .accel_struct("scene_tlas", scene_tlas)
-                .texture("skycube", skycube)
-                .texture(
-                    "prev_indirect_diffuse_texture",
-                    prev_indirect_diffuse_texture,
-                )
-                .texture("prev_depth", prev_depth)
-                .rw_buffer("rw_prev_reservoir_buffer", prev_reservoir_buffer)
-                //.rw_texture("rw_debug_texture", debug_texture.1)
-                .dimension(main_size.width, main_size.height, 1);
-        }
-
-        let temporal_reservoir_buffer =
-            rg.create_buffer(BufferDesc::compute(main_size_flat as u64 * 24 * 4));
-
-        // Pass: Temporal Resampling
-        rg.new_compute("Temporal Resample")
-            .compute_shader("restir/temporal_resample.hlsl")
-            .texture("prev_gbuffer_depth", prev_depth)
-            .texture("gbuffer_depth", gbuffer.depth.1)
-            .texture("gbuffer_color", gbuffer.color.1)
-            .buffer("new_sample_buffer", new_sample_buffer)
-            .buffer("prev_reservoir_buffer", prev_reservoir_buffer)
-            .buffer("rw_temporal_reservoir_buffer", temporal_reservoir_buffer)
-            .push_constant(&self.frame_index)
-            .push_constant(&(has_prev_reservoir as u32))
-            .push_constant(&has_new_sample)
-            .group_count_uvec3(div_round_up_uvec2(main_size_vec, UVec2::new(8, 4)).extend(1));
-
-        // Pass: Spatial Resampling
-        let indirect_diffuse;
-        {
-            indirect_diffuse = {
-                let desc = TextureDesc::new_2d(
-                    main_size.width,
-                    main_size.height,
-                    vk::Format::B10G11R11_UFLOAT_PACK32,
-                    vk::ImageUsageFlags::COLOR_ATTACHMENT // sky rendering
-                    | vk::ImageUsageFlags::STORAGE // compute lighting
-                    | vk::ImageUsageFlags::SAMPLED, // taa
-                );
-                let texture = rg.create_texutre(desc);
-                let view = rg.create_texture_view(texture, None);
-                (texture, view)
-            };
-
-            let reservoir_buffer_desc = rg.get_buffer_desc(temporal_reservoir_buffer);
-            let spatial_reservoir_buffer = rg.create_buffer(*reservoir_buffer_desc);
-
-            rg.new_compute("Spatial Resampling")
-                .compute_shader("restir/spatial_resampling.hlsl")
-                .texture("gbuffer_depth", gbuffer.depth.1)
-                .texture("gbuffer_color", gbuffer.color.1)
-                .buffer("temporal_reservoir_buffer", temporal_reservoir_buffer)
-                .rw_buffer("rw_spatial_reservoir_buffer", spatial_reservoir_buffer)
-                .rw_texture("rw_lighting_texture", indirect_diffuse.1)
-                .rw_texture("rw_debug_texture", debug_texture.1)
-                .push_constant(&self.frame_index)
-                .group_count(
-                    div_round_up(main_size.width, 8),
-                    div_round_up(main_size.height, 4),
-                    1,
-                );
-
-            self.sample_gen.prev_reservoir_buffer.replace(
-                rg.convert_to_temporal(&mut self.render_graph_cache, spatial_reservoir_buffer),
-            );
-            self.sample_gen
-                .prev_indirect_diffuse_texture
-                .replace(rg.convert_to_temporal(&mut self.render_graph_cache, indirect_diffuse.0));
-        }
-
-        // Pass: Raytraced Shadow
-        let raytraced_shadow_mask = {
-            let tex = rg.create_texutre(TextureDesc::new_2d(
-                main_size.width,
-                main_size.height,
-                vk::Format::R8_UNORM,
-                vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
-            ));
-            (tex, rg.create_texture_view(tex, None))
-        };
-        {
-            rg.new_raytracing("Raytraced Shadow")
-                .raygen_shader("raytraced_shadow.hlsl")
-                .miss_shader("raytrace/shadow.rmiss.hlsl")
-                .accel_struct("scene_tlas", scene_tlas)
-                .texture("gbuffer_depth", gbuffer.depth.1)
-                .rw_texture("rw_shadow", raytraced_shadow_mask.1)
-                .dimension(main_size.width, main_size.height, 1);
-        }
-
-        let scene_color = {
-            let desc = TextureDesc::new_2d(
-                main_size.width,
-                main_size.height,
-                vk::Format::B10G11R11_UFLOAT_PACK32,
-                vk::ImageUsageFlags::COLOR_ATTACHMENT // sky rendering
-                    | vk::ImageUsageFlags::STORAGE // compute lighting
-                    | vk::ImageUsageFlags::SAMPLED, // taa
-            );
-            let texture = rg.create_texutre(desc);
-            let view = rg.create_texture_view(texture, None);
-            (texture, view)
-        };
-
-        // Pass: Draw sky
-        {
-            let stencil = rg.create_texture_view(
-                gbuffer.depth.0,
-                Some(TextureViewDesc {
-                    view_type: vk::ImageViewType::TYPE_2D,
-                    format: vk::Format::D24_UNORM_S8_UINT,
-                    aspect: vk::ImageAspectFlags::STENCIL,
-                    ..Default::default()
-                }),
-            );
-
-            rg.new_graphics("Sky")
-                .vertex_shader_with_ep("sky_vsps.hlsl", "vs_main")
-                .pixel_shader_with_ep("sky_vsps.hlsl", "ps_main")
-                .texture("skycube", skycube)
-                .color_targets(&[ColorTarget {
-                    view: scene_color.1,
-                    load_op: ColorLoadOp::DontCare,
-                }])
-                .depth_stencil(DepthStencilTarget {
-                    view: stencil,
-                    load_op: DepthLoadOp::Load,
-                    store_op: vk::AttachmentStoreOp::NONE,
-                })
-                .render(move |cb, pipeline| {
-                    // Set up raster states
-                    cb.set_depth_test_enable(false);
-                    cb.set_depth_write_enable(false);
-                    cb.set_stencil_test_enable(true);
-                    let face_mask = vk::StencilFaceFlags::FRONT_AND_BACK;
-                    let stencil_op = StencilOps::only_compare(vk::CompareOp::EQUAL);
-                    cb.set_stencil_op(face_mask, stencil_op);
-                    cb.set_stencil_compare_mask(face_mask, 0x01);
-                    cb.set_stencil_reference(face_mask, 0x00);
-
-                    // Draw
-                    cb.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, pipeline.handle);
-                    cb.draw(3, 1, 0, 0);
-                });
-        }
-
-        // Pass: Final Lighting (Combine)
-        // TODO pixel shader to utilize the stencil buffer
-        {
-            rg.new_compute("Combined Lighting")
-                .compute_shader("restir/final_lighting.hlsl")
-                .texture("gbuffer_color", gbuffer.color.1)
-                .texture("shadow_mask_buffer", raytraced_shadow_mask.1)
-                .texture("indirect_diffuse_buffer", indirect_diffuse.1)
-                .rw_texture("rw_color_buffer", scene_color.1)
-                .group_count(
-                    div_round_up(main_size.width, 8),
-                    div_round_up(main_size.height, 4),
-                    1,
-                );
-        }
-
-        let has_prev_color = self.taa.prev_color.is_some() as u32;
-        let prev_color = match self.taa.prev_color.take() {
-            Some(tex) => {
-                let tex = rg.convert_to_transient(tex);
-                rg.create_texture_view(tex, None)
-            }
-            None => rg.register_texture_view(self.default_res.dummy_texture.1),
-        };
-
-        // Pass: TAA
-        let post_taa_color;
-        if self.config.taa {
-            post_taa_color = {
-                let desc = TextureDesc::new_2d(
-                    main_size.width,
-                    main_size.height,
-                    vk::Format::B10G11R11_UFLOAT_PACK32,
-                    vk::ImageUsageFlags::STORAGE // compute TAA
-                    | vk::ImageUsageFlags::SAMPLED, // history and post
-                );
-                let texture = rg.create_texutre(desc);
-                let view = rg.create_texture_view(texture, None);
-                (texture, view)
-            };
-
-            rg.new_compute("Temporal AA")
-                .compute_shader("temporal_aa.hlsl")
-                .texture("gbuffer_depth", gbuffer.depth.1)
-                .texture("source_texture", scene_color.1)
-                .texture("history_texture", prev_color)
-                .rw_texture("rw_target", post_taa_color.1)
-                .push_constant(&has_prev_color)
-                .group_count(
-                    div_round_up(main_size.width, 8),
-                    div_round_up(main_size.height, 4),
-                    1,
-                );
+        let scene_color = if self.config.reference {
+            self.reference_path_tracer
+                .add_passes(rd, &mut rg, scene, scene_renderer_input)
         } else {
-            post_taa_color = scene_color;
-        }
-
-        // Cache scene buffer for next frame (TAA, temporal restir, etc.)
-        self.taa
-            .prev_color
-            .replace(rg.convert_to_temporal(&mut self.render_graph_cache, post_taa_color.0));
-        self.taa
-            .prev_depth
-            .replace(rg.convert_to_temporal(&mut self.render_graph_cache, gbuffer.depth.0));
+            self.restir_renderer
+                .add_passes(rd, &mut rg, scene, scene_renderer_input)
+        };
 
         // Wait swapchain image
         let (swapchain_image_index, acquire_swapchain_duratiaon) = self
@@ -549,15 +270,17 @@ impl RenderLoop for RestirRenderLoop {
             rg.register_texture_view(rd.swapchain.texture_views[swapchain_image_index as usize]),
         );
 
+        let scene_color_view = rg.create_texture_view(scene_color, None);
+
         // Pass: Post Processing (write to swapchain)
         rg.new_compute("Post Processing")
             .compute_shader("post_processing.hlsl")
-            .texture("src_color_texture", post_taa_color.1)
+            .texture("src_color_texture", scene_color_view)
             .texture("debug_texture", debug_texture.1)
             .rw_texture("rw_target_buffer", present_target.1)
             .group_count(
-                div_round_up(main_size.width, 8),
-                div_round_up(main_size.height, 4),
+                div_round_up(main_size.x, 8),
+                div_round_up(main_size.y, 4),
                 1,
             );
 
@@ -583,10 +306,10 @@ impl RenderLoop for RestirRenderLoop {
         // Update frame CB (before submit)
         let exposure = 20.0;
         let sun_inten = Vec3::new(1.0, 1.0, 0.85) * exposure;
-        let jitter_info = if self.config.taa {
+        let jitter_info = if self.restir_renderer.taa() {
             Some(JitterInfo {
                 frame_index: self.frame_index,
-                viewport_size: main_size_vec,
+                viewport_size: main_size,
             })
         } else {
             None
@@ -596,11 +319,11 @@ impl RenderLoop for RestirRenderLoop {
             jitter_info.as_ref(),
             &scene.sun_dir,
             &sun_inten,
-            self.taa.prev_view.as_ref(),
+            self.prev_view.as_ref(),
         ));
 
         // only after last use of prev_view_info
-        self.taa.prev_view.replace(PrevView {
+        self.prev_view.replace(PrevView {
             view_info: *view_info,
             jitter_info,
         });

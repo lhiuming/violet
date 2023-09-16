@@ -19,7 +19,7 @@ pub mod imgui_pass;
  */
 
 pub trait RenderLoop: Sized {
-    fn new(rd: &RenderDevice) -> Option<Self>;
+    fn new(rd: &mut RenderDevice) -> Option<Self>;
 
     fn ui(&mut self, _ui: &mut imgui::Ui) {}
 

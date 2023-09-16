@@ -751,7 +751,7 @@ pub struct RenderGraphCache {
     // Temporal Resources
     temporal_textures: HashMap<usize, Texture>,
     temporal_buffers: HashMap<usize, Buffer>,
-    next_temporal_id: usize,
+    next_temporal_id: Option<usize>,
 
     // Resource pool
     texture_pool: ResPool<TextureDesc, Texture>,
@@ -779,7 +779,7 @@ impl RenderGraphCache {
             free_vk_descriptor_sets: Vec::new(),
             temporal_textures: HashMap::new(),
             temporal_buffers: HashMap::new(),
-            next_temporal_id: 0,
+            next_temporal_id: Some(0),
             texture_pool: ResPool::new(),
             texture_view_pool: ResPool::new(),
             buffer_pool: ResPool::new(),
@@ -891,6 +891,7 @@ pub struct RenderGraphBuilder<'render> {
     passes: Vec<RenderPass<'render>>,
 
     shader_config: shader::ShadersConfig,
+    next_temporal_id: usize,
 
     // Descriptor sets that would be bound for all passes
     // Exist for ergonomics reason; descriptors set like per-frame stuffs can be specify as this.
@@ -914,6 +915,7 @@ impl<'a> RenderGraphBuilder<'a> {
         self.passes.push(pass);
     }
 
+    /*
     fn is_virtual<T>(&self, handle: RGHandle<T>) -> bool
     where
         T: ResType,
@@ -926,6 +928,39 @@ impl<'a> RenderGraphBuilder<'a> {
             ResTypeEnum::Buffer => match self.buffers.get(handle.id) {
                 Some(RenderResource::Virtual(_)) => true,
                 _ => false,
+            },
+        }
+    }
+    */
+
+    fn is_external<T>(&self, handle: RGHandle<T>) -> bool
+    where
+        T: ResType,
+    {
+        match T::get_enum() {
+            ResTypeEnum::Texture => match self.textures.get(handle.id) {
+                Some(RenderResource::External(_)) => true,
+                _ => false,
+            },
+            ResTypeEnum::Buffer => match self.buffers.get(handle.id) {
+                Some(RenderResource::External(_)) => true,
+                _ => false,
+            },
+        }
+    }
+
+    fn get_temporal_id<T>(&self, handle: RGHandle<T>) -> Option<usize>
+    where
+        T: ResType,
+    {
+        match T::get_enum() {
+            ResTypeEnum::Texture => match self.textures.get(handle.id) {
+                Some(RenderResource::Temporal(id)) => Some(*id),
+                _ => None,
+            },
+            ResTypeEnum::Buffer => match self.buffers.get(handle.id) {
+                Some(RenderResource::Temporal(id)) => Some(*id),
+                _ => None,
             },
         }
     }
@@ -963,15 +998,12 @@ impl<'a> RenderGraphBuilder<'a> {
 
 // Interface
 impl<'a> RenderGraphBuilder<'a> {
-    pub fn new() -> Self {
-        Self::new_with_shader_config(shader::ShadersConfig::default())
-    }
-
-    pub fn new_with_shader_config(shader_config: ShadersConfig) -> Self {
+    pub fn new(cache: &mut RenderGraphCache, shader_config: ShadersConfig) -> Self {
         Self {
             passes: Vec::new(),
 
             shader_config,
+            next_temporal_id: cache.next_temporal_id.take().unwrap(),
 
             global_descriptor_sets: Vec::new(),
 
@@ -1098,20 +1130,23 @@ impl<'a> RenderGraphBuilder<'a> {
     }
 
     // Convert a transient resource to a temporal one (content is kept through frames)
-    pub fn convert_to_temporal<T>(
-        &mut self,
-        cache: &mut RenderGraphCache,
-        handle: RGHandle<T>,
-    ) -> RGTemporal<T>
+    pub fn convert_to_temporal<T>(&mut self, handle: RGHandle<T>) -> RGTemporal<T>
     where
         T: ResType,
     {
-        // Validate
-        assert!(self.is_virtual(handle));
+        // Validate: not valid for external resource
+        assert!(!self.is_external(handle));
 
         // all type using same temporal id scope... :)
-        let temporal_id = cache.next_temporal_id;
-        cache.next_temporal_id += 1;
+        let temporal_id;
+        if let Some(prev_temporal_id) = self.get_temporal_id(handle) {
+            // reused the temporal id
+            temporal_id = prev_temporal_id
+        } else {
+            // alocate a new one
+            temporal_id = self.next_temporal_id;
+            self.next_temporal_id += 1;
+        };
 
         // record for later caching
         match T::get_enum() {
@@ -2053,13 +2088,19 @@ impl RenderGraphBuilder<'_> {
         // Process all textures converted to temporals
         for (handle, temporal_handle) in &self.transient_to_temporal_textures {
             let tex = exec_context.textures[handle.id].take().unwrap();
-            cache.temporal_textures.insert(temporal_handle.id, tex);
+            let conflict = cache.temporal_textures.insert(temporal_handle.id, tex);
+            assert!(conflict.is_none());
         }
         self.transient_to_temporal_textures.clear();
         for (handle, temporal_handle) in &self.transient_to_temporal_buffers {
             let buf = exec_context.buffers[handle.id].take().unwrap();
-            cache.temporal_buffers.insert(temporal_handle.id, buf);
+            let conflict = cache.temporal_buffers.insert(temporal_handle.id, buf);
+            assert!(conflict.is_none());
         }
+
+        // puch back temporal id allocator
+        assert!(cache.next_temporal_id.is_none());
+        cache.next_temporal_id = Some(self.next_temporal_id);
 
         // Pool back all resource objects
         for view in exec_context
