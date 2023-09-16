@@ -9,6 +9,9 @@ use spirq::{self};
 
 use crate::render_device::RenderDevice;
 
+const LOG_REFLECTION_INFO: bool = false;
+const LOG_DESCRIPTOR_INFO: bool = false;
+
 // TODO it should be provided by user?
 const BINDLESS_SIZE: u32 = 1024;
 
@@ -278,7 +281,7 @@ fn create_pipeline_program(
     };
 
     // Debug: print the reflect content
-    {
+    if LOG_REFLECTION_INFO {
         println!(
             "Reflection(shader: {}, entry_point: {})",
             shader_def.virtual_path, shader_def.entry_point
@@ -702,7 +705,9 @@ fn create_merged_descriptor_set_layouts(
                 // Check override
                 if hack.set_layout_override.contains_key(&set_index) {
                     set_layouts[set_index as usize] = hack.set_layout_override[&set_index];
-                    println!("Overriding set layout for set {}", set_index);
+                    if LOG_DESCRIPTOR_INFO {
+                        println!("Overriding set layout for set {}", set_index);
+                    }
                     return;
                 }
                 // Create set layout
