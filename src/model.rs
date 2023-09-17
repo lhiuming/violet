@@ -127,9 +127,15 @@ impl mikktspace::Geometry for MikktspaceGeometry<'_> {
     }
 }
 
+const DEV_ALWAYS_IMPORT: bool = false;
+
 // Load a model from cache, or
 // if model is not in cache, load the original gltf file and store it in cache.
 pub fn load(path: &Path) -> Result<Model> {
+    if DEV_ALWAYS_IMPORT {
+        return import_gltf(path);
+    }
+
     // Try to load from caceh
     match try_load_from_cache(path) {
         Ok(model) => Ok(model),
@@ -501,18 +507,44 @@ pub fn import_gltf_uncached(path: &Path) -> Result<Model> {
         });
     }
 
+    let fmt_sampler = |sampler: &gltf::texture::Sampler<'_>| {
+        format!(
+            "index:{:?}-{:?}, <min:{:?}, max:{:?}, wrap_s:{:?}, wrap_t:{:?}>",
+            sampler.index(),
+            sampler.name(),
+            sampler.min_filter(),
+            sampler.mag_filter(),
+            sampler.wrap_s(),
+            sampler.wrap_t(),
+        )
+    };
+
     // Looa materials
     let mut model_materials = Vec::<Material>::new();
     for material in document.materials() {
         let pbr_texs = material.pbr_metallic_roughness();
+
+        if pbr_texs.metallic_factor() != 1.0 {
+            println!(
+                "Warning: metallic factor {} is ignored by violet.",
+                pbr_texs.metallic_factor()
+            );
+        }
+        if pbr_texs.roughness_factor() != 1.0 {
+            println!(
+                "Warning: roughness factor {} is ignored by violet.",
+                pbr_texs.roughness_factor()
+            );
+        }
 
         let base_color_map = if let Some(base_color) = pbr_texs.base_color_texture() {
             if base_color.tex_coord() != 0 {
                 println!("Warning: GLTF Loader: Only texture coordinate 0 is supported");
             }
             println!(
-                "Material base color texture: {}",
+                "Material base color texture: {}, sampler {}",
                 base_color.texture().source().index(),
+                fmt_sampler(&base_color.texture().sampler())
             );
 
             Some(MaterialMap {
@@ -528,8 +560,9 @@ pub fn import_gltf_uncached(path: &Path) -> Result<Model> {
                     println!("Warning: GLTF Loader: Only texture coordinate 0 is supported");
                 }
                 println!(
-                    "Material metal rough texture: {}",
-                    metal_rough.texture().index()
+                    "Material metal rough texture: {}, sampler {:?}",
+                    metal_rough.texture().index(),
+                    fmt_sampler(&metal_rough.texture().sampler()),
                 );
 
                 Some(MaterialMap {
@@ -543,7 +576,17 @@ pub fn import_gltf_uncached(path: &Path) -> Result<Model> {
             if normal.tex_coord() != 0 {
                 println!("Warning: GLTF Loader: Only texture coordinate 0 is supported");
             }
-            println!("Material normal texture: {}", normal.texture().index());
+            println!(
+                "Material normal texture: {}, sampler {:?}",
+                normal.texture().index(),
+                fmt_sampler(&normal.texture().sampler()),
+            );
+            if normal.scale() != 1.0f32 {
+                println!(
+                    "\t normal texture required scale {}, is ignored.",
+                    normal.scale()
+                );
+            }
 
             Some(MaterialMap {
                 image_index: normal.texture().index() as u32,

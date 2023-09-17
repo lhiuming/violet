@@ -143,6 +143,8 @@ float3 get_specular_f0(float3 base_color, float metallic) {
 }
 
 // Combined BRDF evaluation
+// https://registry.khronos.org/glTF/specs/2.0/glTF-2.0.html#appendix-b-brdf-implementation
+// NOTE: ignoring the (1.0 - Fresnel) term compared to the glTF spec 
 float3 eval_GGX_Lambertian(float3 v, float3 l, float3 n, float perceptual_roughness, float3 diffuse_rho, float3 specular_f0) {
 	float3 h = normalize(v + l);
 

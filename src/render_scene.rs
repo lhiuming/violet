@@ -588,7 +588,7 @@ impl RenderScene {
 
             self.material_parmas.push(MaterialParams {
                 base_color_index: resolve(&material.base_color_map, true),
-                metallic_roughness_index: resolve(&material.metallic_roughness_map, true),
+                metallic_roughness_index: resolve(&material.metallic_roughness_map, false),
                 normal_index: resolve(&material.normal_map, false),
                 pad: 0,
             });
