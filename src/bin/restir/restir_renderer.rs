@@ -41,11 +41,15 @@ impl TAAPass {
 }
 
 pub struct RestirConfig {
+    validation: bool,
     taa: bool,
 }
 impl Default for RestirConfig {
     fn default() -> Self {
-        Self { taa: true }
+        Self {
+            validation: true,
+            taa: true,
+        }
     }
 }
 
@@ -72,8 +76,9 @@ impl RestirRenderer {
 
     pub fn ui(&mut self, ui: &mut Ui) {
         let config = &mut self.config;
-        ui.heading("restir renderer");
-        ui.checkbox(&mut config.taa, "TAA");
+        ui.heading("RESTIR RENDERER");
+        ui.checkbox(&mut config.validation, "sample validation");
+        ui.checkbox(&mut config.taa, "taa");
     }
 
     pub fn add_passes<'render>(
@@ -125,7 +130,8 @@ impl RestirRenderer {
             None => rg.register_buffer(default_res.dummy_buffer),
         };
 
-        let is_validation_frame = has_prev_reservoir && ((frame_index % 6) == 0);
+        let is_validation_frame =
+            has_prev_reservoir && ((frame_index % 6) == 0) && self.config.validation;
 
         // Pass: Sample Generation (and temporal reusing)
         let has_new_sample;

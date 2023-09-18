@@ -1,7 +1,5 @@
 #include "display.hlsl"
 
-// TODO use a auto-exposure
-#define EXPOSURE 3.0
 #define DISPLAY_MAPPING 1
 #define DEBUG_VIEW 0
 
@@ -9,14 +7,13 @@ Texture2D<float3> src_color_texture;
 Texture2D<float4> debug_texture;
 RWTexture2D<float4> rw_target_buffer;
 
-/*
 struct PushConstants
 {
-    uint debug_view;
+    float exposure_scale;
+    //uint debug_view;
 };
 [[vk::push_constant]]
 PushConstants pc;
-*/
 
 [numthreads(8, 4, 1)]
 void main(uint2 dispatch_id: SV_DispatchThreadID)
@@ -24,7 +21,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     float3 scene_referred = src_color_texture[dispatch_id.xy];
 
     // Exposure adjustment
-    scene_referred *= pow(2, EXPOSURE);
+    scene_referred *= pc.exposure_scale;
 
     // Display mapping (a.k.a. neutral tonemapping)
 #if DISPLAY_MAPPING

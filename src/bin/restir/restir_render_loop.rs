@@ -59,11 +59,15 @@ impl DefaultResources {
 
 pub struct RenderConfig {
     reference: bool,
+    exposure_stop: f32,
 }
 
 impl Default for RenderConfig {
     fn default() -> Self {
-        Self { reference: false }
+        Self {
+            reference: false,
+            exposure_stop: 0.0,
+        }
     }
 }
 
@@ -131,13 +135,23 @@ impl RenderLoop for RestirRenderLoop {
 
     fn ui(&mut self, ui: &mut Ui) {
         let config = &mut self.config;
-        ui.toggle_value(&mut config.reference, "Reference");
+        ui.toggle_value(&mut config.reference, "reference");
 
-        if config.reference {
+        // Scene Renderer
+        ui.add_enabled_ui(config.reference, |ui| {
             self.reference_path_tracer.ui(ui);
-        } else {
+        });
+        ui.add_enabled_ui(!config.reference, |ui| {
             self.restir_renderer.ui(ui);
-        }
+        });
+
+        // Post
+        ui.heading("POSTPROCESSING");
+        ui.horizontal(|ui| {
+            let label = ui.label("exposure");
+            let slider = egui::Slider::new(&mut config.exposure_stop, -3.0..=3.0);
+            ui.add(slider).labelled_by(label.id);
+        });
     }
 
     fn print_stat(&self) {
@@ -273,11 +287,13 @@ impl RenderLoop for RestirRenderLoop {
         let scene_color_view = rg.create_texture_view(scene_color, None);
 
         // Pass: Post Processing (write to swapchain)
+        let exposure_scale: f32 = 2.0f32.powf(self.config.exposure_stop);
         rg.new_compute("Post Processing")
             .compute_shader("post_processing.hlsl")
             .texture("src_color_texture", scene_color_view)
             .texture("debug_texture", debug_texture.1)
             .rw_texture("rw_target_buffer", present_target.1)
+            .push_constant(&exposure_scale)
             .group_count(
                 div_round_up(main_size.x, 8),
                 div_round_up(main_size.y, 4),
@@ -304,8 +320,7 @@ impl RenderLoop for RestirRenderLoop {
         let command_buffer = self.stream_lined.wait_and_reset_command_buffer(rd);
 
         // Update frame CB (before submit)
-        let exposure = 20.0;
-        let sun_inten = Vec3::new(1.0, 1.0, 0.85) * exposure;
+        let sun_inten = Vec3::new(1.0, 1.0, 0.85) * 20.0;
         let jitter_info = if self.restir_renderer.taa() {
             Some(JitterInfo {
                 frame_index: self.frame_index,

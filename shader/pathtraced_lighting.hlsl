@@ -4,6 +4,9 @@
 #include "brdf.hlsl"
 #include "rand.hlsl"
 #include "sampling.hlsl"
+#include "util.hlsl"
+
+#include "raytrace/geometry_ray.inc.hlsl"
 #include "raytrace/shadow_ray.inc.hlsl"
 
 /* 
@@ -17,6 +20,7 @@ Reference:
 
 #define DIRECTI_LIGHTING 1
 #define PRIMARY_RAY_JITTER 1
+#define SPECULAR_SUPRESSION 1
 
 #define WHITE_FURNACE 0
 #define SPECULAR_ONLY 0
@@ -35,27 +39,6 @@ struct PushConstants
 };
 [[vk::push_constant]]
 PushConstants pc;
-
-// Miscs
-float luminance(float3 color) {
-    return dot(color, float3(0.2126f, 0.7152f, 0.0722f));
-}
-float max3(float3 v) {
-    return max(max(v.x, v.y), v.z);
-}
-
-struct Payload {
-    bool missed;
-    float hit_t;
-    float3 normal_ws;
-    float3 normal_geo_ws;
-    float3 position_ws;
-    float3 base_color;
-    float metallic;
-    float perceptual_roughness;
-    uint mesh_index;
-    uint triangle_index;
-};
 
 [shader("raygeneration")]
 void main() {
@@ -81,16 +64,12 @@ void main() {
     float3 view_dir_end = view_dir_end_h.xyz / view_dir_end_h.w;
     float3 view_dir = normalize(view_dir_end - view_params().view_pos);
 
-    // TODO Frame Parameters
-    float exposure = 5;
-    float3 light_color = float3(0.7f, 0.7f, 0.6f) * PI * exposure;
-
     // Setup primary Ray
     RayDesc ray;
     ray.Origin = view_params().view_pos;
     ray.Direction = view_dir;
     ray.TMin = 0.0005f; // 0.5mm
-    ray.TMax = 100.0f;
+    ray.TMax = 1000.0f;
 
     float3 throughput = 1.0f;
     float3 radiance = 0.0f;
@@ -100,7 +79,8 @@ void main() {
     for (int bounce = 0; bounce < MAX_BOUNCE; ++bounce) 
     {
         // Trace
-        Payload hit = (Payload)0;
+        GeometryRayPayload hit = (GeometryRayPayload)0;
+        hit.missed = false;
         TraceRay(scene_tlas,
                 RAY_FLAG_FORCE_OPAQUE, // skip anyhit
                 0xff, // uint InstanceInclusionMask,
@@ -132,24 +112,30 @@ void main() {
         #endif
 
         // Material attribute decode
-	    const float3 specular_color = lerp(float3(0.04f, 0.04f, 0.04f), hit.base_color, hit.metallic);
-	    const float3 diffuse_color = hit.base_color * (1.0f - hit.metallic);
+	    const float3 specular_color = get_specular_f0(hit.base_color, hit.metallic);
+	    const float3 diffuse_color = get_diffuse_rho(hit.base_color, hit.metallic);
+        #if SPECULAR_SUPRESSION
+        float perceptual_roughness = max(hit.perceptual_roughness, 0.045f);
+        const float roughness = perceptual_roughness * perceptual_roughness;
+        #else
         const float roughness = hit.perceptual_roughness * hit.perceptual_roughness;
+        #endif
 
         // Add Direct Lighting
         #if !WHITE_FURNACE && DIRECTI_LIGHTING
         float nol_sun = dot(hit.normal_ws, frame_params.sun_dir.xyz);
         if ((nol_sun > 0.0f) && (bounce < MAX_BOUNCE_WITH_LIGHTING))
         {
-            float leviation = 1.f/32.f;
+            //float leviation = 1.f/32.f;
+            float leviation = 0.0f;
 
             RayDesc shadow_ray;
             shadow_ray.Origin = hit.position_ws + hit.normal_geo_ws * leviation;
             shadow_ray.Direction = frame_params.sun_dir.xyz;
             shadow_ray.TMin = 0.0005f; // 0.5mm
-            shadow_ray.TMax = 100.0f;
+            shadow_ray.TMax = 1000.0f;
 
-            Payload shadow = (Payload)0;
+            ShadowRayPayload shadow = (ShadowRayPayload)0;
             shadow.missed = false;
             TraceRay(scene_tlas,
                 RAY_FLAG_FORCE_OPAQUE // skip anyhit
@@ -159,29 +145,37 @@ void main() {
                 0xff, // uint InstanceInclusionMask,
                 0, // uint RayContributionToHitGroupIndex,
                 0, // uint MultiplierForGeometryContributionToHitGroupIndex,
-                0, // uint MissShaderIndex,
+                1, // uint MissShaderIndex,
                 shadow_ray,
                 shadow
             );
 
             if (shadow.missed)
             {
+                // Match with what eval_GGX_Lambertian is doing
+
+                float3 v = -ray.Direction;
+                float3 l = frame_params.sun_dir.xyz;
+                float3 n = hit.normal_ws;
+                float3 h = normalize(v + l);
+                float NoL = saturate(nol_sun);
+                float NoV = saturate(dot(n, v));
+                float NoH = saturate(dot(n, h));
+                float LoH = saturate(dot(l, h));
+
                 float3 brdf = 0.0f;
 
                 #if !SPECULAR_ONLY
                 // Diffuse
-                brdf += diffuse_color * ONE_OVER_PI;
+                brdf += diffuse_color * Fd_Lambert();
                 #endif
 
                 #if !DIFFUSE_ONLY
                 // Specualr
-                float LoH = max(0.0001f, dot(view_dir, normalize(view_dir + frame_params.sun_dir.xyz)));
-                float NoL = max(0.0001f, nol_sun);
-                float NoV = max(0.0001f, dot(hit.normal_ws, -ray.Direction));
+                float D = D_GGX(NoH, roughness);
                 float3 F = F_Schlick(LoH, specular_color);
                 float V = vis_smith_G2_height_correlated_GGX(NoL, NoV, roughness);
-                float D = D_GGX(LoH, roughness);
-                brdf += F * (V * D);
+                brdf += min(D * V, F32_SIGNIFICANTLY_LARGE) * F;
                 #endif
 
                 radiance += (throughput * nol_sun) * brdf * frame_params.sun_inten.rgb;
@@ -205,11 +199,12 @@ void main() {
         // ref: RTGII, ch14
         float prop_specular;
         {
-            float NoV = max(0.0f, dot(hit.normal_ws, V));
-            float f90_luminance = luminance(specular_color); // TODO mul by throughput?
-            float e_spec = F_Schlick(NoV, f90_luminance.xxx).x;
+            float NoV = saturate(dot(hit.normal_ws, V));
+            float f90_luminance = luminance(specular_color);
+            float e_spec = F_Schlick_single(NoV, f90_luminance);
             float e_diff = luminance(diffuse_color);
-            prop_specular = e_spec / max(0.0000001f, e_spec + e_diff);
+            // NOTE: okay to divide by zero, since we clamp prop_specular below
+            prop_specular = e_spec / (e_spec + e_diff);
             // remove extreme value of prop_specular to avoid undersampling specular/diffuse
             prop_specular = clamp(prop_specular, 0.1f, 0.9f);
 #if SPECULAR_ONLY
@@ -278,10 +273,10 @@ void main() {
             //        = G1(V) * D(H) / (4 * NoV)
             L_local = reflect(-V_local, H_local);
 
-            float LoH = max(0.000001f, dot(L_local, H_local));
+            float LoH = saturate(dot(L_local, H_local));
             float3 N_local = float3(0.0f, 0.0f, 1.0f);
-            float NoL = max(0.000001f, dot(N_local, L_local)); // L_local.z
-            float NoV = max(0.000001f, dot(N_local, V_local)); // V_local.z
+            float NoL = max(F32_SIGNIFICANTLY_SMALL, dot(N_local, L_local)); // L_local.z
+            float NoV = max(F32_SIGNIFICANTLY_SMALL, dot(N_local, V_local)); // V_local.z
 
             float3 F = F_Schlick(LoH, specular_color);
 

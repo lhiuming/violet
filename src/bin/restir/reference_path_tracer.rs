@@ -54,14 +54,14 @@ impl ReferencePathTracer {
         Self {
             accumulated_count: 0,
             accumulated_texture: None,
-            accumulation_limit: 4 * 1024,
+            accumulation_limit: 8 * 1024,
             force_restart: false,
             last_params: None,
         }
     }
 
     pub fn ui(&mut self, ui: &mut Ui) {
-        ui.heading("pathtracer");
+        ui.heading("PATHTRACER");
         ui.label(format!("- frame count: {}", self.accumulated_count));
         if ui.button("restart").clicked() {
             self.force_restart = true;
@@ -120,7 +120,7 @@ impl ReferencePathTracer {
 
         rg.new_raytracing("Path Tracing")
             .raygen_shader("pathtraced_lighting.hlsl")
-            .miss_shader("raytrace/geometry.rmiss.hlsl")
+            .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
             .closest_hit_shader("raytrace/geometry.rchit.hlsl")
             .accel_struct("scene_tlas", input.scene_tlas)
             .texture("skycube", input.sky_cube)

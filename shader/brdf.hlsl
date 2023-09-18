@@ -1,23 +1,29 @@
 #pragma once
 #include "constants.hlsl"
 
-// Fresnel with f90
-// https://google.github.io/filament/Filament.md.html#materialsystem/specularbrdf
-float3 F_Schlick_with_f90(float u, float3 f0, float f90) {
-    return f0 + (f90.xxx - f0) * pow(1.0 - u, 5.0);
-}
-
-// Fresnel 
+// Fresnel, assuming f90 = 1.0
 // https://google.github.io/filament/Filament.md.html#materialsystem/specularbrdf
 float3 F_Schlick(float u, float3 f0) {
-	// Replace f90 with 1.0 in F_Schlick, and some refactoring
+	// NOTE: Replacing f90 with 1.0 in F_Schlick_f90, and some refactoring
     float f = pow(1.0 - u, 5.0);
     return f + f0 * (1.0 - f);
 }
 
-// Fresnel with single channel
+// Fresnel for single channel, assuming f90 = 1.0
+float F_Schlick_single(float u, float f0) {
+    float f = pow(1.0 - u, 5.0);
+    return f + f0 * (1.0 - f);
+}
+
+// Fresnel with f90
 // https://google.github.io/filament/Filament.md.html#materialsystem/specularbrdf
-float F_Schlick_single(float u, float f0, float f90) {
+float3 F_Schlick_f90(float u, float3 f0, float f90) {
+    return f0 + (f90.xxx - f0) * pow(1.0 - u, 5.0);
+}
+
+// Fresnel with f90 for single channel
+// https://google.github.io/filament/Filament.md.html#materialsystem/specularbrdf
+float F_Schlick_f90_single(float u, float f0, float f90) {
 	return f0 + (f90 - f0) * pow(1.0 - u, 5.0);
 }
 
@@ -37,8 +43,8 @@ float Fd_Lambert() {
 // https://google.github.io/filament/Filament.md.html#materialsystem/brdf
 float Fd_Burley(float NoV, float NoL, float LoH, float roughness) {
     float f90 = 0.5 + 2.0 * roughness * LoH * LoH;
-    float lightScatter = F_Schlick_single(NoL, 1.0, f90);
-    float viewScatter = F_Schlick_single(NoV, 1.0, f90);
+    float lightScatter = F_Schlick_f90_single(NoL, 1.0, f90);
+    float viewScatter = F_Schlick_f90_single(NoV, 1.0, f90);
     return lightScatter * viewScatter * (1.0 / PI);
 }
 
@@ -148,8 +154,8 @@ float3 get_specular_f0(float3 base_color, float metallic) {
 float3 eval_GGX_Lambertian(float3 v, float3 l, float3 n, float perceptual_roughness, float3 diffuse_rho, float3 specular_f0) {
 	float3 h = normalize(v + l);
 
-    float NoV = abs(dot(n, v)) + 1e-5;
     float NoL = saturate(dot(n, l));
+    float NoV = saturate(dot(n, v));
     float NoH = saturate(dot(n, h));
     float LoH = saturate(dot(l, h));
 
@@ -158,10 +164,11 @@ float3 eval_GGX_Lambertian(float3 v, float3 l, float3 n, float perceptual_roughn
 
     float D = D_GGX(NoH, roughness);
     float3 F = F_Schlick(LoH, specular_f0);
-    float V = vis_smith_G2_height_correlated_GGX(NoV, NoL, roughness);
+    float V = vis_smith_G2_height_correlated_GGX(NoL, NoV, roughness);
 
     // specular BRDF
-    float3 Fr = (D * V) * F;
+    // NOTE: vis_smith_G2_height_correlated_GGX produce INF if both NoV and NoL is zero; to minimized bias and make reasoning easier, we clamp final scalar only.
+    float3 Fr = min(D * V, F32_SIGNIFICANTLY_LARGE) * F;
 
     // diffuse BRDF
     float3 Fd = diffuse_rho * Fd_Lambert();
