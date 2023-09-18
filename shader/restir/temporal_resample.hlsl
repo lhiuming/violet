@@ -64,8 +64,8 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         // TODO try something like PCF and reject softly?
         float reproj_depth = ndc_reproj.z;
         float prev_depth = prev_gbuffer_depth.SampleLevel(sampler_linear_clamp, uv_reproj, 0); // NO, dont lerp the depth!
-        const float TOLERANCE = 0.001f;
-        if (abs(prev_depth - reproj_depth) > TOLERANCE)
+        const float DEPTH_TOLERANCE = 0.001f;
+        if (abs(prev_depth - reproj_depth) > DEPTH_TOLERANCE)
         {
             sample_prev_frame = false;
         }

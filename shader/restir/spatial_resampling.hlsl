@@ -6,8 +6,9 @@
 #include "reservoir.hlsl"
 
 #define MAX_ITERATION 9
+#define MAX_RADIUS 16
 
-// Use cosine-weighted PDF (instead of uniformly distrubuted) PDF reduce noise alot
+// Using cosine-weighted PDF (instead of uniformly distrubuted) PDF reduce noise alot
 #define UNIFORM_PDF 0
 
 Texture2D<float> gbuffer_depth;
@@ -58,7 +59,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         w_sum = reservoir.W * target_pdf * float(reservoir.M);
     }
 
-    float radius = 32; // px
+    float radius = MAX_RADIUS; // px
     uint rng_state = lcg_init(dispatch_id, buffer_size, pc.frame_index);
     for (uint i = 0; i < MAX_ITERATION; i++)
     {
@@ -109,7 +110,8 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         // TODO wall viewed from grazing-angle will become noisy because depth
         // gradient is large in this case. So a better test should check if two
         // visble sample are on the same surface (plane)
-        geometrical_diff |= abs(depth - depth_n) > 0.0005f;
+        const float DEPTH_TOLERANCE = 0.0005f;
+        geometrical_diff |= abs(depth - depth_n) > DEPTH_TOLERANCE;
         if (geometrical_diff)
         {
             continue;
@@ -201,20 +203,14 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     // update the W
     {
         float target_pdf = TARGET_PDF_FOR_SAMPLE(reservoir.z);
-
-#if 0
-        // Ideally we use a branch (like in sample_gen.hlsl) instead of injecting a bit of bias. But it is kind of okay here because we are not using the W for anything else beside multiplying it with the hit radiance.
-        target_pdf = max(target_pdf, 1e-7f);
-#else
         if (target_pdf > 0)
         {
             reservoir.W = w_sum / (target_pdf * float(reservoir.M));
         }
         else
         {
-            reservoir.W = TWO_PI;
+            // just keep the original W
         }
-#endif
     }
 
     // Store for next frame temporal reuse

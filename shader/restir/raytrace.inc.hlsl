@@ -80,6 +80,7 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
     else 
     {
         // Shade the hit point //
+        float3 diffuse_rho = get_diffuse_rho(payload.base_color, payload.metallic);
 
         // Directl lighting (diffuse only)
         float3 sun_dir = frame_params.sun_dir.xyz;
@@ -87,13 +88,14 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
         bool missed = trace_shadow(payload.position_ws, sun_dir);
         if (missed) 
         {
+            // SPECULAR_SUPRESSION
+            float perceptual_roughness = max(payload.perceptual_roughness, 0.045f);
+
             float NoL = saturate(dot(payload.normal_ws, sun_dir));
-            float3 diffuse_rho = get_diffuse_rho(payload.base_color, payload.metallic);
             float3 specular_f0 = get_specular_f0(payload.base_color, payload.metallic);
-            float3 direct_lighting = eval_GGX_Lambertian(-ray_dir, sun_dir, payload.normal_ws, payload.perceptual_roughness, diffuse_rho, specular_f0) * NoL * sun_inten;
+            float3 direct_lighting = eval_GGX_Lambertian(-ray_dir, sun_dir, payload.normal_ws, perceptual_roughness, diffuse_rho, specular_f0) * NoL * sun_inten;
             float3 direct_diffuse = diffuse_rho * (Fd_Lambert() * NoL) * sun_inten;
-            // NOTE: ignore specular for now, because too much fireflys due to caustics
-            if (1) {
+            if (0) {
                 radiance = direct_diffuse;
             }
             else {
@@ -106,8 +108,8 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
         }
 
         // Indirect lighting (diffuse only)
-        // try to read from prev frame color
-        // TODO use world cache instead of screen
+        // 1. try to read from prev frame color
+        // 2. TODO use world cache instead of screen
         if (bool(has_prev_frame)) { 
             float4 prev_hpos = mul(frame_params.prev_view_proj, float4(payload.position_ws, 1.0f));
             float2 ndc = prev_hpos.xy / prev_hpos.w - frame_params.jitter.zw;
@@ -123,10 +125,11 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
 	            float2 prev_screen_uv = ndc.xy * 0.5f + 0.5f;
                 uint2 prev_pixcoord = uint2(floor(prev_screen_uv * buffer_size));
 
+                // TODO compare in world space? Currently this cause a lot light leaking in micro geometry details (where typically AO should works on).
                 float prev_depth_value = prev_depth[prev_pixcoord];
-                float DEPTH_TOLERANCE = 0.0005f; // TODO compare in world space?
+                float DEPTH_TOLERANCE = 0.0001f; 
                 if (abs(reproj_depth - prev_depth_value) < DEPTH_TOLERANCE) {
-                    radiance += prev_indirect_diffuse_texture[prev_pixcoord].rgb;
+                    radiance += diffuse_rho * prev_indirect_diffuse_texture[prev_pixcoord].rgb;
                 }
             }
         } 
