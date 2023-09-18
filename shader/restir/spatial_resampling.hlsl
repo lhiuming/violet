@@ -7,6 +7,9 @@
 
 #define MAX_ITERATION 9
 
+// Use cosine-weighted PDF (instead of uniformly distrubuted) PDF reduce noise alot
+#define UNIFORM_PDF 0
+
 Texture2D<float> gbuffer_depth;
 Texture2D<uint4> gbuffer_color;
 StructuredBuffer<Reservoir> temporal_reservoir_buffer;
@@ -19,6 +22,12 @@ struct PushConstants
 {
     uint frame_index;
 } pc;
+
+#if UNIFORM_PDF
+#define TARGET_PDF_FOR_SAMPLE(z) luminance(z.hit_radiance)
+#else
+#define TARGET_PDF_FOR_SAMPLE(z) (saturate(dot(gbuffer.normal, normalize(z.hit_pos - position_ws))) * luminance(z.hit_radiance))
+#endif
 
 [numthreads(8, 4, 1)]
 void main(uint2 dispatch_id: SV_DispatchThreadID)
@@ -37,17 +46,17 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     const float3 position_ws =
         cs_depth_to_position(dispatch_id, buffer_size, depth);
 
+    // Normal (for similarity test and consine pdf)
+    GBuffer gbuffer = decode_gbuffer(gbuffer_color[dispatch_id.xy]);
+
     Reservoir reservoir;
     float w_sum;
     {
         uint index = dispatch_id.y * buffer_size.x + dispatch_id.x;
         reservoir = temporal_reservoir_buffer[index];
-        float target_pdf = luminance(reservoir.z.hit_radiance);
-        w_sum = reservoir.W * target_pdf * reservoir.M;
+        float target_pdf = TARGET_PDF_FOR_SAMPLE(reservoir.z);
+        w_sum = reservoir.W * target_pdf * float(reservoir.M);
     }
-
-    // Normal (for similarity test)
-    GBuffer gbuffer = decode_gbuffer(gbuffer_color[dispatch_id.xy]);
 
     float radius = 32; // px
     uint rng_state = lcg_init(dispatch_id, buffer_size, pc.frame_index);
@@ -155,8 +164,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 
         // NOTE: should be a typo in the ReSTIR GI paper [Ouyang 2021, algo 4]: It
         // should be `target_pdf * jacobian` instead of `target_pdf / jacobian`
-        float target_pdf_neighbor =
-            luminance(reservoir_n.z.hit_radiance) * reuse_jacobian;
+        float target_pdf_neighbor = TARGET_PDF_FOR_SAMPLE(reservoir_n.z) * reuse_jacobian;
 
         // TODO visibility test, and continue
         // At least NoL test is cheap enough?
@@ -176,7 +184,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
             }
 
             float w_sum_neighbor =
-                reservoir_n.W * target_pdf_neighbor * reservoir_n.M;
+                reservoir_n.W * target_pdf_neighbor * float(reservoir_n.M);
             w_sum += w_sum_neighbor;
             float chance = w_sum_neighbor / w_sum;
             if (lcg_rand(rng_state) < chance)
@@ -192,7 +200,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 
     // update the W
     {
-        float target_pdf = luminance(reservoir.z.hit_radiance);
+        float target_pdf = TARGET_PDF_FOR_SAMPLE(reservoir.z);
 
 #if 0
         // Ideally we use a branch (like in sample_gen.hlsl) instead of injecting a bit of bias. But it is kind of okay here because we are not using the W for anything else beside multiplying it with the hit radiance.
@@ -218,9 +226,6 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     // Evaluate the RIS esimator
     float3 lighting;
     {
-        // world position reconstruction from depth buffer
-        float3 position_ws = cs_depth_to_position(dispatch_id, buffer_size, depth);
-
         float3 selected_dir = normalize(reservoir.z.hit_pos - position_ws);
         float NoL = saturate(dot(gbuffer.normal, selected_dir));
         float brdf = ONE_OVER_PI;
