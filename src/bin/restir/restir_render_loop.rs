@@ -101,6 +101,7 @@ pub struct RestirRenderLoop {
     total_acquire_duration: std::time::Duration,
     total_wait_duration: std::time::Duration,
     total_present_duration: std::time::Duration,
+    last_ui_duration: std::time::Duration,
 }
 
 impl RenderLoop for RestirRenderLoop {
@@ -130,6 +131,7 @@ impl RenderLoop for RestirRenderLoop {
             total_acquire_duration: std::time::Duration::ZERO,
             total_wait_duration: std::time::Duration::ZERO,
             total_present_duration: std::time::Duration::ZERO,
+            last_ui_duration: std::time::Duration::ZERO,
         })
     }
 
@@ -164,6 +166,7 @@ impl RenderLoop for RestirRenderLoop {
         avg_ms("Acq. Swap.", self.total_acquire_duration);
         avg_ms("Wait Swap.", self.total_wait_duration);
         avg_ms("Present", self.total_present_duration);
+        avg_ms("UI (last).", self.last_ui_duration);
 
         self.render_graph_cache.pass_profiling.print();
     }
@@ -302,6 +305,7 @@ impl RenderLoop for RestirRenderLoop {
 
         // Pass: UI
         if let Some(imgui) = imgui {
+            let ui_time = std::time::Instant::now();
             self.imgui_pass.add(
                 &mut rg,
                 rd,
@@ -311,6 +315,7 @@ impl RenderLoop for RestirRenderLoop {
                 imgui,
                 None,
             );
+            self.last_ui_duration = ui_time.elapsed();
         }
 
         // Pass: Output

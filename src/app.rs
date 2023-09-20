@@ -126,6 +126,7 @@ where
         // Reload shaders
         if window.clicked('r') {
             shaders.reload_all();
+            println!("App:: shader reloaded.")
         }
 
         // Reset camera
