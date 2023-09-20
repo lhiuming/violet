@@ -100,6 +100,7 @@ where
 
     // Add ImGUI
     let mut imgui = imgui::ImGUI::new();
+    let mut show_gui = true;
 
     // Init camera
     // NOTE:
@@ -249,11 +250,18 @@ where
         }
 
         // Show GUI
-        let imgui_output = imgui.run(window_size, &window, |ctx| {
-            imgui::Window::new("Render Loop").show(ctx, |ui| {
-                render_loop.ui(ui);
-            });
-        });
+        if window.clicked('u') {
+            show_gui = !show_gui;
+        }
+        let imgui_output = if show_gui {
+            Some(imgui.run(window_size, &window, |ctx| {
+                imgui::Window::new("Render Loop").show(ctx, |ui| {
+                    render_loop.ui(ui);
+                });
+            }))
+        } else {
+            None
+        };
 
         // Render if swapchain is not changed; save a lot troubles :)
         if !window.minimized() {
@@ -262,7 +270,7 @@ where
                 &mut shaders,
                 &render_scene,
                 &view_info,
-                Some(&imgui_output),
+                imgui_output.as_ref(),
             );
         }
 
