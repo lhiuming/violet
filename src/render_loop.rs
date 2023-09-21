@@ -324,11 +324,7 @@ pub struct StreamLinedFrameResource {
     present_finished_fences: Vec<vk::Fence>,
     present_ready_semaphores: Vec<vk::Semaphore>,
 
-    // Index to acess per-frame resources, but in double period
-    double_render_index: u32,
-
-    /// Resrouce that is released after MAX_FRAMES_ON_THE_FLY frames.
-    /// Accessed by double render index (push: +MAX_FRAMES_ON_THE_FLY)
+    /// Resrouce that is released after MAX_FRAMES_ON_THE_FLY-1 frames.
     delayed_release: Vec<Vec<ResourceType>>,
 }
 
@@ -361,7 +357,6 @@ impl StreamLinedFrameResource {
             command_buffer_finished_fences,
             present_finished_fences,
             present_ready_semaphores,
-            double_render_index: 0,
             delayed_release,
         }
     }
@@ -369,7 +364,6 @@ impl StreamLinedFrameResource {
     // Index into per-render resource arrays (command_buffer, constant_buffer slot, etc.)
     pub fn advance_render_index(&mut self) -> u32 {
         self.render_index = (self.render_index + 1) % (MAX_FRAMES_ON_THE_FLY);
-        self.double_render_index = (self.double_render_index + 1) % (MAX_FRAMES_ON_THE_FLY * 2);
         self.render_index
     }
 
@@ -414,13 +408,12 @@ impl StreamLinedFrameResource {
     }
 
     fn delay_release(&mut self, res: ResourceType) {
-        let future_index =
-            (self.double_render_index + MAX_FRAMES_ON_THE_FLY) % (MAX_FRAMES_ON_THE_FLY * 2);
+        let future_index = (self.render_index + MAX_FRAMES_ON_THE_FLY - 1) % MAX_FRAMES_ON_THE_FLY;
         self.delayed_release[future_index as usize].push(res);
     }
 
     fn release_resources(&mut self, rd: &RenderDevice) {
-        let resources = &mut self.delayed_release[self.double_render_index as usize];
+        let resources = &mut self.delayed_release[self.render_index as usize];
         for resource in resources.drain(0..) {
             match resource {
                 ResourceType::Buffer(buffer) => {

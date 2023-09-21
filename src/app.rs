@@ -62,7 +62,7 @@ where
 
     // Create a system window
     // TODO implement Drop for Window
-    let window_size = UVec2::new(1280, 720);
+    let window_size = UVec2::new(1920, 1080);
     let mut window = Window::new(window_size, "Rusty Violet");
 
     let mut rd =

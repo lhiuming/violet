@@ -9,10 +9,7 @@ use crate::{
     render_device::{
         Buffer, BufferDesc, RenderDevice, Texture, TextureDesc, TextureView, TextureViewDesc,
     },
-    render_graph::{
-        ColorLoadOp, ColorTarget, PassBuilderTrait, RGHandle, RenderGraphBuilder,
-        DESCRIPTOR_SET_INDEX_UNUSED,
-    },
+    render_graph::{ColorLoadOp, ColorTarget, PassBuilderTrait, RGHandle, RenderGraphBuilder},
     render_scene::UploadContext,
     shader::PushConstantsBuilder,
 };
@@ -20,7 +17,7 @@ use crate::{
 use super::StreamLinedFrameResource;
 
 // see also: imgui_vsps.hlsl
-static IMGUI_DESCRIPTOR_SET_INDEX: u32 = 0;
+static IMGUI_DESCRIPTOR_SET_INDEX: u32 = 3;
 
 pub struct ImGUIPass {
     index_buffer: Option<Buffer>,
@@ -38,38 +35,21 @@ impl ImGUIPass {
         let descriptor_set_pool = rd.create_descriptor_pool(
             vk::DescriptorPoolCreateFlags::UPDATE_AFTER_BIND,
             1,
-            &[
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::STORAGE_BUFFER,
-                    descriptor_count: 1, // vertex buffer
-                },
-                vk::DescriptorPoolSize {
-                    ty: vk::DescriptorType::SAMPLED_IMAGE,
-                    descriptor_count: 1024, // TODO bindless
-                },
-            ],
+            &[vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::SAMPLED_IMAGE,
+                descriptor_count: 1024, // TODO bindless
+            }],
         );
         let set_layout = {
             let stage_flags = vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT;
-            let bindings = [
-                vk::DescriptorSetLayoutBinding::builder()
-                    .binding(0)
-                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                    .descriptor_count(1)
-                    .stage_flags(stage_flags)
-                    .build(),
-                vk::DescriptorSetLayoutBinding::builder()
-                    .binding(1)
-                    .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
-                    .descriptor_count(1024)
-                    .stage_flags(stage_flags)
-                    .build(),
-            ];
-            let binding_falgs = [
-                vk::DescriptorBindingFlags::default(),
-                vk::DescriptorBindingFlags::PARTIALLY_BOUND
-                    | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND,
-            ];
+            let bindings = [vk::DescriptorSetLayoutBinding::builder()
+                .binding(1)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(1024)
+                .stage_flags(stage_flags)
+                .build()];
+            let binding_falgs = [vk::DescriptorBindingFlags::PARTIALLY_BOUND
+                | vk::DescriptorBindingFlags::UPDATE_AFTER_BIND];
             let mut flags_create_info = vk::DescriptorSetLayoutBindingFlagsCreateInfo::builder()
                 .binding_flags(&binding_falgs);
             let create_info = vk::DescriptorSetLayoutCreateInfo::builder()
@@ -145,19 +125,6 @@ impl ImGUIPass {
                     memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
                 })
                 .unwrap();
-
-            let buffer_info = vk::DescriptorBufferInfo::builder()
-                .buffer(buffer.handle)
-                .offset(0)
-                .range(vk::WHOLE_SIZE)
-                .build();
-            let descriptor_writes = [vk::WriteDescriptorSet::builder()
-                .dst_set(self.descriptor_set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(std::slice::from_ref(&buffer_info))
-                .build()];
-            rd.update_descriptor_sets(&descriptor_writes, &[]);
 
             self.vertex_buffer = Some(buffer);
         }
@@ -591,32 +558,25 @@ impl ImGUIPass {
                 1.0 / viewport_extent.width as f32,
                 1.0 / viewport_extent.height as f32,
             );
+            let pos_to_screen_uv = imgui.pixels_per_point * texel_size;
             let index_buffer_handle = index_buffer.handle;
-            let imgui_descriptor_set = self.descriptor_set;
+            let rg_vertex_buffer = rg.register_buffer(vertex_buffer);
             let target_view = rg.create_texture_view(target, None);
             let load_op = match clear {
                 Some(color) => ColorLoadOp::Clear(color),
                 None => ColorLoadOp::Load,
             };
-
-            /*
-            // check
-            let target_format = rg.get_texture_desc(target).format;
-            if !rd.format_support_blending(target_format) {
-                panic!("ImGUI: target format {:?} does not support blending; GUI may not composed corecctly.", target_format);
-            }
-            */
-
+            let imgui_descriptor_set = self.descriptor_set;
             rg.new_graphics("ImGUI")
                 .vertex_shader_with_ep("imgui_vsps.hlsl", "vs_main")
                 .pixel_shader_with_ep("imgui_vsps.hlsl", "ps_main")
                 .set_layout_override(IMGUI_DESCRIPTOR_SET_INDEX, self.descriptor_set_layout)
-                .descriptor_set_index(DESCRIPTOR_SET_INDEX_UNUSED)
                 .color_targets(&[ColorTarget {
                     view: target_view,
                     load_op,
                 }])
                 .blend_enabled(true)
+                .buffer("vertex_buffer", rg_vertex_buffer)
                 .render(move |cb, pipeline| {
                     // TODO make into gfx config
                     cb.set_depth_test_enable(false);
@@ -645,7 +605,7 @@ impl ImGUIPass {
                             let pc = PushConstantsBuilder::new()
                                 .push(&vertex_offset)
                                 .push(&texture_meta)
-                                .push(&texel_size);
+                                .push(&pos_to_screen_uv);
                             cb.push_constants(
                                 pipeline.layout,
                                 pipeline.push_constant_ranges[0].stage_flags,

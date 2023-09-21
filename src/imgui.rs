@@ -12,6 +12,7 @@ pub use egui::{TopBottomPanel, Ui, Window};
 
 pub struct ImGUI {
     pub egui_ctx: egui::Context,
+    curr_pixels_per_point: f32,
 }
 
 // Things to be render/updated on GPU.
@@ -19,6 +20,7 @@ pub struct ImGUIOuput {
     //pub repaint_after: std::time::Duration,
     pub textures_delta: egui::epaint::textures::TexturesDelta,
     pub clipped_primitives: Vec<egui::ClippedPrimitive>,
+    pub pixels_per_point: f32,
 }
 
 fn transmute_key(discriminant: u8) -> Key {
@@ -42,24 +44,29 @@ fn char_to_egui_key(char: u8) -> Option<Key> {
 impl ImGUI {
     pub fn new() -> Self {
         let egui_ctx = egui::Context::default();
-        Self { egui_ctx }
+        Self {
+            egui_ctx,
+            curr_pixels_per_point: 1.0,
+        }
     }
 
     // Gather input (mouse, touches, keyboard, screen size, etc):
     pub fn gather_input(&self, window_size: UVec2, window: &window::Window) -> egui::RawInput {
+        let pixels_per_point = window.pixels_per_point();
         let mut raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect {
                 min: egui::Pos2 { x: 0.0, y: 0.0 },
                 max: egui::Pos2 {
-                    x: window_size.x as f32,
-                    y: window_size.y as f32,
+                    x: window_size.x as f32 / pixels_per_point,
+                    y: window_size.y as f32 / pixels_per_point,
                 },
             }),
+            pixels_per_point: Some(pixels_per_point),
             ..Default::default()
         };
 
-        // NOTE: no scaling; logical pixel == pixel
-        let to_pos2 = |x: &i16, y: &i16| pos2(*x as f32, *y as f32);
+        let to_pos2 =
+            |x: &i16, y: &i16| pos2(*x as f32 / pixels_per_point, *y as f32 / pixels_per_point);
 
         raw_input.events = window
             .msg_stream()
@@ -99,6 +106,9 @@ impl ImGUI {
 
     // Before adding ui elements
     pub fn begin(&mut self, raw_input: egui::RawInput) {
+        if let Some(pixels_per_point) = raw_input.pixels_per_point {
+            self.curr_pixels_per_point = pixels_per_point;
+        }
         self.egui_ctx.begin_frame(raw_input);
     }
 
@@ -109,6 +119,7 @@ impl ImGUI {
         ImGUIOuput {
             textures_delta: full_output.textures_delta,
             clipped_primitives,
+            pixels_per_point: self.curr_pixels_per_point,
         }
     }
 

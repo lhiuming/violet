@@ -1,15 +1,15 @@
 #include "frame_bindings.hlsl"
 
-#define IMGUI_DESCRIPTOR_SET_INDEX 0
-
-[[vk::binding(0, IMGUI_DESCRIPTOR_SET_INDEX)]] ByteAddressBuffer vertex_buffer;
+#define IMGUI_DESCRIPTOR_SET_INDEX 3
 [[vk::binding(1, IMGUI_DESCRIPTOR_SET_INDEX)]] Texture2D bindless_textures[];
+
+ByteAddressBuffer vertex_buffer;
 
 [[vk::push_constant]]
 struct PushConstants {
     uint vertex_offset;
     uint texture_meta; // 0xFFFF0000: is font; 0x0000FFFF: texture index
-    float2 texel_size;
+    float2 pos_to_screen_uv; // texel_size * pos_to_pixel_scale
 } pc;
 
 // 4 f32 + 1 R8G8B8A8
@@ -34,7 +34,7 @@ void vs_main(
     float4 pos_and_uv = asfloat(vertex_buffer.Load4(vert_byte_offset));
     float4 sRGB_A = unpack_rgba(vertex_buffer.Load(vert_byte_offset + VERTEX_COLOR_OFFSET));
 
-    float2 pos = pos_and_uv.xy * pc.texel_size;
+    float2 pos = pos_and_uv.xy * pc.pos_to_screen_uv;
 	hpos = float4(pos * 2.0 - 1.0, 1.0, 1.0);
     uv = pos_and_uv.zw;
     // TOOD convert to linear
