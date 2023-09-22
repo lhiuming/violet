@@ -30,9 +30,9 @@ struct PushConstants
 // TODO: using luminance() might cause bias toward green samples ...
 float radiance_reduce(float3 radiance)
 {
-    //return luminance(radiance);
+    return luminance(radiance);
     //return dot(radiance, 1.0.rrr);
-    return max3(radiance);
+    //return max3(radiance);
 }
 
 #if UNIFORM_PDF
@@ -74,7 +74,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     //float radius = MAX_RADIUS; // px
     float radius = min(buffer_size.x, buffer_size.y) * INIT_RADIUS_FACTOR;
     #if USE_AO
-    radius = max(radius * ao * ao, MIN_RADIUS);
+    radius = max(radius * ao, MIN_RADIUS);
     #endif
     uint rng_state = lcg_init(dispatch_id, buffer_size, pc.frame_index);
     for (uint i = 0; i < MAX_ITERATION; i++)
@@ -123,7 +123,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         geometrical_diff |=
             dot(gbuffer.normal, gbuffer_n.normal) < cos(NORMAL_ANGLE_TELERANCE);
         // depth test (within 0.05 of depth range) [Ouyang 2021]
-        // TODO should be normalized depth
+        // TODO should be normalized depth (currently hard to trading between noise and light leak due to inconsistent depth range) 
         // TODO wall viewed from grazing-angle will become noisy because depth
         // gradient is large in this case. So a better test should check if two
         // visble sample are on the same surface (plane)
