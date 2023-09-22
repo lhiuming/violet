@@ -4,8 +4,8 @@ use std::{ffi, mem, ptr};
 use glam::UVec2;
 
 use windows_sys::Win32::{
-    Foundation::*, System::LibraryLoader::*, System::Memory::*, UI::Input::KeyboardAndMouse::*,
-    UI::WindowsAndMessaging::*,
+    Foundation::*, System::LibraryLoader::*, System::Memory::*, UI::HiDpi::*,
+    UI::Input::KeyboardAndMouse::*, UI::WindowsAndMessaging::*,
 };
 
 // TODO this process shoule be run in compile time, and return a const u16 array; but currently this is hard to write in Rust (might need to use proc_macro)
@@ -352,12 +352,20 @@ unsafe extern "system" fn wnd_callback(
 
 pub struct Window {
     system_handle: u64,
+    pixels_per_point: f32, // useful on hi-res screen and apps is scaled system-wide.
     message_handler: Option<Box<MessageHandler>>,
 }
 
 impl Window {
     // General constructor
     pub fn new(init_size: UVec2, title: &str) -> Box<Window> {
+        // Tell the system that we care about DPI, such that
+        // - the windows surface will not be scale before display.
+        // - GetDpiForSystem will return a useful value
+        unsafe {
+            SetProcessDPIAware();
+        }
+
         // Check if we have reigster window class (wnd_callback)
         ensure_register_window_class();
 
@@ -415,6 +423,11 @@ impl Window {
             report_last_error();
         }
 
+        let pixels_per_point: f32 = unsafe {
+            let dpi = GetDpiForSystem();
+            dpi as f32 / USER_DEFAULT_SCREEN_DPI as f32
+        };
+
         // A message handler, on heap, to receive message from global call back
         let message_handler = Some(Box::new(MessageHandler::new(hwnd)));
 
@@ -423,6 +436,7 @@ impl Window {
             std::assert!(mem::size_of_val(&hwnd) >= mem::size_of::<HWND>());
             let temp = Window {
                 system_handle: hwnd as u64,
+                pixels_per_point,
                 message_handler: message_handler,
             };
             Box::new(temp)
@@ -504,6 +518,10 @@ impl Window {
     pub fn system_handle_for_module() -> u64 {
         let hmodule = unsafe { GetModuleHandleW(std::ptr::null_mut()) };
         hmodule as u64
+    }
+
+    pub fn pixels_per_point(&self) -> f32 {
+        self.pixels_per_point
     }
 
     pub fn should_close(&self) -> bool {
