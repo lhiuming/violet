@@ -242,6 +242,7 @@ impl RenderPass<'_> {
 // Private interfaces for all pass builders, for implementing the public trait
 // TODO any way in rust to actually make this private?
 pub trait PrivatePassBuilderTrait<'render> {
+    fn rg(&mut self) -> &mut RenderGraphBuilder<'render>;
     fn inner(&mut self) -> &mut RenderPass<'render>;
 }
 
@@ -258,9 +259,21 @@ pub trait PassBuilderTrait<'render>: PrivatePassBuilderTrait<'render> {
         self
     }
 
+    fn texture_raw(&mut self, name: &'static str, texture: RGHandle<Texture>) -> &mut Self {
+        let view = self.rg().create_texture_view(texture, None);
+        self.inner().textures.push((name, view));
+        self
+    }
+
     // Binding rw texture to per-pass descriptor set
     fn rw_texture(&mut self, name: &'static str, texture: RGHandle<TextureView>) -> &mut Self {
         self.inner().rw_textures.push((name, texture));
+        self
+    }
+
+    fn rw_texture_raw(&mut self, name: &'static str, texture: RGHandle<Texture>) -> &mut Self {
+        let view = self.rg().create_texture_view(texture, None);
+        self.inner().rw_textures.push((name, view));
         self
     }
 
@@ -323,6 +336,10 @@ macro_rules! define_pass_builder {
 
         // Implement methods
         impl<'render> PrivatePassBuilderTrait<'render> for $pass_builder<'_, 'render> {
+            fn rg(&mut self) -> &mut RenderGraphBuilder<'render> {
+                self.render_graph
+            }
+
             fn inner(&mut self) -> &mut RenderPass<'render> {
                 self.inner.as_mut().unwrap()
             }
