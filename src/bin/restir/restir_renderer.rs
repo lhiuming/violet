@@ -40,15 +40,25 @@ impl TAAPass {
     }
 }
 
+#[derive(Debug, PartialEq)]
+enum DebugView {
+    None,
+    AO,
+}
+
 pub struct RestirConfig {
     validation: bool,
     taa: bool,
+    ao_radius: f32,
+    debug_view: DebugView,
 }
 impl Default for RestirConfig {
     fn default() -> Self {
         Self {
             validation: true,
             taa: true,
+            ao_radius: 0.5,
+            debug_view: DebugView::None,
         }
     }
 }
@@ -59,6 +69,8 @@ pub struct RestirRenderer {
 
     sample_gen: SampleGenPass,
     taa: TAAPass,
+
+    ao_history: Option<RGTemporal<Texture>>,
 }
 
 impl RestirRenderer {
@@ -67,6 +79,7 @@ impl RestirRenderer {
             config: Default::default(),
             sample_gen: SampleGenPass::new(),
             taa: TAAPass::new(),
+            ao_history: None,
         }
     }
 
@@ -79,6 +92,14 @@ impl RestirRenderer {
         ui.heading("RESTIR RENDERER");
         ui.checkbox(&mut config.validation, "sample validation");
         ui.checkbox(&mut config.taa, "taa");
+        ui.add(egui::Slider::new(&mut config.ao_radius, 0.0..=5.0).text("ao radius"));
+
+        egui::ComboBox::from_label("debug view")
+            .selected_text(format!("{:?}", config.debug_view))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut config.debug_view, DebugView::None, "None");
+                ui.selectable_value(&mut config.debug_view, DebugView::AO, "AO");
+            });
     }
 
     pub fn add_passes<'render>(
@@ -130,8 +151,9 @@ impl RestirRenderer {
             None => rg.register_buffer(default_res.dummy_buffer),
         };
 
+        let has_buffer_for_validation = has_prev_depth && has_prev_reservoir;
         let is_validation_frame =
-            has_prev_reservoir && ((frame_index % 6) == 0) && self.config.validation;
+            has_buffer_for_validation && ((frame_index % 6) == 0) && self.config.validation;
 
         // Pass: Sample Generation (and temporal reusing)
         let has_new_sample;
@@ -186,6 +208,41 @@ impl RestirRenderer {
         let temporal_reservoir_buffer =
             rg.create_buffer(BufferDesc::compute(main_size_flat as u64 * 24 * 4));
 
+        let has_ao_history = self.ao_history.is_some() as u32;
+        let ao_history = match self.ao_history {
+            Some(temporal) => rg.convert_to_transient(temporal),
+            None => rg.create_texutre(TextureDesc::new_2d(
+                main_size.x,
+                main_size.y,
+                vk::Format::R16G16B16A16_SFLOAT,
+                vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+            )),
+        };
+        let ao_texture = rg.create_texutre(TextureDesc::new_2d(
+            main_size.x,
+            main_size.y,
+            vk::Format::R8_UNORM,
+            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+        ));
+
+        // Pass: AO
+        rg.new_compute("RayTraced AO")
+            .compute_shader("restir/raytraced_ao.hlsl")
+            .buffer("new_sample_buffer", new_sample_buffer)
+            .texture("depth_buffer", gbuffer.depth.1)
+            .rw_texture_raw("rw_ao_history_texture", ao_history)
+            .rw_texture_raw("rw_ao_texture", ao_texture)
+            .push_constant::<u32>(&has_new_sample)
+            .push_constant::<u32>(&has_ao_history)
+            .push_constant::<f32>(&self.config.ao_radius)
+            .group_count(
+                div_round_up(main_size.x, 8),
+                div_round_up(main_size.y, 4),
+                1,
+            );
+
+        self.ao_history.replace(rg.convert_to_temporal(ao_history));
+
         // Pass: Temporal Resampling
         rg.new_compute("Temporal Resample")
             .compute_shader("restir/temporal_resample.hlsl")
@@ -224,6 +281,7 @@ impl RestirRenderer {
                 .compute_shader("restir/spatial_resampling.hlsl")
                 .texture("gbuffer_depth", gbuffer.depth.1)
                 .texture("gbuffer_color", gbuffer.color.1)
+                .texture_raw("ao_texture", ao_texture)
                 .buffer("temporal_reservoir_buffer", temporal_reservoir_buffer)
                 .rw_buffer("rw_spatial_reservoir_buffer", spatial_reservoir_buffer)
                 .rw_texture("rw_lighting_texture", indirect_diffuse.1)
@@ -374,6 +432,19 @@ impl RestirRenderer {
                 );
         } else {
             post_taa_color = scene_color;
+        }
+
+        // Pass: debug view
+        if self.config.debug_view != DebugView::None {
+            rg.new_compute("Debug View")
+                .compute_shader("restir/debug_view.hlsl")
+                .texture_raw("color_texture", ao_texture)
+                .rw_texture_raw("rw_output_texture", post_taa_color.0)
+                .group_count(
+                    div_round_up(main_size.x, 8),
+                    div_round_up(main_size.y, 4),
+                    1,
+                );
         }
 
         // Cache scene buffer for next frame (TAA, temporal restir, etc.)

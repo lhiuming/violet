@@ -6,13 +6,16 @@
 #include "reservoir.hlsl"
 
 #define MAX_ITERATION 9
-#define MAX_RADIUS 16
+#define INIT_RADIUS_FACTOR 0.1
+#define MIN_RADIUS 1.5
+#define USE_AO 1
 
 // Using cosine-weighted PDF (instead of uniformly distrubuted) PDF reduce noise alot
 #define UNIFORM_PDF 0
 
 Texture2D<float> gbuffer_depth;
 Texture2D<uint4> gbuffer_color;
+Texture2D<float> ao_texture;
 StructuredBuffer<Reservoir> temporal_reservoir_buffer;
 RWStructuredBuffer<Reservoir> rw_spatial_reservoir_buffer;
 RWTexture2D<float3> rw_lighting_texture;
@@ -24,10 +27,18 @@ struct PushConstants
     uint frame_index;
 } pc;
 
+// TODO: using luminance() might cause bias toward green samples ...
+float radiance_reduce(float3 radiance)
+{
+    //return luminance(radiance);
+    //return dot(radiance, 1.0.rrr);
+    return max3(radiance);
+}
+
 #if UNIFORM_PDF
-#define TARGET_PDF_FOR_SAMPLE(z) luminance(z.hit_radiance)
+#define TARGET_PDF_FOR_SAMPLE(z) radiance_reduce(z.hit_radiance)
 #else
-#define TARGET_PDF_FOR_SAMPLE(z) (saturate(dot(gbuffer.normal, normalize(z.hit_pos - position_ws))) * luminance(z.hit_radiance))
+#define TARGET_PDF_FOR_SAMPLE(z) (saturate(dot(gbuffer.normal, normalize(z.hit_pos - position_ws))) * radiance_reduce(z.hit_radiance))
 #endif
 
 [numthreads(8, 4, 1)]
@@ -49,6 +60,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 
     // Normal (for similarity test and consine pdf)
     GBuffer gbuffer = decode_gbuffer(gbuffer_color[dispatch_id.xy]);
+    float ao = ao_texture[dispatch_id.xy];
 
     Reservoir reservoir;
     float w_sum;
@@ -59,7 +71,11 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         w_sum = reservoir.W * target_pdf * float(reservoir.M);
     }
 
-    float radius = MAX_RADIUS; // px
+    //float radius = MAX_RADIUS; // px
+    float radius = min(buffer_size.x, buffer_size.y) * INIT_RADIUS_FACTOR;
+    #if USE_AO
+    radius = max(radius * ao * ao, MIN_RADIUS);
+    #endif
     uint rng_state = lcg_init(dispatch_id, buffer_size, pc.frame_index);
     for (uint i = 0; i < MAX_ITERATION; i++)
     {
@@ -103,8 +119,9 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         // Geometry similarity test
         bool geometrical_diff = false;
         // normal test (within 25 degree) [Ouyang 2021]
+        const float NORMAL_ANGLE_TELERANCE = PI * (25.0 / 180.0);
         geometrical_diff |=
-            dot(gbuffer.normal, gbuffer_n.normal) < cos(PI * (25.0 / 180.0));
+            dot(gbuffer.normal, gbuffer_n.normal) < cos(NORMAL_ANGLE_TELERANCE);
         // depth test (within 0.05 of depth range) [Ouyang 2021]
         // TODO should be normalized depth
         // TODO wall viewed from grazing-angle will become noisy because depth
@@ -114,6 +131,8 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         geometrical_diff |= abs(depth - depth_n) > DEPTH_TOLERANCE;
         if (geometrical_diff)
         {
+            // [Ouyang 2021]
+            radius = max(radius * 0.5, MIN_RADIUS);
             continue;
         }
 
@@ -170,8 +189,11 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 
         // TODO visibility test, and continue
         // At least NoL test is cheap enough?
-        if (0)
+        //if (0)
+        if (target_pdf_neighbor <= 0.0)
         {
+            // [Ouyang 2021]
+            //radius = max(radius * 0.5, 3.0);
             continue;
         }
 

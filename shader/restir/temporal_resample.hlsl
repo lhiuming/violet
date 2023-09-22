@@ -27,6 +27,13 @@ struct PushConstants
 [[vk::push_constant]]
 PushConstants pc;
 
+float radiance_reduce(float3 radiance)
+{
+    return luminance(radiance);
+    //return dot(radiance, 1.0.rrr);
+    //return max3(radiance);
+}
+
 [numthreads(8, 4, 1)]
 void main(uint2 dispatch_id: SV_DispatchThreadID)
 {
@@ -117,10 +124,10 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         // TODO maybe put into textures for faster read/write
         RestirSample new_sample = new_sample_buffer[buffer_size.x * dispatch_id.y + dispatch_id.x];
 
-        float reservoir_target_pdf = luminance(reservoir.z.hit_radiance);
+        float reservoir_target_pdf = radiance_reduce(reservoir.z.hit_radiance);
         float w_sum = reservoir.W * reservoir_target_pdf * float(reservoir.M);
 
-        float new_target_pdf = luminance(new_sample.hit_radiance);
+        float new_target_pdf = radiance_reduce(new_sample.hit_radiance);
         float new_w = new_target_pdf * TWO_PI; // source_pdf = 1 / TWO_PI;
 
         uint rng_state = lcg_init(dispatch_id.xy, buffer_size, pc.frame_index);
