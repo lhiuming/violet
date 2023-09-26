@@ -307,7 +307,7 @@ void main() {
         ray.Direction = normalize(ray.Direction);
 
         // Terminate poth with zero contribution
-        if (max3(brdf_NoL_over_pdf) <= 0.0f)
+        if (component_max(brdf_NoL_over_pdf) <= 0.0f)
         {
             break;
         }

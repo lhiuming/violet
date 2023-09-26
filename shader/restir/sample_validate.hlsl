@@ -53,7 +53,7 @@ void main()
     // Just replace the sample if too different
     // TODO should blend in natually
     float3 prev_radiance = reservoir.z.hit_radiance;
-    float max_radiance = max(max(prev_radiance.x, prev_radiance.y), prev_radiance.z);
+    float max_radiance = component_max(prev_radiance);
     bool changed = any(abs(prev_radiance - hit.radiance) > max_radiance * 0.5f);
     if (changed)
     {
