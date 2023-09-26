@@ -6,6 +6,8 @@
 #include "../raytrace/shadow_ray.inc.hlsl"
 #include "../sampling.hlsl"
 
+#define RAYTRACE_INC_FIREFLY_SUPPRESS 1
+
 RaytracingAccelerationStructure scene_tlas;
 TextureCube<float4> skycube;
 Texture2D<float3> prev_indirect_diffuse_texture;
@@ -91,6 +93,10 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
             // SPECULAR_SUPRESSION
             float perceptual_roughness = max(payload.perceptual_roughness, 0.045f);
 
+            #if RAYTRACE_INC_FIREFLY_SUPPRESS
+            perceptual_roughness = max(perceptual_roughness, 0.5f);
+            #endif
+
             float NoL = saturate(dot(payload.normal_ws, sun_dir));
             float3 specular_f0 = get_specular_f0(payload.base_color, payload.metallic);
             float3 direct_lighting = eval_GGX_Lambertian(-ray_dir, sun_dir, payload.normal_ws, perceptual_roughness, diffuse_rho, specular_f0) * NoL * sun_inten;
@@ -124,9 +130,9 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
                 // nearest neighbor sampling
 	            float2 prev_screen_uv = ndc.xy * 0.5f + 0.5f;
                 uint2 prev_pixcoord = uint2(floor(prev_screen_uv * buffer_size));
+                float prev_depth_value = prev_depth[prev_pixcoord];
 
                 // TODO compare in world space? Currently this cause a lot light leaking in micro geometry details (where typically AO should works on).
-                float prev_depth_value = prev_depth[prev_pixcoord];
                 float DEPTH_TOLERANCE = 0.0001f; 
                 if (abs(reproj_depth - prev_depth_value) < DEPTH_TOLERANCE) {
                     radiance += diffuse_rho * prev_indirect_diffuse_texture[prev_pixcoord].rgb;

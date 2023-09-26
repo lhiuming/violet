@@ -44,6 +44,8 @@ impl TAAPass {
 enum DebugView {
     None,
     AO,
+    FilteredAO,
+    IndirectDiffuse,
 }
 
 pub struct RestirConfig {
@@ -57,7 +59,7 @@ impl Default for RestirConfig {
         Self {
             validation: true,
             taa: true,
-            ao_radius: 0.5,
+            ao_radius: 2.0,
             debug_view: DebugView::None,
         }
     }
@@ -99,6 +101,12 @@ impl RestirRenderer {
             .show_ui(ui, |ui| {
                 ui.selectable_value(&mut config.debug_view, DebugView::None, "None");
                 ui.selectable_value(&mut config.debug_view, DebugView::AO, "AO");
+                ui.selectable_value(&mut config.debug_view, DebugView::FilteredAO, "FilteredAO");
+                ui.selectable_value(
+                    &mut config.debug_view,
+                    DebugView::IndirectDiffuse,
+                    "IndirectDiff",
+                );
             });
     }
 
@@ -208,32 +216,27 @@ impl RestirRenderer {
         let temporal_reservoir_buffer =
             rg.create_buffer(BufferDesc::compute(main_size_flat as u64 * 24 * 4));
 
-        let has_ao_history = self.ao_history.is_some() as u32;
-        let ao_history = match self.ao_history {
+        let has_prev_ao = self.ao_history.is_some() as u32;
+        let prev_ao_texture = match self.ao_history.take() {
             Some(temporal) => rg.convert_to_transient(temporal),
-            None => rg.create_texutre(TextureDesc::new_2d(
-                main_size.x,
-                main_size.y,
-                vk::Format::R16G16B16A16_SFLOAT,
-                vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
-            )),
+            None => rg.register_texture(default_res.dummy_texture.0),
         };
-        let ao_texture = rg.create_texutre(TextureDesc::new_2d(
+        let curr_ao_texture = rg.create_texutre(TextureDesc::new_2d(
             main_size.x,
             main_size.y,
-            vk::Format::R8_UNORM,
+            vk::Format::R16G16B16A16_SFLOAT,
             vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
         ));
 
-        // Pass: AO
-        rg.new_compute("RayTraced AO")
-            .compute_shader("restir/raytraced_ao.hlsl")
+        // Pass: AO Gen and Temporal Filtering
+        rg.new_compute("RayTraced AO Gen")
+            .compute_shader("restir/raytraced_ao_gen.hlsl")
             .buffer("new_sample_buffer", new_sample_buffer)
             .texture("depth_buffer", gbuffer.depth.1)
-            .rw_texture_raw("rw_ao_history_texture", ao_history)
-            .rw_texture_raw("rw_ao_texture", ao_texture)
+            .texture_raw("prev_ao_texture", prev_ao_texture)
+            .rw_texture_raw("rw_ao_texture", curr_ao_texture)
             .push_constant::<u32>(&has_new_sample)
-            .push_constant::<u32>(&has_ao_history)
+            .push_constant::<u32>(&has_prev_ao)
             .push_constant::<f32>(&self.config.ao_radius)
             .group_count(
                 div_round_up(main_size.x, 8),
@@ -241,7 +244,27 @@ impl RestirRenderer {
                 1,
             );
 
-        self.ao_history.replace(rg.convert_to_temporal(ao_history));
+        let filtered_ao_texture = rg.create_texutre(TextureDesc::new_2d(
+            main_size.x,
+            main_size.y,
+            vk::Format::R16G16B16A16_SFLOAT,
+            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+        ));
+
+        // Pass: AO Spatial Filtering
+        rg.new_compute("RayTraced AO Filter")
+            .compute_shader("restir/raytraced_ao_filter.hlsl")
+            .texture("depth_buffer", gbuffer.depth.1)
+            .texture_raw("ao_texture", curr_ao_texture)
+            .rw_texture_raw("rw_filtered_ao_texture", filtered_ao_texture)
+            .group_count(
+                div_round_up(main_size.x, 8),
+                div_round_up(main_size.y, 4),
+                1,
+            );
+
+        self.ao_history
+            .replace(rg.convert_to_temporal(curr_ao_texture));
 
         // Pass: Temporal Resampling
         rg.new_compute("Temporal Resample")
@@ -281,7 +304,7 @@ impl RestirRenderer {
                 .compute_shader("restir/spatial_resampling.hlsl")
                 .texture("gbuffer_depth", gbuffer.depth.1)
                 .texture("gbuffer_color", gbuffer.color.1)
-                .texture_raw("ao_texture", ao_texture)
+                .texture_raw("ao_texture", filtered_ao_texture)
                 .buffer("temporal_reservoir_buffer", temporal_reservoir_buffer)
                 .rw_buffer("rw_spatial_reservoir_buffer", spatial_reservoir_buffer)
                 .rw_texture("rw_lighting_texture", indirect_diffuse.1)
@@ -436,9 +459,15 @@ impl RestirRenderer {
 
         // Pass: debug view
         if self.config.debug_view != DebugView::None {
+            let color_texture = match self.config.debug_view {
+                DebugView::AO => curr_ao_texture,
+                DebugView::FilteredAO => filtered_ao_texture,
+                DebugView::IndirectDiffuse => indirect_diffuse.0,
+                DebugView::None => rg.register_texture(default_res.dummy_texture.0),
+            };
             rg.new_compute("Debug View")
                 .compute_shader("restir/debug_view.hlsl")
-                .texture_raw("color_texture", ao_texture)
+                .texture_raw("color_texture", color_texture)
                 .rw_texture_raw("rw_output_texture", post_taa_color.0)
                 .group_count(
                     div_round_up(main_size.x, 8),

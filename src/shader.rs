@@ -753,6 +753,10 @@ fn make_merged_push_constant_ranges(
     for (stage_flag, reflection) in stages_info {
         let stage_flag = *stage_flag;
         if let Ok(Some(info)) = reflection.get_push_constant_range() {
+            if info.size == 0 {
+                continue;
+            }
+
             // merge to prev range entry
             let mut merged = false;
             for range in &mut push_constant_ranges {

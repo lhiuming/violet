@@ -6,9 +6,15 @@
 #include "reservoir.hlsl"
 
 #define MAX_ITERATION 9
-#define INIT_RADIUS_FACTOR 0.1
+#define INIT_RADIUS_FACTOR 0.05
 #define MIN_RADIUS 1.5
-#define USE_AO 1
+
+// Use ao-guided search radius
+#define AO_GUIDED_RADIUS 1
+#define AO_GUIDED_RADIUS_POW 2.0
+
+// Adptive search radius to reduce noise[Ouyang 2021]
+#define ADAPTIVE_RADIUS 1
 
 // Using cosine-weighted PDF (instead of uniformly distrubuted) PDF reduce noise alot
 #define UNIFORM_PDF 0
@@ -32,7 +38,7 @@ float radiance_reduce(float3 radiance)
 {
     return luminance(radiance);
     //return dot(radiance, 1.0.rrr);
-    //return max3(radiance);
+    //return component_max(radiance);
 }
 
 #if UNIFORM_PDF
@@ -71,15 +77,15 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         w_sum = reservoir.W * target_pdf * float(reservoir.M);
     }
 
-    //float radius = MAX_RADIUS; // px
     float radius = min(buffer_size.x, buffer_size.y) * INIT_RADIUS_FACTOR;
-    #if USE_AO
-    radius = max(radius * ao, MIN_RADIUS);
-    #endif
+#if AO_GUIDED_RADIUS
+    radius = max(radius * pow(ao, AO_GUIDED_RADIUS_POW), MIN_RADIUS);
+#endif
     uint rng_state = lcg_init(dispatch_id, buffer_size, pc.frame_index);
+    float rand_angle = lcg_rand(rng_state) * TWO_PI;
     for (uint i = 0; i < MAX_ITERATION; i++)
     {
-#if 1
+#if 0
         // Uniform sampling in a disk
         float x, y;
         float2 u = float2(lcg_rand(rng_state), lcg_rand(rng_state));
@@ -91,11 +97,11 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         }
 #else
         // Sampling in a golden spiral with max radius 1
-        // TODO per frame jitter + per pixel rotation
-        const float b = log(1.61803398) / (0.5 * PI);
-        const float a = 1.0f / exp(b * TWO_PI);
-        float theta = TWO_PI * ((i + 1) / float(MAX_ITERATION));
-        float r = a * exp(b * theta);
+        // TODO random jitter
+        const float B = log(1.61803398) / (0.5 * PI);
+        const float A = 1.0f / exp(B * TWO_PI);
+        float theta = TWO_PI * ((i + 1) / float(MAX_ITERATION)) + rand_angle;
+        float r = A * exp(B * theta);
         float x = r * cos(theta);
         float y = r * sin(theta);
 #endif
@@ -103,6 +109,12 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         int2 offset = int2(float2(x, y) * radius);
         uint2 pixcood_n =
             clamp(int2(dispatch_id) + offset, int2(0, 0), int2(buffer_size) - 1);
+
+        if (all(pixcood_n == dispatch_id.xy))
+        {
+            // avoid resample the same (center) sample
+            continue;
+        }
 
         GBuffer gbuffer_n = decode_gbuffer(gbuffer_color[pixcood_n]);
         float depth_n = gbuffer_depth[pixcood_n];
@@ -118,12 +130,13 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 
         // Geometry similarity test
         bool geometrical_diff = false;
-        // normal test (within 25 degree) [Ouyang 2021]
-        const float NORMAL_ANGLE_TELERANCE = PI * (25.0 / 180.0);
+        // normal test
+        // TODO better use geometry normal?
+        const float NORMAL_ANGLE_TELERANCE = PI * (25.0 / 180.0); //[Ouyang 2021]
         geometrical_diff |=
             dot(gbuffer.normal, gbuffer_n.normal) < cos(NORMAL_ANGLE_TELERANCE);
         // depth test (within 0.05 of depth range) [Ouyang 2021]
-        // TODO should be normalized depth (currently hard to trading between noise and light leak due to inconsistent depth range) 
+        // TODO should be normalized depth (currently hard to trading between noise and light leak due to inconsistent depth range)
         // TODO wall viewed from grazing-angle will become noisy because depth
         // gradient is large in this case. So a better test should check if two
         // visble sample are on the same surface (plane)
@@ -131,8 +144,9 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         geometrical_diff |= abs(depth - depth_n) > DEPTH_TOLERANCE;
         if (geometrical_diff)
         {
-            // [Ouyang 2021]
+#if ADAPTIVE_RADIUS
             radius = max(radius * 0.5, MIN_RADIUS);
+#endif
             continue;
         }
 
@@ -189,11 +203,8 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 
         // TODO visibility test, and continue
         // At least NoL test is cheap enough?
-        //if (0)
         if (target_pdf_neighbor <= 0.0)
         {
-            // [Ouyang 2021]
-            //radius = max(radius * 0.5, 3.0);
             continue;
         }
 
@@ -203,12 +214,12 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
             {
                 // How can M ever exceed 500? (M is clamped to 30+1 in temporal, and up
                 // to 10 merged reservoir after spatial)
-                uint M_MAX = 500; // [Ouyang 2021]
+                // uint M_MAX = 500; // [Ouyang 2021]
+                uint M_MAX = 256;
                 reservoir_n.M = min(reservoir_n.M, M_MAX);
             }
 
-            float w_sum_neighbor =
-                reservoir_n.W * target_pdf_neighbor * float(reservoir_n.M);
+            float w_sum_neighbor = reservoir_n.W * target_pdf_neighbor * float(reservoir_n.M);
             w_sum += w_sum_neighbor;
             float chance = w_sum_neighbor / w_sum;
             if (lcg_rand(rng_state) < chance)
@@ -247,7 +258,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         float3 selected_dir = normalize(reservoir.z.hit_pos - position_ws);
         float NoL = saturate(dot(gbuffer.normal, selected_dir));
         float brdf = ONE_OVER_PI;
-        lighting = reservoir.z.hit_radiance * brdf * NoL * reservoir.W;
+        lighting = reservoir.z.hit_radiance * (brdf * NoL * reservoir.W);
     }
 
     rw_lighting_texture[dispatch_id] = lighting;
