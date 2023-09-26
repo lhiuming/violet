@@ -151,7 +151,7 @@ impl RenderLoop for RestirRenderLoop {
         ui.heading("POSTPROCESSING");
         ui.horizontal(|ui| {
             let label = ui.label("exposure");
-            let slider = egui::Slider::new(&mut config.exposure_stop, -3.0..=3.0);
+            let slider = egui::Slider::new(&mut config.exposure_stop, -3.0..=3.0).step_by(0.5);
             ui.add(slider).labelled_by(label.id);
         });
     }
