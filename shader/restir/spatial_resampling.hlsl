@@ -5,19 +5,25 @@
 #include "../util.hlsl"
 #include "reservoir.hlsl"
 
-#define MAX_ITERATION 9
+#define MAX_ITERATION 8
 #define INIT_RADIUS_FACTOR 0.05
 #define MIN_RADIUS 1.5
 
+// Use a pretty random pattern, otherwise a quasi golden spiral
+#define SEARCH_PATTERN_RANDOM 0
+
 // Use ao-guided search radius
 #define AO_GUIDED_RADIUS 1
-#define AO_GUIDED_RADIUS_POW 2.0
+#define AO_GUIDED_RADIUS_POW 1.0
 
 // Adptive search radius to reduce noise[Ouyang 2021]
 #define ADAPTIVE_RADIUS 1
 
 // Using cosine-weighted PDF (instead of uniformly distrubuted) PDF reduce noise alot
 #define UNIFORM_PDF 0
+
+// Use plane distance instead of depth in the geometrical test
+#define PLANE_DISTANCE_TEST 1
 
 Texture2D<float> gbuffer_depth;
 Texture2D<uint4> gbuffer_color;
@@ -85,36 +91,42 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     float rand_angle = lcg_rand(rng_state) * TWO_PI;
     for (uint i = 0; i < MAX_ITERATION; i++)
     {
-#if 0
-        // Uniform sampling in a disk
         float x, y;
-        float2 u = float2(lcg_rand(rng_state), lcg_rand(rng_state));
+#if SEARCH_PATTERN_RANDOM
+        // Uniform sampling in a disk
         {
+            float2 u = float2(lcg_rand(rng_state), lcg_rand(rng_state));
             float r = sqrt(u.x);
             float theta = TWO_PI * u.y;
             x = r * cos(theta);
             y = r * sin(theta);
         }
 #else
-        // Sampling in a golden spiral with max radius 1
-        // TODO random jitter
-        const float B = log(1.61803398) / (0.5 * PI);
-        const float A = 1.0f / exp(B * TWO_PI);
-        float theta = TWO_PI * ((i + 1) / float(MAX_ITERATION)) + rand_angle;
-        float r = A * exp(B * theta);
-        float x = r * cos(theta);
-        float y = r * sin(theta);
+        // Sampling in a (quasi) golden spiral with max radius 1
+        // see: https://www.desmos.com/calculator/ym3apsimiy
+        // TODO random jitter?
+        {
+            const float T = 0.6186 * MAX_ITERATION; // repeat of 2 Pi; work good for MAX_ITERATION in [8, 16], see desmos link above
+            const float B = log(1.61803398) / (0.5 * PI);
+            const float A = 1.0f / exp(B * TWO_PI);
+            float theta = TWO_PI * ((float(i) + 1) / float(MAX_ITERATION));
+            float r = A * exp(B * theta);
+            x = r * cos(theta * T + rand_angle);
+            y = r * sin(theta * T + rand_angle);
+        }
 #endif
 
         int2 offset = int2(float2(x, y) * radius);
         uint2 pixcood_n =
             clamp(int2(dispatch_id) + offset, int2(0, 0), int2(buffer_size) - 1);
 
+#if SEARCH_PATTERN_RANDOM
+        // avoid resample the same (center) sample
         if (all(pixcood_n == dispatch_id.xy))
         {
-            // avoid resample the same (center) sample
             continue;
         }
+#endif
 
         GBuffer gbuffer_n = decode_gbuffer(gbuffer_color[pixcood_n]);
         float depth_n = gbuffer_depth[pixcood_n];
@@ -135,6 +147,14 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         const float NORMAL_ANGLE_TELERANCE = PI * (25.0 / 180.0); //[Ouyang 2021]
         geometrical_diff |=
             dot(gbuffer.normal, gbuffer_n.normal) < cos(NORMAL_ANGLE_TELERANCE);
+#if PLANE_DISTANCE_TEST
+        // plane distance test
+        // TODO gemetry normal!
+        float3 position_ws_n = cs_depth_to_position(pixcood_n, buffer_size, depth_n);
+        float dist_to_plane = dot(position_ws_n - position_ws, gbuffer.normal);
+        const float PLANE_DISTANCE_TOLERANCE = 0.05;
+        geometrical_diff |= abs(dist_to_plane) > PLANE_DISTANCE_TOLERANCE;
+#else
         // depth test (within 0.05 of depth range) [Ouyang 2021]
         // TODO should be normalized depth (currently hard to trading between noise and light leak due to inconsistent depth range)
         // TODO wall viewed from grazing-angle will become noisy because depth
@@ -142,6 +162,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         // visble sample are on the same surface (plane)
         const float DEPTH_TOLERANCE = 0.0005f;
         geometrical_diff |= abs(depth - depth_n) > DEPTH_TOLERANCE;
+#endif
         if (geometrical_diff)
         {
 #if ADAPTIVE_RADIUS
@@ -164,8 +185,9 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
             // sample ray origin, otherwise a same (bright) path can get reused
             // multiple times with the same (possibly high) jacobian in the iteration
             // and the pixel blows up.
-            float3 position_ws_n =
-                cs_depth_to_position(pixcood_n, buffer_size, depth_n);
+            #if !PLANE_DISTANCE_TEST
+            float3 position_ws_n = cs_depth_to_position(pixcood_n, buffer_size, depth_n);
+            #endif
             float3 sample_hit_pos_ws = reservoir_n.z.hit_pos;
             float3 sample_hit_normal_ws = reservoir_n.z.hit_normal;
 
