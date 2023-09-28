@@ -40,26 +40,31 @@ impl TAAPass {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 enum DebugView {
     None,
     AO,
-    FilteredAO,
-    IndirectDiffuse,
+    AOFiltered,
+    IndDiff,
+    IndDiffFiltered,
 }
 
 pub struct RestirConfig {
-    validation: bool,
     taa: bool,
+    validation: bool,
     ao_radius: f32,
+    ind_diffuse_taa: bool,
+
     debug_view: DebugView,
 }
 impl Default for RestirConfig {
     fn default() -> Self {
         Self {
-            validation: true,
             taa: true,
+            validation: true,
             ao_radius: 2.0,
+            ind_diffuse_taa: true,
+
             debug_view: DebugView::None,
         }
     }
@@ -73,6 +78,7 @@ pub struct RestirRenderer {
     taa: TAAPass,
 
     ao_history: Option<RGTemporal<Texture>>,
+    indirect_diffuse_history: Option<RGTemporal<Texture>>,
 }
 
 impl RestirRenderer {
@@ -82,6 +88,7 @@ impl RestirRenderer {
             sample_gen: SampleGenPass::new(),
             taa: TAAPass::new(),
             ao_history: None,
+            indirect_diffuse_history: None,
         }
     }
 
@@ -92,21 +99,23 @@ impl RestirRenderer {
     pub fn ui(&mut self, ui: &mut Ui) {
         let config = &mut self.config;
         ui.heading("RESTIR RENDERER");
-        ui.checkbox(&mut config.validation, "sample validation");
         ui.checkbox(&mut config.taa, "taa");
+        ui.checkbox(&mut config.validation, "sample validate");
+        ui.checkbox(&mut config.ind_diffuse_taa, "ind. diff. taa");
         ui.add(egui::Slider::new(&mut config.ao_radius, 0.0..=5.0).text("ao radius"));
 
         egui::ComboBox::from_label("debug view")
             .selected_text(format!("{:?}", config.debug_view))
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut config.debug_view, DebugView::None, "None");
-                ui.selectable_value(&mut config.debug_view, DebugView::AO, "AO");
-                ui.selectable_value(&mut config.debug_view, DebugView::FilteredAO, "FilteredAO");
-                ui.selectable_value(
-                    &mut config.debug_view,
-                    DebugView::IndirectDiffuse,
-                    "IndirectDiff",
-                );
+                ui.set_min_width(12.0);
+                let mut item = |view: DebugView| {
+                    ui.selectable_value(&mut config.debug_view, view, format!("{:?}", view));
+                };
+                item(DebugView::None);
+                item(DebugView::AO);
+                item(DebugView::AOFiltered);
+                item(DebugView::IndDiff);
+                item(DebugView::IndDiffFiltered);
             });
     }
 
@@ -145,11 +154,8 @@ impl RestirRenderer {
         let has_prev_indirect_diffuse = self.sample_gen.prev_indirect_diffuse_texture.is_some();
         let prev_indirect_diffuse_texture =
             match self.sample_gen.prev_indirect_diffuse_texture.take() {
-                Some(tex) => {
-                    let tex = rg.convert_to_transient(tex);
-                    rg.create_texture_view(tex, None)
-                }
-                None => rg.register_texture_view(default_res.dummy_texture.1),
+                Some(tex) => rg.convert_to_transient(tex),
+                None => rg.register_texture(default_res.dummy_texture.0),
             };
 
         // resercoir buffer from last frame
@@ -179,7 +185,7 @@ impl RestirRenderer {
                 .closest_hit_shader("raytrace/geometry.rchit.hlsl")
                 .accel_struct("scene_tlas", scene_tlas)
                 .texture("skycube", skycube)
-                .texture(
+                .texture_raw(
                     "prev_indirect_diffuse_texture",
                     prev_indirect_diffuse_texture,
                 )
@@ -203,7 +209,7 @@ impl RestirRenderer {
                 .closest_hit_shader("raytrace/geometry.rchit.hlsl")
                 .accel_struct("scene_tlas", scene_tlas)
                 .texture("skycube", skycube)
-                .texture(
+                .texture_raw(
                     "prev_indirect_diffuse_texture",
                     prev_indirect_diffuse_texture,
                 )
@@ -292,9 +298,7 @@ impl RestirRenderer {
                     | vk::ImageUsageFlags::STORAGE // compute lighting
                     | vk::ImageUsageFlags::SAMPLED, // taa
                 );
-                let texture = rg.create_texutre(desc);
-                let view = rg.create_texture_view(texture, None);
-                (texture, view)
+                rg.create_texutre(desc)
             };
 
             let reservoir_buffer_desc = rg.get_buffer_desc(temporal_reservoir_buffer);
@@ -307,7 +311,7 @@ impl RestirRenderer {
                 .texture_raw("ao_texture", filtered_ao_texture)
                 .buffer("temporal_reservoir_buffer", temporal_reservoir_buffer)
                 .rw_buffer("rw_spatial_reservoir_buffer", spatial_reservoir_buffer)
-                .rw_texture("rw_lighting_texture", indirect_diffuse.1)
+                .rw_texture_raw("rw_lighting_texture", indirect_diffuse)
                 //.rw_texture("rw_debug_texture", debug_texture.1)
                 .push_constant(&frame_index)
                 .group_count(
@@ -321,8 +325,41 @@ impl RestirRenderer {
                 .replace(rg.convert_to_temporal(spatial_reservoir_buffer));
             self.sample_gen
                 .prev_indirect_diffuse_texture
-                .replace(rg.convert_to_temporal(indirect_diffuse.0));
+                .replace(rg.convert_to_temporal(indirect_diffuse));
         }
+
+        let has_prev_indirect_diffuse = self.indirect_diffuse_history.is_some() as u32;
+        let prev_indirect_diffuse = match self.indirect_diffuse_history.take() {
+            Some(tex) => rg.convert_to_transient(tex),
+            None => rg.register_texture(default_res.dummy_texture.0),
+        };
+
+        // Pass: Indirect Diffuse Temporal Filtering
+        let filtered_indirect_diffuse;
+        if (has_prev_indirect_diffuse != 0) && self.config.ind_diffuse_taa {
+            let desc = rg.get_texture_desc(indirect_diffuse);
+            filtered_indirect_diffuse = rg.create_texutre(*desc);
+
+            let has_prev_frame = has_prev_depth as u32 & has_prev_indirect_diffuse;
+
+            rg.new_compute("Ind. Diff. Temporal")
+                .compute_shader("restir/ind_diff_temporal_filter.hlsl")
+                .texture_raw("depth_buffer", gbuffer.depth.0)
+                .texture_raw("prev_ind_diff_texture", prev_indirect_diffuse)
+                .texture_raw("curr_ind_diff_texture", indirect_diffuse)
+                .rw_texture_raw("rw_filtered_ind_diff_texture", filtered_indirect_diffuse)
+                .push_constant::<u32>(&has_prev_frame)
+                .group_count(
+                    div_round_up(main_size.x, 8),
+                    div_round_up(main_size.y, 4),
+                    1,
+                );
+        } else {
+            filtered_indirect_diffuse = indirect_diffuse;
+        }
+
+        self.indirect_diffuse_history
+            .replace(rg.convert_to_temporal(filtered_indirect_diffuse));
 
         // Pass: Raytraced Shadow
         let raytraced_shadow_mask = {
@@ -407,7 +444,7 @@ impl RestirRenderer {
                 .compute_shader("restir/final_lighting.hlsl")
                 .texture("gbuffer_color", gbuffer.color.1)
                 .texture("shadow_mask_buffer", raytraced_shadow_mask.1)
-                .texture("indirect_diffuse_buffer", indirect_diffuse.1)
+                .texture_raw("indirect_diffuse_buffer", filtered_indirect_diffuse)
                 .rw_texture("rw_color_buffer", scene_color.1)
                 .group_count(
                     div_round_up(main_size.x, 8),
@@ -461,8 +498,9 @@ impl RestirRenderer {
         if self.config.debug_view != DebugView::None {
             let color_texture = match self.config.debug_view {
                 DebugView::AO => curr_ao_texture,
-                DebugView::FilteredAO => filtered_ao_texture,
-                DebugView::IndirectDiffuse => indirect_diffuse.0,
+                DebugView::AOFiltered => filtered_ao_texture,
+                DebugView::IndDiff => indirect_diffuse,
+                DebugView::IndDiffFiltered => filtered_indirect_diffuse,
                 DebugView::None => rg.register_texture(default_res.dummy_texture.0),
             };
             rg.new_compute("Debug View")

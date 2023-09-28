@@ -1011,6 +1011,23 @@ impl<'a> RenderGraphBuilder<'a> {
 
         None
     }
+
+    fn find_converted_to_temporal<T>(&self, handle: RGHandle<T>) -> Option<RGTemporal<T>>
+    where
+        T: ResType,
+    {
+        let handle_id = handle.id;
+        match T::get_enum() {
+            ResTypeEnum::Texture => self
+                .transient_to_temporal_textures
+                .get(&RGHandle::new(handle_id))
+                .map(|t| RGTemporal::new(t.id)),
+            ResTypeEnum::Buffer => self
+                .transient_to_temporal_buffers
+                .get(&RGHandle::new(handle_id))
+                .map(|t| RGTemporal::new(t.id)),
+        }
+    }
 }
 
 // Interface
@@ -1151,6 +1168,11 @@ impl<'a> RenderGraphBuilder<'a> {
     where
         T: ResType,
     {
+        // check if already converted
+        if let Some(temporal) = self.find_converted_to_temporal(handle) {
+            return temporal;
+        }
+
         // Validate: not valid for external resource
         assert!(!self.is_external(handle));
 
