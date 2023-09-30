@@ -12,20 +12,6 @@ use violet::{
 
 use crate::restir_render_loop::SceneRendererInput;
 
-struct SampleGenPass {
-    prev_reservoir_buffer: Option<RGTemporal<Buffer>>,
-    prev_indirect_diffuse_texture: Option<RGTemporal<Texture>>,
-}
-
-impl SampleGenPass {
-    fn new() -> Self {
-        Self {
-            prev_reservoir_buffer: None,
-            prev_indirect_diffuse_texture: None,
-        }
-    }
-}
-
 struct TAAPass {
     prev_color: Option<RGTemporal<Texture>>,
     prev_depth: Option<RGTemporal<Texture>>,
@@ -73,22 +59,22 @@ impl Default for RestirConfig {
 // Render the scene using ReSTIR lighting
 pub struct RestirRenderer {
     config: RestirConfig,
-
-    sample_gen: SampleGenPass,
     taa: TAAPass,
 
+    prev_diffuse_reservoir_buffer: Option<RGTemporal<Buffer>>,
+    prev_indirect_diffuse_texture: Option<RGTemporal<Texture>>,
+
     ao_history: Option<RGTemporal<Texture>>,
-    indirect_diffuse_history: Option<RGTemporal<Texture>>,
 }
 
 impl RestirRenderer {
     pub fn new() -> Self {
         Self {
             config: Default::default(),
-            sample_gen: SampleGenPass::new(),
             taa: TAAPass::new(),
+            prev_diffuse_reservoir_buffer: None,
+            prev_indirect_diffuse_texture: None,
             ao_history: None,
-            indirect_diffuse_history: None,
         }
     }
 
@@ -151,36 +137,36 @@ impl RestirRenderer {
         };
 
         // indirect diffuse from last frame
-        let has_prev_indirect_diffuse = self.sample_gen.prev_indirect_diffuse_texture.is_some();
-        let prev_indirect_diffuse_texture =
-            match self.sample_gen.prev_indirect_diffuse_texture.take() {
-                Some(tex) => rg.convert_to_transient(tex),
-                None => rg.register_texture(default_res.dummy_texture.0),
-            };
+        let has_prev_indirect_diffuse = self.prev_indirect_diffuse_texture.is_some();
+        let prev_indirect_diffuse_texture = match self.prev_indirect_diffuse_texture.take() {
+            Some(tex) => rg.convert_to_transient(tex),
+            None => rg.register_texture(default_res.dummy_texture.0),
+        };
 
-        // resercoir buffer from last frame
-        let has_prev_reservoir = self.sample_gen.prev_reservoir_buffer.is_some();
-        let prev_reservoir_buffer = match self.sample_gen.prev_reservoir_buffer {
+        // indirect diffuse reservior buffer from last frame
+        let has_prev_diffuse_reservoir = self.prev_diffuse_reservoir_buffer.is_some();
+        let prev_diffuse_reservoir_buffer = match self.prev_diffuse_reservoir_buffer {
             Some(buffer) => rg.convert_to_transient(buffer),
             None => rg.register_buffer(default_res.dummy_buffer),
         };
 
-        let has_buffer_for_validation = has_prev_depth && has_prev_reservoir;
-        let is_validation_frame =
-            has_buffer_for_validation && ((frame_index % 6) == 0) && self.config.validation;
+        let is_indirect_diffuse_validation_frame = {
+            let has_buffers = has_prev_depth && has_prev_diffuse_reservoir;
+            has_buffers && ((frame_index % 6) == 0) && self.config.validation
+        };
 
-        // Pass: Sample Generation (and temporal reusing)
-        let has_new_sample;
-        let new_sample_buffer;
-        if !is_validation_frame {
-            has_new_sample = 1u32;
-            new_sample_buffer =
+        // Pass: Indirect Diffuse ReSTIR Sample Generation (and temporal reusing)
+        let indirect_diffuse_has_new_sample;
+        let indirect_diffuse_new_sample_buffer;
+        if !is_indirect_diffuse_validation_frame {
+            indirect_diffuse_has_new_sample = 1u32;
+            indirect_diffuse_new_sample_buffer =
                 rg.create_buffer(BufferDesc::compute(main_size_flat as u64 * 5 * 4 * 4));
 
             let has_prev_indirect = (has_prev_depth && has_prev_indirect_diffuse) as u32;
 
-            rg.new_raytracing("Sample Gen")
-                .raygen_shader("restir/sample_gen.hlsl")
+            rg.new_raytracing("Ind. Diff. Sample Gen.")
+                .raygen_shader("restir/ind_diff_sample_gen.hlsl")
                 .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
                 .closest_hit_shader("raytrace/geometry.rchit.hlsl")
                 .accel_struct("scene_tlas", scene_tlas)
@@ -192,19 +178,19 @@ impl RestirRenderer {
                 .texture("prev_depth", prev_depth)
                 .texture("gbuffer_depth", gbuffer.depth.1)
                 .texture("gbuffer_color", gbuffer.color.1)
-                .buffer("rw_new_sample_buffer", new_sample_buffer)
+                .buffer("rw_new_sample_buffer", indirect_diffuse_new_sample_buffer)
                 //.rw_texture("rw_debug_texture", debug_texture.1)
                 .push_constant(&input.frame_index)
                 .push_constant(&has_prev_indirect)
                 .dimension(main_size.x, main_size.y, 1);
         }
-        // Pass: Sample Validation
+        // Pass: Indirect Diffuse Sample Validation
         else {
-            has_new_sample = 0u32;
-            new_sample_buffer = rg.register_buffer(default_res.dummy_buffer);
+            indirect_diffuse_has_new_sample = 0u32;
+            indirect_diffuse_new_sample_buffer = rg.register_buffer(default_res.dummy_buffer);
 
-            rg.new_raytracing("Sample Validate")
-                .raygen_shader("restir/sample_validate.hlsl")
+            rg.new_raytracing("Ind. Diff. Sample Validate")
+                .raygen_shader("restir/ind_diff_sample_validate.hlsl")
                 .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
                 .closest_hit_shader("raytrace/geometry.rchit.hlsl")
                 .accel_struct("scene_tlas", scene_tlas)
@@ -214,12 +200,12 @@ impl RestirRenderer {
                     prev_indirect_diffuse_texture,
                 )
                 .texture("prev_depth", prev_depth)
-                .rw_buffer("rw_prev_reservoir_buffer", prev_reservoir_buffer)
+                .rw_buffer("rw_prev_reservoir_buffer", prev_diffuse_reservoir_buffer)
                 //.rw_texture("rw_debug_texture", debug_texture.1)
                 .dimension(main_size.x, main_size.y, 1);
         }
 
-        let temporal_reservoir_buffer =
+        let indirect_diffuse_temporal_reservoir_buffer =
             rg.create_buffer(BufferDesc::compute(main_size_flat as u64 * 24 * 4));
 
         let has_prev_ao = self.ao_history.is_some() as u32;
@@ -235,13 +221,13 @@ impl RestirRenderer {
         ));
 
         // Pass: AO Gen and Temporal Filtering
-        rg.new_compute("RayTraced AO Gen")
+        rg.new_compute("RayTraced AO Gen.")
             .compute_shader("restir/raytraced_ao_gen.hlsl")
-            .buffer("new_sample_buffer", new_sample_buffer)
+            .buffer("new_sample_buffer", indirect_diffuse_new_sample_buffer)
             .texture("depth_buffer", gbuffer.depth.1)
             .texture_raw("prev_ao_texture", prev_ao_texture)
             .rw_texture_raw("rw_ao_texture", curr_ao_texture)
-            .push_constant::<u32>(&has_new_sample)
+            .push_constant::<u32>(&indirect_diffuse_has_new_sample)
             .push_constant::<u32>(&has_prev_ao)
             .push_constant::<f32>(&self.config.ao_radius)
             .group_count(
@@ -272,21 +258,24 @@ impl RestirRenderer {
         self.ao_history
             .replace(rg.convert_to_temporal(curr_ao_texture));
 
-        // Pass: Temporal Resampling
-        rg.new_compute("Temporal Resample")
-            .compute_shader("restir/temporal_resample.hlsl")
+        // Pass: Indirect Diffuse Temporal Resampling
+        rg.new_compute("Ind. Diff. Temporal Resample")
+            .compute_shader("restir/ind_diff_temporal_resample.hlsl")
             .texture("prev_gbuffer_depth", prev_depth)
             .texture("gbuffer_depth", gbuffer.depth.1)
             .texture("gbuffer_color", gbuffer.color.1)
-            .buffer("new_sample_buffer", new_sample_buffer)
-            .buffer("prev_reservoir_buffer", prev_reservoir_buffer)
-            .buffer("rw_temporal_reservoir_buffer", temporal_reservoir_buffer)
+            .buffer("new_sample_buffer", indirect_diffuse_new_sample_buffer)
+            .buffer("prev_reservoir_buffer", prev_diffuse_reservoir_buffer)
+            .buffer(
+                "rw_temporal_reservoir_buffer",
+                indirect_diffuse_temporal_reservoir_buffer,
+            )
             .push_constant(&input.frame_index)
-            .push_constant(&(has_prev_reservoir as u32))
-            .push_constant(&has_new_sample)
+            .push_constant(&(has_prev_diffuse_reservoir as u32))
+            .push_constant(&indirect_diffuse_has_new_sample)
             .group_count_uvec3(div_round_up_uvec2(main_size, UVec2::new(8, 4)).extend(1));
 
-        // Pass: Spatial Resampling
+        // Pass: Indirect Diffuse Spatial Resampling
         let indirect_diffuse;
         {
             indirect_diffuse = {
@@ -301,15 +290,19 @@ impl RestirRenderer {
                 rg.create_texutre(desc)
             };
 
-            let reservoir_buffer_desc = rg.get_buffer_desc(temporal_reservoir_buffer);
+            let reservoir_buffer_desc =
+                rg.get_buffer_desc(indirect_diffuse_temporal_reservoir_buffer);
             let spatial_reservoir_buffer = rg.create_buffer(*reservoir_buffer_desc);
 
-            rg.new_compute("Spatial Resampling")
-                .compute_shader("restir/spatial_resampling.hlsl")
+            rg.new_compute("Ind. Diff. Spatial Resample")
+                .compute_shader("restir/ind_diff_spatial_resample.hlsl")
                 .texture("gbuffer_depth", gbuffer.depth.1)
                 .texture("gbuffer_color", gbuffer.color.1)
                 .texture_raw("ao_texture", filtered_ao_texture)
-                .buffer("temporal_reservoir_buffer", temporal_reservoir_buffer)
+                .buffer(
+                    "temporal_reservoir_buffer",
+                    indirect_diffuse_temporal_reservoir_buffer,
+                )
                 .rw_buffer("rw_spatial_reservoir_buffer", spatial_reservoir_buffer)
                 .rw_texture_raw("rw_lighting_texture", indirect_diffuse)
                 //.rw_texture("rw_debug_texture", debug_texture.1)
@@ -320,32 +313,23 @@ impl RestirRenderer {
                     1,
                 );
 
-            self.sample_gen
-                .prev_reservoir_buffer
+            // NOTE: spatial reservoir is feedback to temporal reservoir (next frame)
+            self.prev_diffuse_reservoir_buffer
                 .replace(rg.convert_to_temporal(spatial_reservoir_buffer));
-            self.sample_gen
-                .prev_indirect_diffuse_texture
-                .replace(rg.convert_to_temporal(indirect_diffuse));
         }
-
-        let has_prev_indirect_diffuse = self.indirect_diffuse_history.is_some() as u32;
-        let prev_indirect_diffuse = match self.indirect_diffuse_history.take() {
-            Some(tex) => rg.convert_to_transient(tex),
-            None => rg.register_texture(default_res.dummy_texture.0),
-        };
 
         // Pass: Indirect Diffuse Temporal Filtering
         let filtered_indirect_diffuse;
-        if (has_prev_indirect_diffuse != 0) && self.config.ind_diffuse_taa {
+        if has_prev_indirect_diffuse && self.config.ind_diffuse_taa {
             let desc = rg.get_texture_desc(indirect_diffuse);
             filtered_indirect_diffuse = rg.create_texutre(*desc);
 
-            let has_prev_frame = has_prev_depth as u32 & has_prev_indirect_diffuse;
+            let has_prev_frame = (has_prev_depth & has_prev_indirect_diffuse) as u32;
 
-            rg.new_compute("Ind. Diff. Temporal")
+            rg.new_compute("Ind. Diff. Temporal Filter")
                 .compute_shader("restir/ind_diff_temporal_filter.hlsl")
                 .texture_raw("depth_buffer", gbuffer.depth.0)
-                .texture_raw("prev_ind_diff_texture", prev_indirect_diffuse)
+                .texture_raw("prev_ind_diff_texture", prev_indirect_diffuse_texture)
                 .texture_raw("curr_ind_diff_texture", indirect_diffuse)
                 .rw_texture_raw("rw_filtered_ind_diff_texture", filtered_indirect_diffuse)
                 .push_constant::<u32>(&has_prev_frame)
@@ -358,7 +342,7 @@ impl RestirRenderer {
             filtered_indirect_diffuse = indirect_diffuse;
         }
 
-        self.indirect_diffuse_history
+        self.prev_indirect_diffuse_texture
             .replace(rg.convert_to_temporal(filtered_indirect_diffuse));
 
         // Pass: Raytraced Shadow
