@@ -241,6 +241,13 @@ impl super::RenderDevice {
                 "Error: texture creation for {:?} failed: {:?}. Try something else.",
                 desc.format, e
             );
+            match e {
+                vk::Result::ERROR_FORMAT_NOT_SUPPORTED => {
+                    let prop = self.physical.get_format_properties(desc.format);
+                    println!("Format not supported. Format properties: {:?}", prop);
+                }
+                _ => {}
+            }
             return None;
         }
 

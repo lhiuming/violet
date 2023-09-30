@@ -6,7 +6,8 @@
 
 Texture2D<uint4> gbuffer_color;
 Texture2D<float> shadow_mask_buffer;
-Texture2D<float3> indirect_diffuse_buffer;
+Texture2D<float3> indirect_diffuse_texture;
+Texture2D<float3> indirect_specular_texture;
 RWTexture2D<float3> rw_color_buffer;
 
 [numthreads(8, 4, 1)]
@@ -40,8 +41,8 @@ void main(uint2 dispatch_id : SV_DispatchThreadID) {
     float3 directi_lighting = eval_GGX_Lambertian(view_dir, frame_params.sun_dir.xyz, gbuffer.normal, perceptual_roughness, diffuse_rho, specular_f0) * (NoL * direct_atten) * frame_params.sun_inten.rgb;
 
     // Indirect lighting
-    float3 indirect_diffuse = indirect_diffuse_buffer[dispatch_id];
-    float3 indirect_specular = 0.0f;
+    float3 indirect_diffuse = indirect_diffuse_texture[dispatch_id];
+    float3 indirect_specular = indirect_specular_texture[dispatch_id];
     float3 indirect_lighting = indirect_diffuse * diffuse_rho + indirect_specular;
 
     // Output

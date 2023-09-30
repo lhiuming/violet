@@ -1,4 +1,5 @@
 #include "../brdf.hlsl"
+#include "../enc.inc.hlsl"
 #include "../frame_bindings.hlsl"
 #include "../gbuffer.hlsl"
 #include "../rand.hlsl"
@@ -10,16 +11,21 @@
 
 Texture2D<float> gbuffer_depth;
 Texture2D<uint4> gbuffer_color;
-RWStructuredBuffer<RestirSample> rw_new_sample_buffer;
+
+// New sample propertie textures
+//RWTexture2D<float3> rw_origin_pos_texture;
+RWTexture2D<float4> rw_hit_pos_texture;
+RWTexture2D<uint> rw_hit_normal_texture;
+RWTexture2D<float3> rw_hit_radiance_texture;
+
 RWTexture2D<float4> rw_debug_texture;
 
+[[vk::push_constant]]
 struct PushConstants
 {
     uint frame_index;
     uint has_prev_frame;
-};
-[[vk::push_constant]]
-PushConstants pc;
+} pc;
 
 [shader("raygeneration")]
 void main()
@@ -33,8 +39,8 @@ void main()
     // early out if no geometry
     if (has_no_geometry_via_depth(depth))
     {
-        uint buffer_index = buffer_size.x * dispatch_id.y + dispatch_id.x;
-        rw_new_sample_buffer[buffer_index] = (RestirSample)0;
+        // For Debug
+        rw_hit_radiance_texture[dispatch_id.xy] = 0.0;
         return;
     }
 
@@ -46,6 +52,7 @@ void main()
     float4 position_ws_h = mul(view_params().inv_view_proj, float4(screen_pos * 2.0f - 1.0f, depth + depth_error, 1.0f));
     float3 position_ws = position_ws_h.xyz / position_ws_h.w;
 
+    // Specualr may need some better noise
     uint rng_state = lcg_init(dispatch_id.xy, buffer_size, pc.frame_index);
 
     // Generate Sample Point with uniform hemisphere sampling
@@ -59,12 +66,8 @@ void main()
     // Raytrace
     RadianceTraceResult trace_result = trace_radiance(position_ws, sample_dir, pc.has_prev_frame);
 
-    const RestirSample new_sample = make_restir_sample(
-        position_ws,
-        trace_result.position_ws,
-        trace_result.normal_ws,
-        trace_result.radiance);
-
-    uint buffer_index = buffer_size.x * dispatch_id.y + dispatch_id.x;
-    rw_new_sample_buffer[buffer_index] = new_sample;
+    //rw_origin_pos_texture[dispatch_id.xy] = position_ws;
+    rw_hit_pos_texture[dispatch_id.xy] = float4(trace_result.position_ws, 1.0f);
+    rw_hit_normal_texture[dispatch_id.xy] = normal_encode_oct_u32(trace_result.normal_ws);
+    rw_hit_radiance_texture[dispatch_id.xy] = trace_result.radiance;
 }

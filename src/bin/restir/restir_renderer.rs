@@ -33,6 +33,7 @@ enum DebugView {
     AOFiltered,
     IndDiff,
     IndDiffFiltered,
+    IndSpec,
 }
 
 pub struct RestirConfig {
@@ -93,7 +94,7 @@ impl RestirRenderer {
         egui::ComboBox::from_label("debug view")
             .selected_text(format!("{:?}", config.debug_view))
             .show_ui(ui, |ui| {
-                ui.set_min_width(12.0);
+                ui.set_min_width(24.0);
                 let mut item = |view: DebugView| {
                     ui.selectable_value(&mut config.debug_view, view, format!("{:?}", view));
                 };
@@ -102,6 +103,7 @@ impl RestirRenderer {
                 item(DebugView::AOFiltered);
                 item(DebugView::IndDiff);
                 item(DebugView::IndDiffFiltered);
+                item(DebugView::IndSpec);
             });
     }
 
@@ -129,11 +131,8 @@ impl RestirRenderer {
         // depth buffer from last frame
         let has_prev_depth = self.taa.prev_depth.is_some();
         let prev_depth = match self.taa.prev_depth.take() {
-            Some(tex) => {
-                let tex = rg.convert_to_transient(tex);
-                rg.create_texture_view(tex, None)
-            }
-            None => rg.register_texture_view(default_res.dummy_texture.1),
+            Some(tex) => rg.convert_to_transient(tex),
+            None => rg.register_texture(default_res.dummy_texture.0),
         };
 
         // indirect diffuse from last frame
@@ -155,7 +154,7 @@ impl RestirRenderer {
             has_buffers && ((frame_index % 6) == 0) && self.config.validation
         };
 
-        // Pass: Indirect Diffuse ReSTIR Sample Generation (and temporal reusing)
+        // Pass: Indirect Diffuse ReSTIR Sample Generation
         let indirect_diffuse_has_new_sample;
         let indirect_diffuse_new_sample_buffer;
         if !is_indirect_diffuse_validation_frame {
@@ -163,7 +162,7 @@ impl RestirRenderer {
             indirect_diffuse_new_sample_buffer =
                 rg.create_buffer(BufferDesc::compute(main_size_flat as u64 * 5 * 4 * 4));
 
-            let has_prev_indirect = (has_prev_depth && has_prev_indirect_diffuse) as u32;
+            let has_prev_frame = (has_prev_depth && has_prev_indirect_diffuse) as u32;
 
             rg.new_raytracing("Ind. Diff. Sample Gen.")
                 .raygen_shader("restir/ind_diff_sample_gen.hlsl")
@@ -175,13 +174,13 @@ impl RestirRenderer {
                     "prev_indirect_diffuse_texture",
                     prev_indirect_diffuse_texture,
                 )
-                .texture_view("prev_depth", prev_depth)
+                .texture("prev_depth", prev_depth)
                 .texture_view("gbuffer_depth", gbuffer.depth.1)
                 .texture_view("gbuffer_color", gbuffer.color.1)
                 .buffer("rw_new_sample_buffer", indirect_diffuse_new_sample_buffer)
                 //.rw_texture("rw_debug_texture", debug_texture.1)
                 .push_constant(&input.frame_index)
-                .push_constant(&has_prev_indirect)
+                .push_constant(&has_prev_frame)
                 .dimension(main_size.x, main_size.y, 1);
         }
         // Pass: Indirect Diffuse Sample Validation
@@ -199,7 +198,7 @@ impl RestirRenderer {
                     "prev_indirect_diffuse_texture",
                     prev_indirect_diffuse_texture,
                 )
-                .texture_view("prev_depth", prev_depth)
+                .texture("prev_depth", prev_depth)
                 .rw_buffer("rw_prev_reservoir_buffer", prev_diffuse_reservoir_buffer)
                 //.rw_texture("rw_debug_texture", debug_texture.1)
                 .dimension(main_size.x, main_size.y, 1);
@@ -261,7 +260,7 @@ impl RestirRenderer {
         // Pass: Indirect Diffuse Temporal Resampling
         rg.new_compute("Ind. Diff. Temporal Resample")
             .compute_shader("restir/ind_diff_temporal_resample.hlsl")
-            .texture_view("prev_gbuffer_depth", prev_depth)
+            .texture("prev_gbuffer_depth", prev_depth)
             .texture_view("gbuffer_depth", gbuffer.depth.1)
             .texture_view("gbuffer_color", gbuffer.color.1)
             .buffer("new_sample_buffer", indirect_diffuse_new_sample_buffer)
@@ -275,21 +274,15 @@ impl RestirRenderer {
             .push_constant(&indirect_diffuse_has_new_sample)
             .group_count_uvec3(div_round_up_uvec2(main_size, UVec2::new(8, 4)).extend(1));
 
-        // Pass: Indirect Diffuse Spatial Resampling
-        let indirect_diffuse;
-        {
-            indirect_diffuse = {
-                let desc = TextureDesc::new_2d(
-                    main_size.x,
-                    main_size.y,
-                    vk::Format::B10G11R11_UFLOAT_PACK32,
-                    vk::ImageUsageFlags::COLOR_ATTACHMENT // sky rendering
-                    | vk::ImageUsageFlags::STORAGE // compute lighting
-                    | vk::ImageUsageFlags::SAMPLED, // taa
-                );
-                rg.create_texutre(desc)
-            };
+        let indirect_diffuse = rg.create_texutre(TextureDesc::new_2d(
+            main_size.x,
+            main_size.y,
+            vk::Format::B10G11R11_UFLOAT_PACK32,
+            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+        ));
 
+        // Pass: Indirect Diffuse Spatial Resampling
+        {
             let reservoir_buffer_desc =
                 rg.get_buffer_desc(indirect_diffuse_temporal_reservoir_buffer);
             let spatial_reservoir_buffer = rg.create_buffer(*reservoir_buffer_desc);
@@ -344,6 +337,61 @@ impl RestirRenderer {
 
         self.prev_indirect_diffuse_texture
             .replace(rg.convert_to_temporal(filtered_indirect_diffuse));
+
+        // Pass: Indirect Specular Sample Genenration
+        let mut ind_spec_new_tex = |format: vk::Format| {
+            let usage = vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED;
+            rg.create_texutre(TextureDesc::new_2d(main_size.x, main_size.y, format, usage))
+        };
+        //let ind_spec_origin_pos = ind_spec_new_tex(vk::Format::R32G32B32_SFLOAT);
+        let ind_spec_hit_pos = ind_spec_new_tex(vk::Format::R32G32B32A32_SFLOAT); // TODO wasting 4 bytes
+        let ind_spec_hit_normal = ind_spec_new_tex(vk::Format::R32_UINT);
+        let ind_spec_hit_radiance = ind_spec_new_tex(vk::Format::B10G11R11_UFLOAT_PACK32);
+        {
+            let has_prev_frame = (has_prev_depth && has_prev_indirect_diffuse) as u32;
+
+            rg.new_raytracing("Ind. Spec. Sample Gen.")
+                .raygen_shader("restir/ind_spec_sample_gen.hlsl")
+                .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
+                .closest_hit_shader("raytrace/geometry.rchit.hlsl")
+                .accel_struct("scene_tlas", scene_tlas)
+                .texture_view("skycube", skycube)
+                .texture(
+                    "prev_indirect_diffuse_texture",
+                    prev_indirect_diffuse_texture,
+                )
+                .texture("prev_depth", prev_depth)
+                .texture("gbuffer_depth", gbuffer.depth.0)
+                .texture("gbuffer_color", gbuffer.color.0)
+                //.rw_texture("rw_origin_pos_texture", ind_spec_origin_pos)
+                .rw_texture("rw_hit_pos_texture", ind_spec_hit_pos)
+                .rw_texture("rw_hit_normal_texture", ind_spec_hit_normal)
+                .rw_texture("rw_hit_radiance_texture", ind_spec_hit_radiance)
+                .push_constant::<u32>(&frame_index)
+                .push_constant::<u32>(&has_prev_frame)
+                .dimension(main_size.x, main_size.y, 1);
+        }
+
+        let indirect_specular = rg.create_texutre(TextureDesc::new_2d(
+            main_size.x,
+            main_size.y,
+            vk::Format::B10G11R11_UFLOAT_PACK32,
+            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
+        ));
+
+        // Pass: Indirect Specular Spatial Resampling
+        rg.new_compute("Ind. Spec. Spaital Resample")
+            .compute_shader("restir/ind_spec_spatial_resample.hlsl")
+            .texture("gbuffer_depth", gbuffer.depth.0)
+            .texture("gbuffer_color", gbuffer.color.0)
+            .texture("hit_pos_texture", ind_spec_hit_pos)
+            .texture("hit_radiance_texture", ind_spec_hit_radiance)
+            .rw_texture("rw_lighting_texture", indirect_specular)
+            .group_count(
+                div_round_up(main_size.x, 8),
+                div_round_up(main_size.y, 4),
+                1,
+            );
 
         // Pass: Raytraced Shadow
         let raytraced_shadow_mask = {
@@ -428,7 +476,8 @@ impl RestirRenderer {
                 .compute_shader("restir/final_lighting.hlsl")
                 .texture_view("gbuffer_color", gbuffer.color.1)
                 .texture_view("shadow_mask_buffer", raytraced_shadow_mask.1)
-                .texture("indirect_diffuse_buffer", filtered_indirect_diffuse)
+                .texture("indirect_diffuse_texture", filtered_indirect_diffuse)
+                .texture("indirect_specular_texture", indirect_specular)
                 .rw_texture_view("rw_color_buffer", scene_color.1)
                 .group_count(
                     div_round_up(main_size.x, 8),
@@ -485,6 +534,7 @@ impl RestirRenderer {
                 DebugView::AOFiltered => filtered_ao_texture,
                 DebugView::IndDiff => indirect_diffuse,
                 DebugView::IndDiffFiltered => filtered_indirect_diffuse,
+                DebugView::IndSpec => indirect_specular,
                 DebugView::None => rg.register_texture(default_res.dummy_texture.0),
             };
             rg.new_compute("Debug View")

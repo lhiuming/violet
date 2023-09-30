@@ -1,20 +1,19 @@
 #pragma once
+#include "../enc.inc.hlsl"
 
 struct RestirSample
 {
     float3 pixel_pos; // "visible point", used in sample validation pass
-    float3 pixel_normal;
     float3 hit_pos; // "sample point"
     float3 hit_normal;
     float3 hit_radiance;
     // float3 rand_seed; // Just be lousy
 };
 
-RestirSample make_restir_sample(float3 pixel_pos, float3 pixel_normal, float3 hit_pos, float3 hit_normal, float3 hit_radiance)
+RestirSample make_restir_sample(float3 pixel_pos, float3 hit_pos, float3 hit_normal, float3 hit_radiance)
 {
     RestirSample s;
     s.pixel_pos = pixel_pos;
-    s.pixel_normal = pixel_normal;
     s.hit_pos = hit_pos;
     s.hit_normal = hit_normal;
     s.hit_radiance = hit_radiance;
