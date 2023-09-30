@@ -253,27 +253,29 @@ pub trait PassBuilderTrait<'render>: PrivatePassBuilderTrait<'render> {
         self
     }
 
-    // Binding texture to per-pass descriptor set
-    fn texture(&mut self, name: &'static str, texture: RGHandle<TextureView>) -> &mut Self {
-        self.inner().textures.push((name, texture));
-        self
-    }
-
-    fn texture_raw(&mut self, name: &'static str, texture: RGHandle<Texture>) -> &mut Self {
+    /// Binding texture to per-pass descriptor set
+    fn texture(&mut self, name: &'static str, texture: RGHandle<Texture>) -> &mut Self {
         let view = self.rg().create_texture_view(texture, None);
         self.inner().textures.push((name, view));
         self
     }
 
-    // Binding rw texture to per-pass descriptor set
-    fn rw_texture(&mut self, name: &'static str, texture: RGHandle<TextureView>) -> &mut Self {
-        self.inner().rw_textures.push((name, texture));
+    /// Binding texture to per-pass descriptor set, as a TextureView
+    fn texture_view(&mut self, name: &'static str, texture: RGHandle<TextureView>) -> &mut Self {
+        self.inner().textures.push((name, texture));
         self
     }
 
-    fn rw_texture_raw(&mut self, name: &'static str, texture: RGHandle<Texture>) -> &mut Self {
+    /// Binding rw texture to per-pass descriptor set
+    fn rw_texture(&mut self, name: &'static str, texture: RGHandle<Texture>) -> &mut Self {
         let view = self.rg().create_texture_view(texture, None);
         self.inner().rw_textures.push((name, view));
+        self
+    }
+
+    /// Binding rw texture to per-pass descriptor set, as a TextureView
+    fn rw_texture_view(&mut self, name: &'static str, texture: RGHandle<TextureView>) -> &mut Self {
+        self.inner().rw_textures.push((name, texture));
         self
     }
 

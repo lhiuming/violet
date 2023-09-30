@@ -170,14 +170,14 @@ impl RestirRenderer {
                 .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
                 .closest_hit_shader("raytrace/geometry.rchit.hlsl")
                 .accel_struct("scene_tlas", scene_tlas)
-                .texture("skycube", skycube)
-                .texture_raw(
+                .texture_view("skycube", skycube)
+                .texture(
                     "prev_indirect_diffuse_texture",
                     prev_indirect_diffuse_texture,
                 )
-                .texture("prev_depth", prev_depth)
-                .texture("gbuffer_depth", gbuffer.depth.1)
-                .texture("gbuffer_color", gbuffer.color.1)
+                .texture_view("prev_depth", prev_depth)
+                .texture_view("gbuffer_depth", gbuffer.depth.1)
+                .texture_view("gbuffer_color", gbuffer.color.1)
                 .buffer("rw_new_sample_buffer", indirect_diffuse_new_sample_buffer)
                 //.rw_texture("rw_debug_texture", debug_texture.1)
                 .push_constant(&input.frame_index)
@@ -194,12 +194,12 @@ impl RestirRenderer {
                 .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
                 .closest_hit_shader("raytrace/geometry.rchit.hlsl")
                 .accel_struct("scene_tlas", scene_tlas)
-                .texture("skycube", skycube)
-                .texture_raw(
+                .texture_view("skycube", skycube)
+                .texture(
                     "prev_indirect_diffuse_texture",
                     prev_indirect_diffuse_texture,
                 )
-                .texture("prev_depth", prev_depth)
+                .texture_view("prev_depth", prev_depth)
                 .rw_buffer("rw_prev_reservoir_buffer", prev_diffuse_reservoir_buffer)
                 //.rw_texture("rw_debug_texture", debug_texture.1)
                 .dimension(main_size.x, main_size.y, 1);
@@ -224,9 +224,9 @@ impl RestirRenderer {
         rg.new_compute("RayTraced AO Gen.")
             .compute_shader("restir/raytraced_ao_gen.hlsl")
             .buffer("new_sample_buffer", indirect_diffuse_new_sample_buffer)
-            .texture("depth_buffer", gbuffer.depth.1)
-            .texture_raw("prev_ao_texture", prev_ao_texture)
-            .rw_texture_raw("rw_ao_texture", curr_ao_texture)
+            .texture_view("depth_buffer", gbuffer.depth.1)
+            .texture("prev_ao_texture", prev_ao_texture)
+            .rw_texture("rw_ao_texture", curr_ao_texture)
             .push_constant::<u32>(&indirect_diffuse_has_new_sample)
             .push_constant::<u32>(&has_prev_ao)
             .push_constant::<f32>(&self.config.ao_radius)
@@ -246,9 +246,9 @@ impl RestirRenderer {
         // Pass: AO Spatial Filtering
         rg.new_compute("RayTraced AO Filter")
             .compute_shader("restir/raytraced_ao_filter.hlsl")
-            .texture("depth_buffer", gbuffer.depth.1)
-            .texture_raw("ao_texture", curr_ao_texture)
-            .rw_texture_raw("rw_filtered_ao_texture", filtered_ao_texture)
+            .texture_view("depth_buffer", gbuffer.depth.1)
+            .texture("ao_texture", curr_ao_texture)
+            .rw_texture("rw_filtered_ao_texture", filtered_ao_texture)
             .group_count(
                 div_round_up(main_size.x, 8),
                 div_round_up(main_size.y, 4),
@@ -261,9 +261,9 @@ impl RestirRenderer {
         // Pass: Indirect Diffuse Temporal Resampling
         rg.new_compute("Ind. Diff. Temporal Resample")
             .compute_shader("restir/ind_diff_temporal_resample.hlsl")
-            .texture("prev_gbuffer_depth", prev_depth)
-            .texture("gbuffer_depth", gbuffer.depth.1)
-            .texture("gbuffer_color", gbuffer.color.1)
+            .texture_view("prev_gbuffer_depth", prev_depth)
+            .texture_view("gbuffer_depth", gbuffer.depth.1)
+            .texture_view("gbuffer_color", gbuffer.color.1)
             .buffer("new_sample_buffer", indirect_diffuse_new_sample_buffer)
             .buffer("prev_reservoir_buffer", prev_diffuse_reservoir_buffer)
             .buffer(
@@ -296,15 +296,15 @@ impl RestirRenderer {
 
             rg.new_compute("Ind. Diff. Spatial Resample")
                 .compute_shader("restir/ind_diff_spatial_resample.hlsl")
-                .texture("gbuffer_depth", gbuffer.depth.1)
-                .texture("gbuffer_color", gbuffer.color.1)
-                .texture_raw("ao_texture", filtered_ao_texture)
+                .texture_view("gbuffer_depth", gbuffer.depth.1)
+                .texture_view("gbuffer_color", gbuffer.color.1)
+                .texture("ao_texture", filtered_ao_texture)
                 .buffer(
                     "temporal_reservoir_buffer",
                     indirect_diffuse_temporal_reservoir_buffer,
                 )
                 .rw_buffer("rw_spatial_reservoir_buffer", spatial_reservoir_buffer)
-                .rw_texture_raw("rw_lighting_texture", indirect_diffuse)
+                .rw_texture("rw_lighting_texture", indirect_diffuse)
                 //.rw_texture("rw_debug_texture", debug_texture.1)
                 .push_constant(&frame_index)
                 .group_count(
@@ -328,10 +328,10 @@ impl RestirRenderer {
 
             rg.new_compute("Ind. Diff. Temporal Filter")
                 .compute_shader("restir/ind_diff_temporal_filter.hlsl")
-                .texture_raw("depth_buffer", gbuffer.depth.0)
-                .texture_raw("prev_ind_diff_texture", prev_indirect_diffuse_texture)
-                .texture_raw("curr_ind_diff_texture", indirect_diffuse)
-                .rw_texture_raw("rw_filtered_ind_diff_texture", filtered_indirect_diffuse)
+                .texture("depth_buffer", gbuffer.depth.0)
+                .texture("prev_ind_diff_texture", prev_indirect_diffuse_texture)
+                .texture("curr_ind_diff_texture", indirect_diffuse)
+                .rw_texture("rw_filtered_ind_diff_texture", filtered_indirect_diffuse)
                 .push_constant::<u32>(&has_prev_frame)
                 .group_count(
                     div_round_up(main_size.x, 8),
@@ -360,8 +360,8 @@ impl RestirRenderer {
                 .raygen_shader("raytraced_shadow.hlsl")
                 .miss_shader("raytrace/shadow.rmiss.hlsl")
                 .accel_struct("scene_tlas", scene_tlas)
-                .texture("gbuffer_depth", gbuffer.depth.1)
-                .rw_texture("rw_shadow", raytraced_shadow_mask.1)
+                .texture_view("gbuffer_depth", gbuffer.depth.1)
+                .rw_texture_view("rw_shadow", raytraced_shadow_mask.1)
                 .dimension(main_size.x, main_size.y, 1);
         }
 
@@ -394,7 +394,7 @@ impl RestirRenderer {
             rg.new_graphics("Sky")
                 .vertex_shader_with_ep("sky_vsps.hlsl", "vs_main")
                 .pixel_shader_with_ep("sky_vsps.hlsl", "ps_main")
-                .texture("skycube", skycube)
+                .texture_view("skycube", skycube)
                 .color_targets(&[ColorTarget {
                     view: scene_color.1,
                     load_op: ColorLoadOp::DontCare,
@@ -426,10 +426,10 @@ impl RestirRenderer {
         {
             rg.new_compute("Combined Lighting")
                 .compute_shader("restir/final_lighting.hlsl")
-                .texture("gbuffer_color", gbuffer.color.1)
-                .texture("shadow_mask_buffer", raytraced_shadow_mask.1)
-                .texture_raw("indirect_diffuse_buffer", filtered_indirect_diffuse)
-                .rw_texture("rw_color_buffer", scene_color.1)
+                .texture_view("gbuffer_color", gbuffer.color.1)
+                .texture_view("shadow_mask_buffer", raytraced_shadow_mask.1)
+                .texture("indirect_diffuse_buffer", filtered_indirect_diffuse)
+                .rw_texture_view("rw_color_buffer", scene_color.1)
                 .group_count(
                     div_round_up(main_size.x, 8),
                     div_round_up(main_size.y, 4),
@@ -464,10 +464,10 @@ impl RestirRenderer {
 
             rg.new_compute("Temporal AA")
                 .compute_shader("temporal_aa.hlsl")
-                .texture("gbuffer_depth", gbuffer.depth.1)
-                .texture("source_texture", scene_color.1)
-                .texture("history_texture", prev_color)
-                .rw_texture("rw_target", post_taa_color.1)
+                .texture_view("gbuffer_depth", gbuffer.depth.1)
+                .texture_view("source_texture", scene_color.1)
+                .texture_view("history_texture", prev_color)
+                .rw_texture_view("rw_target", post_taa_color.1)
                 .push_constant(&has_prev_color)
                 .group_count(
                     div_round_up(main_size.x, 8),
@@ -489,8 +489,8 @@ impl RestirRenderer {
             };
             rg.new_compute("Debug View")
                 .compute_shader("restir/debug_view.hlsl")
-                .texture_raw("color_texture", color_texture)
-                .rw_texture_raw("rw_output_texture", post_taa_color.0)
+                .texture("color_texture", color_texture)
+                .rw_texture("rw_output_texture", post_taa_color.0)
                 .group_count(
                     div_round_up(main_size.x, 8),
                     div_round_up(main_size.y, 4),

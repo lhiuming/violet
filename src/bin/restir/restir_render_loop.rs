@@ -245,7 +245,7 @@ impl RenderLoop for RestirRenderLoop {
 
             rg.new_compute("Sky Cube")
                 .compute_shader("sky_cube.hlsl")
-                .rw_texture("rw_cube_texture", uav)
+                .rw_texture_view("rw_cube_texture", uav)
                 .push_constant(&(width as f32))
                 .group_count(width / 8, width / 4, 6);
 
@@ -293,9 +293,9 @@ impl RenderLoop for RestirRenderLoop {
         let exposure_scale: f32 = 2.0f32.powf(self.config.exposure_stop);
         rg.new_compute("Post Processing")
             .compute_shader("post_processing.hlsl")
-            .texture("src_color_texture", scene_color_view)
-            .texture("debug_texture", debug_texture.1)
-            .rw_texture("rw_target_buffer", present_target.1)
+            .texture_view("src_color_texture", scene_color_view)
+            .texture_view("debug_texture", debug_texture.1)
+            .rw_texture_view("rw_target_buffer", present_target.1)
             .push_constant(&exposure_scale)
             .group_count(
                 div_round_up(main_size.x, 8),

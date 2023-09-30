@@ -78,8 +78,8 @@ impl RenderLoop for SengaRenderLoop {
         // Pass: Image-Based Line-Drawing
         rg.new_compute("IBLD")
             .compute_shader("image_based_line_drawing.hlsl")
-            .texture("gbuffer_depth", gbuffer.depth.1)
-            .rw_texture("rwcolor", final_color.1)
+            .texture_view("gbuffer_depth", gbuffer.depth.1)
+            .rw_texture_view("rwcolor", final_color.1)
             .group_count(
                 div_round_up(gbuffer.size.x, 8),
                 div_round_up(gbuffer.size.y, 8),
