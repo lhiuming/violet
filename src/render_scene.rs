@@ -221,14 +221,18 @@ impl RenderScene {
         // Buffer for whole scene
         let ib_size = 4 * 1024 * 1024;
         let vb_size = 16 * 1024 * 1024;
-        let accel_strut_usafe = vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
-            | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR;
+        let accel_struct_usage = if rd.support_raytracing {
+            vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
+        } else {
+            vk::BufferUsageFlags::empty()
+        };
         let index_buffer = AllocBuffer::new(
             rd.create_buffer(BufferDesc {
                 size: ib_size,
                 usage: vk::BufferUsageFlags::INDEX_BUFFER
                     | vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER
-                    | accel_strut_usafe,
+                    | accel_struct_usage,
                 memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
                     | vk::MemoryPropertyFlags::HOST_COHERENT, // TODO staing buffer
             })
@@ -240,7 +244,7 @@ impl RenderScene {
         let vertex_buffer = AllocBuffer::new(
             rd.create_buffer(BufferDesc {
                 size: vb_size,
-                usage: vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER | accel_strut_usafe,
+                usage: vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER | accel_struct_usage,
                 memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
                     | vk::MemoryPropertyFlags::HOST_COHERENT, // TODO staging buffer
             })
@@ -699,6 +703,12 @@ impl RenderScene {
                 pad: 0,
             });
 
+            if !rd.support_raytracing {
+                continue;
+            }
+
+            // Collect BLAS info //
+
             let triangle_count = index_count / 3;
 
             // TODO assert index type
@@ -752,6 +762,10 @@ impl RenderScene {
                 data_size,
             );
             dst.copy_from_slice(src);
+        }
+
+        if !rd.support_raytracing {
+            return;
         }
 
         // Build BLAS for all added meshes
@@ -830,6 +844,10 @@ impl RenderScene {
     }
 
     pub fn rebuild_top_level_accel_struct(&mut self, rd: &RenderDevice) -> Option<()> {
+        if !rd.support_raytracing {
+            return None;
+        }
+
         let khr_accel_struct = rd.khr_accel_struct.as_ref()?;
 
         // Create instance buffer
