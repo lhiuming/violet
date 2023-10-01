@@ -115,7 +115,8 @@ void main() {
 	    const float3 specular_color = get_specular_f0(hit.base_color, hit.metallic);
 	    const float3 diffuse_color = get_diffuse_rho(hit.base_color, hit.metallic);
         #if SPECULAR_SUPRESSION
-        float perceptual_roughness = max(hit.perceptual_roughness, 0.045f);
+        // always keep the sharp reflection at first bounce
+        float perceptual_roughness = select(bounce > 0, max(hit.perceptual_roughness, 0.045f), hit.perceptual_roughness);
         const float roughness = perceptual_roughness * perceptual_roughness;
         #else
         const float roughness = hit.perceptual_roughness * hit.perceptual_roughness;

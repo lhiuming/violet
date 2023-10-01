@@ -55,13 +55,72 @@ void main()
     // Specualr may need some better noise
     uint rng_state = lcg_init(dispatch_id.xy, buffer_size, pc.frame_index);
 
-    // Generate Sample Point with uniform hemisphere sampling
+    // Generate sample direction
     // TODO blue noise
     float3 sample_dir;
+    float3 brdf_NoL_over_pdf;
+    #if 0
+    // uniform hemisphere sampling
     {
         float2 u = float2(lcg_rand(rng_state), lcg_rand(rng_state));
         sample_dir = sample_hemisphere_uniform_with_normal(u, gbuffer.normal);
     }
+    #else
+    // VNDF sampling
+    {
+        float3 view_dir = normalize(view_params().view_pos - position_ws);
+        float roughness = gbuffer.perceptual_roughness * gbuffer.perceptual_roughness;
+
+        float4 rot_to_local = get_rotation_to_z_from(gbuffer.normal);
+        float3 V_local = rotate_point(rot_to_local, view_dir);
+
+        // Sample a half vector (microfacet normal) from the GGX distribution of visible normals (VNDF).
+        // pdf_H = D_visible(H) = ( G1(V) * VoH * D(H) / NoV ) 
+        // Note: this method allow V_local.z < 0 (viewing below the surface), but such
+        // case is eliminated during hit shader (by flipping the normal).
+        // ref: https://github.com/boksajak/referencePT/blob/master/shaders/brdf.h#L727
+        // [Heitz 2014 "Importance Sampling Microfacet-Based BSDFs using the Distribution of Visible Normals", section 2]
+        // TODO compare methods [Heitz 2018 "Sampling the GGX Distribution of Visible Normals"]
+        float3 H_local;
+        if (roughness != 0.0f)
+        {
+            float2 u = float2(lcg_rand(rng_state), lcg_rand(rng_state));
+
+            // We are not using anisotropic GGX
+            float2 alpha2d = roughness.xx;
+
+            float3 v_h = normalize(float3(alpha2d.x * V_local.x, alpha2d.y * V_local.y, V_local.z));
+
+            float lensq = dot(v_h.xy, v_h.xy);
+            float3 T1 = lensq > 0.0f ? float3(-v_h.y, v_h.x, 0.0f) * rsqrt(lensq) : float3(1.0f, 0.0f, 0.0f);
+            float3 T2 = cross(v_h, T1);
+
+            float r = sqrt(u.x);
+            float phi = TWO_PI * u.y;
+            float t1 = r * cos(phi);
+            float t2 = r * sin(phi);
+            float s = 0.5f * (1.0f + v_h.z);
+            t2 = lerp(sqrt(1.0f - t1 * t1), t2, s);
+
+            float3 n_h = t1 * T1 + t2 * T2 + sqrt(max(0.0f, 1.0f - t1 * t1 - t2 * t2)) * v_h;
+
+            H_local = normalize(float3(alpha2d.x * n_h.x, alpha2d.y * n_h.y, max(0.0f, n_h.z)));
+        }
+        else 
+        {
+            // perfect mirror (roughness == 0.0f) has singularity when transform the view direction to hemisphere configturation 
+            H_local = float3(0.0f, 0.0f, 1.0f);
+        }
+
+        // After relfect operator
+        // pdf_L = pdf_H * Jacobian_refl(V, H) 
+        //       = ( G1(V) * VoH * D(H) / NoV ) * ( 1 / (4 * VoH) )
+        //       = G1(V) * D(H) / (4 * NoV)
+        float3 L_local = reflect(-V_local, H_local);
+
+        sample_dir = rotate_point(invert_rotation(rot_to_local), L_local);
+    }
+    #endif
 
     // Raytrace
     RadianceTraceResult trace_result = trace_radiance(position_ws, sample_dir, pc.has_prev_frame);
