@@ -34,6 +34,7 @@ enum DebugView {
     IndDiff,
     IndDiffFiltered,
     IndSpec,
+    IndSpecFiltered,
 }
 
 pub struct RestirConfig {
@@ -41,7 +42,7 @@ pub struct RestirConfig {
     validation: bool,
     ao_radius: f32,
     ind_diffuse_taa: bool,
-
+    ind_spec_taa: bool,
     debug_view: DebugView,
 }
 impl Default for RestirConfig {
@@ -51,10 +52,17 @@ impl Default for RestirConfig {
             validation: true,
             ao_radius: 2.0,
             ind_diffuse_taa: true,
-
+            ind_spec_taa: true,
             debug_view: DebugView::None,
         }
     }
+}
+
+struct IndirectSpecularTextures {
+    reservoir: RGTemporal<Texture>,
+    hit_pos: RGTemporal<Texture>,
+    hit_radiance: RGTemporal<Texture>,
+    lighting: RGTemporal<Texture>,
 }
 
 // Render the scene using ReSTIR lighting
@@ -65,6 +73,8 @@ pub struct RestirRenderer {
     prev_diffuse_reservoir_buffer: Option<RGTemporal<Buffer>>,
     prev_indirect_diffuse_texture: Option<RGTemporal<Texture>>,
 
+    prev_indirect_specular: Option<IndirectSpecularTextures>,
+
     ao_history: Option<RGTemporal<Texture>>,
 }
 
@@ -73,8 +83,12 @@ impl RestirRenderer {
         Self {
             config: Default::default(),
             taa: TAAPass::new(),
+
             prev_diffuse_reservoir_buffer: None,
             prev_indirect_diffuse_texture: None,
+
+            prev_indirect_specular: None,
+
             ao_history: None,
         }
     }
@@ -89,14 +103,15 @@ impl RestirRenderer {
         ui.checkbox(&mut config.taa, "taa");
         ui.checkbox(&mut config.validation, "sample validate");
         ui.checkbox(&mut config.ind_diffuse_taa, "ind. diff. taa");
+        ui.checkbox(&mut config.ind_spec_taa, "ind. spec. taa");
         ui.add(egui::Slider::new(&mut config.ao_radius, 0.0..=5.0).text("ao radius"));
 
         egui::ComboBox::from_label("debug view")
             .selected_text(format!("{:?}", config.debug_view))
             .show_ui(ui, |ui| {
-                ui.set_min_width(24.0);
                 let mut item = |view: DebugView| {
                     ui.selectable_value(&mut config.debug_view, view, format!("{:?}", view));
+                    ui.set_min_width(128.0);
                 };
                 item(DebugView::None);
                 item(DebugView::AO);
@@ -104,6 +119,7 @@ impl RestirRenderer {
                 item(DebugView::IndDiff);
                 item(DebugView::IndDiffFiltered);
                 item(DebugView::IndSpec);
+                item(DebugView::IndSpecFiltered);
             });
     }
 
@@ -338,15 +354,19 @@ impl RestirRenderer {
         self.prev_indirect_diffuse_texture
             .replace(rg.convert_to_temporal(filtered_indirect_diffuse));
 
-        // Pass: Indirect Specular Sample Genenration
         let mut ind_spec_new_tex = |format: vk::Format| {
             let usage = vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED;
             rg.create_texutre(TextureDesc::new_2d(main_size.x, main_size.y, format, usage))
         };
-        //let ind_spec_origin_pos = ind_spec_new_tex(vk::Format::R32G32B32_SFLOAT);
+
         let ind_spec_hit_pos = ind_spec_new_tex(vk::Format::R32G32B32A32_SFLOAT); // TODO wasting 4 bytes
         let ind_spec_hit_normal = ind_spec_new_tex(vk::Format::R32_UINT);
         let ind_spec_hit_radiance = ind_spec_new_tex(vk::Format::B10G11R11_UFLOAT_PACK32);
+
+        let ind_spec_temporal_reservoir = ind_spec_new_tex(vk::Format::R32G32_UINT);
+        let indirect_specular = ind_spec_new_tex(vk::Format::B10G11R11_UFLOAT_PACK32);
+
+        // Pass: Indirect Specular Sample Genenration
         {
             let has_prev_frame = (has_prev_depth && has_prev_indirect_diffuse) as u32;
 
@@ -372,18 +392,56 @@ impl RestirRenderer {
                 .dimension(main_size.x, main_size.y, 1);
         }
 
-        let indirect_specular = rg.create_texutre(TextureDesc::new_2d(
-            main_size.x,
-            main_size.y,
-            vk::Format::B10G11R11_UFLOAT_PACK32,
-            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
-        ));
+        let has_prev_ind_spec = self.prev_indirect_specular.is_some();
+        let prev_ind_spec_reservoir;
+        let prev_ind_spec_hit_pos;
+        let prev_ind_spec_hit_radiance;
+        let prev_ind_spec;
+        match self.prev_indirect_specular.take() {
+            Some(ind_spec) => {
+                prev_ind_spec_reservoir = rg.convert_to_transient(ind_spec.reservoir);
+                prev_ind_spec_hit_pos = rg.convert_to_transient(ind_spec.hit_pos);
+                prev_ind_spec_hit_radiance = rg.convert_to_transient(ind_spec.hit_radiance);
+                prev_ind_spec = rg.convert_to_transient(ind_spec.lighting);
+            }
+            None => {
+                prev_ind_spec_reservoir = rg.register_texture(default_res.dummy_uint_texture);
+                prev_ind_spec_hit_pos = rg.register_texture(default_res.dummy_texture.0);
+                prev_ind_spec_hit_radiance = rg.register_texture(default_res.dummy_texture.0);
+                prev_ind_spec = rg.register_texture(default_res.dummy_texture.0);
+            }
+        }
+
+        // Pass: Indirect Specular Temporal Resampling
+        {
+            let has_prev_frame = (has_prev_depth && has_prev_ind_spec) as u32;
+
+            rg.new_compute("Ind. Spec. Temporal Resample")
+                .compute_shader("restir/ind_spec_temporal_resample.hlsl")
+                .texture("prev_gbuffer_depth", prev_depth)
+                .texture("gbuffer_depth", gbuffer.depth.0)
+                .texture("gbuffer_color", gbuffer.color.0)
+                .texture("prev_reservoir_texture", prev_ind_spec_reservoir)
+                .texture("prev_hit_pos_texture", prev_ind_spec_hit_pos)
+                .texture("prev_hit_radiance_texture", prev_ind_spec_hit_radiance)
+                .rw_texture("rw_reservoir_texture", ind_spec_temporal_reservoir)
+                .rw_texture("rw_hit_pos_texture", ind_spec_hit_pos)
+                .rw_texture("rw_hit_radiance_texture", ind_spec_hit_radiance)
+                .push_constant::<u32>(&frame_index)
+                .push_constant::<u32>(&has_prev_frame)
+                .group_count(
+                    div_round_up(main_size.x, 8),
+                    div_round_up(main_size.y, 4),
+                    1,
+                );
+        }
 
         // Pass: Indirect Specular Spatial Resampling
         rg.new_compute("Ind. Spec. Spaital Resample")
             .compute_shader("restir/ind_spec_spatial_resample.hlsl")
             .texture("gbuffer_depth", gbuffer.depth.0)
             .texture("gbuffer_color", gbuffer.color.0)
+            .texture("reservoir_texture", ind_spec_temporal_reservoir)
             .texture("hit_pos_texture", ind_spec_hit_pos)
             .texture("hit_radiance_texture", ind_spec_hit_radiance)
             .rw_texture("rw_lighting_texture", indirect_specular)
@@ -392,6 +450,35 @@ impl RestirRenderer {
                 div_round_up(main_size.y, 4),
                 1,
             );
+
+        // Pass: Indirect Specular Temporal Filtering
+        let filtered_indirect_specular;
+        if has_prev_ind_spec && self.config.ind_spec_taa {
+            let desc = rg.get_texture_desc(indirect_specular);
+            filtered_indirect_specular = rg.create_texutre(*desc);
+
+            rg.new_compute("Ind. Spec. Temporal Filter")
+                .compute_shader("restir/ind_spec_temporal_filter.hlsl")
+                .texture("depth_buffer", gbuffer.depth.0)
+                .texture("prev_ind_spec_texture", prev_ind_spec)
+                .texture("curr_ind_spec_texture", indirect_specular)
+                .rw_texture("rw_filtered_ind_spec_texture", filtered_indirect_specular)
+                .group_count(
+                    div_round_up(main_size.x, 8),
+                    div_round_up(main_size.y, 4),
+                    1,
+                );
+        } else {
+            filtered_indirect_specular = indirect_specular;
+        }
+
+        self.prev_indirect_specular
+            .replace(IndirectSpecularTextures {
+                reservoir: rg.convert_to_temporal(ind_spec_temporal_reservoir),
+                hit_pos: rg.convert_to_temporal(ind_spec_hit_pos),
+                hit_radiance: rg.convert_to_temporal(ind_spec_hit_radiance),
+                lighting: rg.convert_to_temporal(filtered_indirect_specular),
+            });
 
         // Pass: Raytraced Shadow
         let raytraced_shadow_mask = {
@@ -477,7 +564,7 @@ impl RestirRenderer {
                 .texture_view("gbuffer_color", gbuffer.color.1)
                 .texture_view("shadow_mask_buffer", raytraced_shadow_mask.1)
                 .texture("indirect_diffuse_texture", filtered_indirect_diffuse)
-                .texture("indirect_specular_texture", indirect_specular)
+                .texture("indirect_specular_texture", filtered_indirect_specular)
                 .rw_texture_view("rw_color_buffer", scene_color.1)
                 .group_count(
                     div_round_up(main_size.x, 8),
@@ -535,6 +622,7 @@ impl RestirRenderer {
                 DebugView::IndDiff => indirect_diffuse,
                 DebugView::IndDiffFiltered => filtered_indirect_diffuse,
                 DebugView::IndSpec => indirect_specular,
+                DebugView::IndSpecFiltered => filtered_indirect_specular,
                 DebugView::None => rg.register_texture(default_res.dummy_texture.0),
             };
             rg.new_compute("Debug View")

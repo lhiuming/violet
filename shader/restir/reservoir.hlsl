@@ -47,3 +47,25 @@ Reservoir init_reservoir(RestirSample z, uint M, float W)
     r.W = W;
     return r;
 }
+
+struct ReservoirSimple
+{
+    uint M;
+    float W;
+};
+
+uint2 reservoir_encode_u32(ReservoirSimple r)
+{
+    uint2 u;
+    u.x = r.M;
+    u.y = asuint(r.W);
+    return u;
+}
+
+ReservoirSimple reservoir_decode_u32(uint2 u)
+{
+    ReservoirSimple r;
+    r.M = u.x;
+    r.W = asfloat(u.y);
+    return r;
+}

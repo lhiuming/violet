@@ -105,11 +105,36 @@ impl PhysicalDevice {
         return None;
     }
 
+    #[inline]
     pub fn get_format_properties(&self, format: vk::Format) -> vk::FormatProperties {
         unsafe {
             self.instance
                 .get_physical_device_format_properties(self.handle, format)
         }
+    }
+
+    pub fn list_supported_image_formats(
+        &self,
+        tiling: vk::ImageTiling,
+        features: vk::FormatFeatureFlags,
+    ) -> Vec<vk::Format> {
+        let is_linear = tiling == vk::ImageTiling::LINEAR;
+        let i_first = vk::Format::R4G4_UNORM_PACK8.as_raw();
+        let i_last = vk::Format::ASTC_12X12_SRGB_BLOCK.as_raw();
+        let mut ret = Vec::new();
+        for i in i_first..=i_last {
+            let format = vk::Format::from_raw(i);
+            let prop = self.get_format_properties(format);
+            let supported = if is_linear {
+                prop.linear_tiling_features.contains(features)
+            } else {
+                prop.optimal_tiling_features.contains(features)
+            };
+            if supported {
+                ret.push(format)
+            }
+        }
+        ret
     }
 }
 

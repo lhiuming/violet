@@ -469,8 +469,8 @@ impl<'a, 'render> ComputePassBuilder<'a, 'render> {
         self
     }
 
-    pub fn group_count(&mut self, width: u32, height: u32, depth: u32) -> &mut Self {
-        self.compute().group_count = UVec3::new(width, height, depth);
+    pub fn group_count(&mut self, x: u32, y: u32, z: u32) -> &mut Self {
+        self.compute().group_count = UVec3::new(x, y, z);
         self
     }
 

@@ -224,6 +224,28 @@ impl PartialEq for TextureView {
     }
 }
 
+// NOTE: not perfect match! (e.g. atomic stoge, color blend)
+fn image_usage_to_feature(usage: vk::ImageUsageFlags) -> vk::FormatFeatureFlags {
+    let mut features = vk::FormatFeatureFlags::empty();
+    use vk::FormatFeatureFlags as Feature;
+    use vk::ImageUsageFlags as Usage;
+    let pairs = [
+        (Usage::SAMPLED, Feature::SAMPLED_IMAGE),
+        (Usage::STORAGE, Feature::STORAGE_IMAGE),
+        (Usage::COLOR_ATTACHMENT, Feature::COLOR_ATTACHMENT),
+        (
+            Usage::DEPTH_STENCIL_ATTACHMENT,
+            Feature::DEPTH_STENCIL_ATTACHMENT,
+        ),
+    ];
+    for p in pairs {
+        if usage.contains(p.0) {
+            features = features | p.1;
+        }
+    }
+    features
+}
+
 impl super::RenderDevice {
     pub fn create_texture(&self, desc: TextureDesc) -> Option<Texture> {
         let format_prop = unsafe {
@@ -245,6 +267,21 @@ impl super::RenderDevice {
                 vk::Result::ERROR_FORMAT_NOT_SUPPORTED => {
                     let prop = self.physical.get_format_properties(desc.format);
                     println!("Format not supported. Format properties: {:?}", prop);
+
+                    // Hint log
+                    let features = image_usage_to_feature(desc.usage);
+                    let tilings = [vk::ImageTiling::OPTIMAL, vk::ImageTiling::LINEAR];
+                    for tiling in tilings {
+                        println!(
+                            "Try these formats for usage {:?} with {:?} tiling:",
+                            desc.usage, tiling
+                        );
+                        let supported_formats =
+                            self.physical.list_supported_image_formats(tiling, features);
+                        for format in supported_formats {
+                            println!("\t{:?}", format);
+                        }
+                    }
                 }
                 _ => {}
             }
