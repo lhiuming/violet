@@ -70,14 +70,17 @@ void main()
     {
         float3 view_dir = normalize(view_params().view_pos - position_ws);
         float roughness = gbuffer.perceptual_roughness * gbuffer.perceptual_roughness;
+        if (IND_SPEC_R_MIN > 0)
+        {
+            roughness = max(roughness, IND_SPEC_R_MIN);
+        }
 
         float4 rot_to_local = get_rotation_to_z_from(gbuffer.normal);
         float3 V_local = rotate_point(rot_to_local, view_dir);
 
         // Sample a half vector (microfacet normal) from the GGX distribution of visible normals (VNDF).
         // pdf_H = D_visible(H) = ( G1(V) * VoH * D(H) / NoV ) 
-        // Note: this method allow V_local.z < 0 (viewing below the surface), but such
-        // case is eliminated during hit shader (by flipping the normal).
+        // TODO: this method allow V_local.z < 0 (viewing below the surface)
         // ref: https://github.com/boksajak/referencePT/blob/master/shaders/brdf.h#L727
         // [Heitz 2014 "Importance Sampling Microfacet-Based BSDFs using the Distribution of Visible Normals", section 2]
         // TODO compare methods [Heitz 2018 "Sampling the GGX Distribution of Visible Normals"]
@@ -112,10 +115,7 @@ void main()
             H_local = float3(0.0f, 0.0f, 1.0f);
         }
 
-        // After relfect operator
-        // pdf_L = pdf_H * Jacobian_refl(V, H) 
-        //       = ( G1(V) * VoH * D(H) / NoV ) * ( 1 / (4 * VoH) )
-        //       = G1(V) * D(H) / (4 * NoV)
+        // Apply relfect operator
         float3 L_local = reflect(-V_local, H_local);
 
         sample_dir = rotate_point(invert_rotation(rot_to_local), L_local);
