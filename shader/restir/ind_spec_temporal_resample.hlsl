@@ -7,8 +7,10 @@
 
 #include "reservoir.hlsl"
 
-// TODO temporal resampling is still not wrong
-#define ENABLE_TEMPORAL_REUSE 0
+#define IND_SPEC_ENABLE_TEMPORAL_REUSE 1
+
+// Thie is necessary; using only lumi as target function will just add noise (naive VNDF sampling is better for most cases)
+#define IND_SPEC_TARGET_FUNCTION_HAS_BRDF 1
 
 Texture2D<float> prev_gbuffer_depth;
 Texture2D<float> gbuffer_depth;
@@ -77,7 +79,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         }
     }
 
-    #if !ENABLE_TEMPORAL_REUSE
+    #if !IND_SPEC_ENABLE_TEMPORAL_REUSE
     sample_prev_frame = false;
     #endif
     
@@ -85,7 +87,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     ReservoirSimple reservoir;
     float3 reservoir_hit_pos;
     float3 reservoir_hit_radiance;
-    float reservoir_target_pdf;
+    float reservoir_target_function;
     if (sample_prev_frame)
     {
         // Nearest neighbor sampling
@@ -101,13 +103,14 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
             prev_pos = clamp(prev_pos, uint2(0, 0), buffer_size - uint2(1, 1));
         }
 
-        reservoir = reservoir_decode_u32(prev_reservoir_texture[prev_pos].xy);
-        reservoir_hit_pos = prev_hit_pos_texture[prev_pos].xyz;
+        reservoir = reservoir_decode_u32(prev_reservoir_texture[prev_pos]);
+        float4 prev_hit_pos_xyzw = prev_hit_pos_texture[prev_pos];
+        reservoir_hit_pos = prev_hit_pos_xyzw.xyz;
         reservoir_hit_radiance = prev_hit_radiance_texture[prev_pos];
-        #if IND_SPEC_TARGET_PDF_HAS_BRDF 
-        reservoir_target_pdf = prev_hit_pos_texture[prev_pos].w;
+        #if IND_SPEC_TARGET_FUNCTION_HAS_BRDF 
+        reservoir_target_function = prev_hit_pos_xyzw.w;
         #else
-        float reservoir_target_pdf = luminance(reservoir_hit_radiance);
+        reservoir_target_function = luminance(reservoir_hit_radiance);
         #endif
 
         // Bound the temporal information to avoid stale sample
@@ -125,7 +128,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         reservoir = reservoir_decode_u32(uint2(0, 0));
         reservoir_hit_pos = 0.0;
         reservoir_hit_radiance = 0.0;
-        reservoir_target_pdf = 0.0;
+        reservoir_target_function = 0.0;
     }
 
     //
@@ -136,10 +139,9 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 
     // VNDF sampling
     // (After relfect operator)
-    // pdf_L = pdf_H * Jacobian_refl(V, H) 
-    //       = ( G1(V) * VoH * D(H) / NoV ) * ( 1 / (4 * VoH) )
-    //       = G1(V) * D(H) / (4 * NoV)
-    bool valid_sample;
+    // source_pdf = pdf_H * Jacobian_refl(V, H) 
+    //            = ( G1(V) * VoH * D(H) / NoV ) * ( 1 / (4 * VoH) )
+    //            = G1(V) * D(H) / (4 * NoV)
     float source_pdf;
     float3 brdf_NoL_over_source_pdf;
     {
@@ -176,7 +178,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         // r   == 0            -> NoV
         float lambda_pomc = smith_lambda_GGX_plus_one_mul_cos(NoV, roughness); 
 
-        // Original formular (pdf_L):
+        // Original formular:
         // source_pdf = G1_V * D / (4 * NoV);
         //            = D / (4 * NoV * (1 + lambda_V));
         //            = D / (4 * NoV * (1 + lambda_V));
@@ -185,7 +187,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 
         #endif
 
-#if IND_SPEC_TARGET_PDF_HAS_BRDF
+#if IND_SPEC_TARGET_FUNCTION_HAS_BRDF
 
         float3 specular_f0 = get_specular_f0(gbuffer.color, gbuffer.metallic);
         float LoH = saturate(dot(light_dir, H));
@@ -217,20 +219,20 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 
     float3 new_sample_hit_radiance = rw_hit_radiance_texture[dispatch_id];
 
-    #if IND_SPEC_TARGET_PDF_HAS_BRDF
+    #if IND_SPEC_TARGET_FUNCTION_HAS_BRDF
     float new_w = luminance(new_sample_hit_radiance * brdf_NoL_over_source_pdf);
-    float new_target_pdf = new_w * source_pdf;
+    float new_target_function = new_w * source_pdf;
     #else
-    float new_target_pdf = luminance(new_sample_hit_radiance);
+    float new_target_function = luminance(new_sample_hit_radiance);
     // NOTE: we can safely divide by source_pdf because it is not zero with above clampping
-    float new_w = new_target_pdf / source_pdf;
+    float new_w = new_target_function / source_pdf;
     #endif
 
-    float w_sum = reservoir.W * (reservoir_target_pdf * float(reservoir.M));
+    float w_sum = reservoir.W * (reservoir_target_function * float(reservoir.M));
 
     uint rng_state = lcg_init(dispatch_id.xy, buffer_size, pc.frame_index);
 
-    // update reserviour with new sample
+    // update reserviour with the new sample
     w_sum += new_w;
     float chance = new_w / w_sum;
     bool replace_sample = (lcg_rand(rng_state) < chance);
@@ -239,29 +241,25 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         // replace the sample
         reservoir_hit_pos = new_sample_hit_pos;
         reservoir_hit_radiance = new_sample_hit_radiance;
-        reservoir_target_pdf = new_target_pdf;
+        reservoir_target_function = new_target_function;
     }
-
-    // update M
     reservoir.M += 1;
-
-    // update W
     // NOTE: if reservoir_target_pdf is zero, the sample will not contribute to lighting and will be replaced soon, so we just ignore it.
-    if (reservoir_target_pdf > 0.0) // avoid dviding by zero
+    if (reservoir_target_function > 0.0) // avoid dviding by zero
     {
-        reservoir.W = w_sum / (reservoir_target_pdf * float(reservoir.M));
+        reservoir.W = w_sum / (reservoir_target_function * float(reservoir.M));
     }
     else
     {
-        //reservoir.W = 1.0 / source_pdf;
         reservoir.W = 0.0;
     }
 
     // store updated reservoir (and selected sample)
-    if (replace_sample)
+    rw_reservoir_texture[dispatch_id] = reservoir_encode_u32(reservoir);
+    rw_hit_pos_texture[dispatch_id] = float4(reservoir_hit_pos, reservoir_target_function);
+    // only write if necessary (reprojecting history sample instead of just takes the new sample)
+    if (!replace_sample)
     {
         rw_hit_radiance_texture[dispatch_id] = reservoir_hit_radiance;
     }
-    rw_hit_pos_texture[dispatch_id] = float4(reservoir_hit_pos, reservoir_target_pdf);
-    rw_reservoir_texture[dispatch_id] = reservoir_encode_u32(reservoir);
 }

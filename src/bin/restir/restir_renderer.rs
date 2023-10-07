@@ -359,7 +359,7 @@ impl RestirRenderer {
             rg.create_texutre(TextureDesc::new_2d(main_size.x, main_size.y, format, usage))
         };
 
-        let ind_spec_hit_pos = ind_spec_new_tex(vk::Format::R32G32B32A32_SFLOAT); // TODO wasting 4 bytes
+        let ind_spec_hit_pos = ind_spec_new_tex(vk::Format::R32G32B32A32_SFLOAT);
         let ind_spec_hit_normal = ind_spec_new_tex(vk::Format::R32_UINT);
         let ind_spec_hit_radiance = ind_spec_new_tex(vk::Format::B10G11R11_UFLOAT_PACK32);
 
