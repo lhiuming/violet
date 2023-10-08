@@ -71,6 +71,7 @@ pub struct FrameParams {
     pub view_ray_down_shift: Vec4,
 
     pub prev_view_proj: Mat4,
+    pub prev_view_pos: Vec4,
 
     pub jitter: Vec4,
 
@@ -124,6 +125,10 @@ impl FrameParams {
             Some(prev) => Self::make_view_proj(&prev.view_info, prev.jitter_info.as_ref()),
             None => (view_proj, Vec2::ZERO),
         };
+        let prev_view_pos = match prev_view {
+            Some(prev) => prev.view_info.view_position.extend(0.0),
+            None => view_info.view_position.extend(0.0),
+        };
 
         let jitter_vec4 = Vec4::new(
             jitter_ndc.x,
@@ -140,6 +145,7 @@ impl FrameParams {
             view_ray_right_shift: (view_ray_right - view_ray_left).extend(0.0),
             view_ray_down_shift: (view_ray_down - view_ray_up).extend(0.0),
             prev_view_proj,
+            prev_view_pos,
             jitter: jitter_vec4,
             sun_dir: sun_dir.extend(0.0),
             sun_inten: sun_inten.extend(0.0),

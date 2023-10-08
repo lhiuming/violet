@@ -74,6 +74,7 @@ pub struct RestirRenderer {
     prev_indirect_diffuse_texture: Option<RGTemporal<Texture>>,
 
     prev_indirect_specular: Option<IndirectSpecularTextures>,
+    prev_gbuffer_color: Option<RGTemporal<Texture>>,
 
     ao_history: Option<RGTemporal<Texture>>,
 }
@@ -88,6 +89,7 @@ impl RestirRenderer {
             prev_indirect_diffuse_texture: None,
 
             prev_indirect_specular: None,
+            prev_gbuffer_color: None,
 
             ao_history: None,
         }
@@ -412,13 +414,21 @@ impl RestirRenderer {
             }
         }
 
+        let has_prev_gbuffer_color = self.prev_gbuffer_color.is_some();
+        let prev_gbuffer_color = match self.prev_gbuffer_color.take() {
+            Some(tex) => rg.convert_to_transient(tex),
+            None => rg.register_texture(default_res.dummy_uint_texture),
+        };
+
         // Pass: Indirect Specular Temporal Resampling
         {
-            let has_prev_frame = (has_prev_depth && has_prev_ind_spec) as u32;
+            let has_prev_frame =
+                (has_prev_depth && has_prev_ind_spec && has_prev_gbuffer_color) as u32;
 
             rg.new_compute("Ind. Spec. Temporal Resample")
                 .compute_shader("restir/ind_spec_temporal_resample.hlsl")
                 .texture("prev_gbuffer_depth", prev_depth)
+                .texture("prev_gbuffer_color", prev_gbuffer_color)
                 .texture("gbuffer_depth", gbuffer.depth.0)
                 .texture("gbuffer_color", gbuffer.color.0)
                 .texture("prev_reservoir_texture", prev_ind_spec_reservoir)
@@ -479,6 +489,8 @@ impl RestirRenderer {
                 hit_radiance: rg.convert_to_temporal(ind_spec_hit_radiance),
                 lighting: rg.convert_to_temporal(filtered_indirect_specular),
             });
+        self.prev_gbuffer_color
+            .replace(rg.convert_to_temporal(gbuffer.color.0));
 
         // Pass: Raytraced Shadow
         let raytraced_shadow_mask = {

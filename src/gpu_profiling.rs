@@ -252,10 +252,12 @@ impl NamedProfiling {
 
     pub fn print(&self) {
         let count = self.entries.len();
+        let width = self.entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
+        let width = (width + 3) / 4 * 4;
         println!("GPU Profiling: ({} entries)", count);
         for entry in self.entries.iter() {
             let avg_time = entry.total_time_ms / (entry.total_count as f64);
-            println!("\t{:>16}: {:.4}ms", entry.name, avg_time);
+            println!("\t{:>width$}: {:.4}ms", entry.name, avg_time);
         }
     }
 }
