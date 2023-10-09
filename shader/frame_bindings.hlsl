@@ -15,6 +15,7 @@ struct FrameParams
 	float4 view_ray_down_shift;
 
     float4x4 prev_view_proj;
+	float4x4 prev_inv_view_proj;
     float4 prev_view_pos;
 
     float4 jitter; // in clip space; xy: this frame; zw: prev frame

@@ -39,9 +39,10 @@ enum DebugView {
 
 pub struct RestirConfig {
     taa: bool,
-    validation: bool,
     ao_radius: f32,
-    ind_diffuse_taa: bool,
+    ind_diff_validate: bool,
+    ind_diff_taa: bool,
+    ind_spec_validate: bool,
     ind_spec_taa: bool,
     debug_view: DebugView,
 }
@@ -49,9 +50,10 @@ impl Default for RestirConfig {
     fn default() -> Self {
         Self {
             taa: true,
-            validation: true,
             ao_radius: 2.0,
-            ind_diffuse_taa: true,
+            ind_diff_validate: true,
+            ind_diff_taa: true,
+            ind_spec_validate: false, // experimental
             ind_spec_taa: true,
             debug_view: DebugView::None,
         }
@@ -103,8 +105,9 @@ impl RestirRenderer {
         let config = &mut self.config;
         ui.heading("RESTIR RENDERER");
         ui.checkbox(&mut config.taa, "taa");
-        ui.checkbox(&mut config.validation, "sample validate");
-        ui.checkbox(&mut config.ind_diffuse_taa, "ind. diff. taa");
+        ui.checkbox(&mut config.ind_diff_validate, "ind. diff. sample validate");
+        ui.checkbox(&mut config.ind_diff_taa, "ind. diff. taa");
+        ui.checkbox(&mut config.ind_spec_validate, "ind. spec. sample validate");
         ui.checkbox(&mut config.ind_spec_taa, "ind. spec. taa");
         ui.add(egui::Slider::new(&mut config.ao_radius, 0.0..=5.0).text("ao radius"));
 
@@ -169,7 +172,7 @@ impl RestirRenderer {
 
         let is_indirect_diffuse_validation_frame = {
             let has_buffers = has_prev_depth && has_prev_diffuse_reservoir;
-            has_buffers && ((frame_index % 6) == 0) && self.config.validation
+            has_buffers && ((frame_index % 6) == 0) && self.config.ind_diff_validate
         };
 
         // Pass: Indirect Diffuse ReSTIR Sample Generation
@@ -192,7 +195,7 @@ impl RestirRenderer {
                     "prev_indirect_diffuse_texture",
                     prev_indirect_diffuse_texture,
                 )
-                .texture("prev_depth", prev_depth)
+                .texture("prev_depth_texture", prev_depth)
                 .texture_view("gbuffer_depth", gbuffer.depth.1)
                 .texture_view("gbuffer_color", gbuffer.color.1)
                 .buffer("rw_new_sample_buffer", indirect_diffuse_new_sample_buffer)
@@ -216,7 +219,7 @@ impl RestirRenderer {
                     "prev_indirect_diffuse_texture",
                     prev_indirect_diffuse_texture,
                 )
-                .texture("prev_depth", prev_depth)
+                .texture("prev_depth_texture", prev_depth)
                 .rw_buffer("rw_prev_reservoir_buffer", prev_diffuse_reservoir_buffer)
                 //.rw_texture("rw_debug_texture", debug_texture.1)
                 .dimension(main_size.x, main_size.y, 1);
@@ -331,7 +334,7 @@ impl RestirRenderer {
 
         // Pass: Indirect Diffuse Temporal Filtering
         let filtered_indirect_diffuse;
-        if has_prev_indirect_diffuse && self.config.ind_diffuse_taa {
+        if has_prev_indirect_diffuse && self.config.ind_diff_taa {
             let desc = rg.get_texture_desc(indirect_diffuse);
             filtered_indirect_diffuse = rg.create_texutre(*desc);
 
@@ -382,7 +385,7 @@ impl RestirRenderer {
                     "prev_indirect_diffuse_texture",
                     prev_indirect_diffuse_texture,
                 )
-                .texture("prev_depth", prev_depth)
+                .texture("prev_depth_texture", prev_depth)
                 .texture("gbuffer_depth", gbuffer.depth.0)
                 .texture("gbuffer_color", gbuffer.color.0)
                 //.rw_texture("rw_origin_pos_texture", ind_spec_origin_pos)
@@ -412,6 +415,27 @@ impl RestirRenderer {
                 prev_ind_spec_hit_radiance = rg.register_texture(default_res.dummy_texture.0);
                 prev_ind_spec = rg.register_texture(default_res.dummy_texture.0);
             }
+        }
+
+        // Pass: Indirect Specular Sample Validation
+        let has_spec_validate_textures =
+            has_prev_depth && has_prev_indirect_diffuse && has_prev_ind_spec;
+        if self.config.ind_spec_validate && has_spec_validate_textures {
+            rg.new_raytracing("Ind. Spec. Sample Validate")
+                .raygen_shader("restir/ind_spec_sample_validate.hlsl")
+                .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
+                .closest_hit_shader("raytrace/geometry.rchit.hlsl")
+                .accel_struct("scene_tlas", scene_tlas)
+                .texture_view("skycube", skycube)
+                .texture(
+                    "prev_indirect_diffuse_texture",
+                    prev_indirect_diffuse_texture,
+                )
+                .texture("prev_depth_texture", prev_depth)
+                .rw_texture("rw_prev_reservoir_texture", prev_ind_spec_reservoir)
+                .rw_texture("rw_prev_hit_pos_texture", prev_ind_spec_hit_pos)
+                .rw_texture("rw_prev_hit_radiance_texture", prev_ind_spec_hit_radiance)
+                .dimension(main_size.x, main_size.y, 1);
         }
 
         let has_prev_gbuffer_color = self.prev_gbuffer_color.is_some();

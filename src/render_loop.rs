@@ -71,6 +71,7 @@ pub struct FrameParams {
     pub view_ray_down_shift: Vec4,
 
     pub prev_view_proj: Mat4,
+    pub prev_inv_view_proj: Mat4,
     pub prev_view_pos: Vec4,
 
     pub jitter: Vec4,
@@ -145,6 +146,7 @@ impl FrameParams {
             view_ray_right_shift: (view_ray_right - view_ray_left).extend(0.0),
             view_ray_down_shift: (view_ray_down - view_ray_up).extend(0.0),
             prev_view_proj,
+            prev_inv_view_proj: prev_view_proj.inverse(),
             prev_view_pos,
             jitter: jitter_vec4,
             sun_dir: sun_dir.extend(0.0),

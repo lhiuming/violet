@@ -30,7 +30,7 @@ void main()
     uint2 dispatch_id = DispatchRaysIndex().xy;
 
     uint2 buffer_size;
-    prev_depth.GetDimensions(buffer_size.x, buffer_size.y);
+    prev_depth_texture.GetDimensions(buffer_size.x, buffer_size.y);
 
     // Read sample (from reservoir) to validate
     // TODO samples can be shared among reservoirs; maybe use a separate buffer for samples, and validate it without duplication

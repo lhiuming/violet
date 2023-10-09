@@ -11,7 +11,7 @@
 RaytracingAccelerationStructure scene_tlas;
 TextureCube<float4> skycube;
 Texture2D<float3> prev_indirect_diffuse_texture;
-Texture2D<float> prev_depth;
+Texture2D<float> prev_depth_texture;
 
 // return: miss or not
 bool trace_shadow(float3 ray_origin, float3 ray_dir)
@@ -125,12 +125,12 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
             if (in_view)
             {
                 uint2 buffer_size;
-                prev_depth.GetDimensions(buffer_size.x, buffer_size.y);
+                prev_depth_texture.GetDimensions(buffer_size.x, buffer_size.y);
 
                 // nearest neighbor sampling
 	            float2 prev_screen_uv = ndc.xy * 0.5f + 0.5f;
                 uint2 prev_pixcoord = uint2(floor(prev_screen_uv * buffer_size));
-                float prev_depth_value = prev_depth[prev_pixcoord];
+                float prev_depth_value = prev_depth_texture[prev_pixcoord];
 
                 // TODO compare in world space? Currently this cause a lot light leaking in micro geometry details (where typically AO should works on).
                 float DEPTH_TOLERANCE = 0.0001f; 
