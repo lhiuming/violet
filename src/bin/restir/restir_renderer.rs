@@ -53,7 +53,7 @@ impl Default for RestirConfig {
             ao_radius: 2.0,
             ind_diff_validate: true,
             ind_diff_taa: true,
-            ind_spec_validate: false, // experimental
+            ind_spec_validate: true,
             ind_spec_taa: true,
             debug_view: DebugView::None,
         }
@@ -105,10 +105,10 @@ impl RestirRenderer {
         let config = &mut self.config;
         ui.heading("RESTIR RENDERER");
         ui.checkbox(&mut config.taa, "taa");
-        ui.checkbox(&mut config.ind_diff_validate, "ind. diff. sample validate");
-        ui.checkbox(&mut config.ind_diff_taa, "ind. diff. taa");
-        ui.checkbox(&mut config.ind_spec_validate, "ind. spec. sample validate");
-        ui.checkbox(&mut config.ind_spec_taa, "ind. spec. taa");
+        ui.checkbox(&mut config.ind_diff_validate, "ind.diff.s.validate");
+        ui.checkbox(&mut config.ind_diff_taa, "ind.diff.taa");
+        ui.checkbox(&mut config.ind_spec_validate, "ind.spec.s.validate");
+        ui.checkbox(&mut config.ind_spec_taa, "ind.spec.taa");
         ui.add(egui::Slider::new(&mut config.ao_radius, 0.0..=5.0).text("ao radius"));
 
         egui::ComboBox::from_label("debug view")
@@ -338,15 +338,12 @@ impl RestirRenderer {
             let desc = rg.get_texture_desc(indirect_diffuse);
             filtered_indirect_diffuse = rg.create_texutre(*desc);
 
-            let has_prev_frame = (has_prev_depth & has_prev_indirect_diffuse) as u32;
-
             rg.new_compute("Ind. Diff. Temporal Filter")
                 .compute_shader("restir/ind_diff_temporal_filter.hlsl")
                 .texture("depth_buffer", gbuffer.depth.0)
-                .texture("prev_ind_diff_texture", prev_indirect_diffuse_texture)
-                .texture("curr_ind_diff_texture", indirect_diffuse)
-                .rw_texture("rw_filtered_ind_diff_texture", filtered_indirect_diffuse)
-                .push_constant::<u32>(&has_prev_frame)
+                .texture("history_texture", prev_indirect_diffuse_texture)
+                .texture("source_texture", indirect_diffuse)
+                .rw_texture("rw_filtered_texture", filtered_indirect_diffuse)
                 .group_count(
                     div_round_up(main_size.x, 8),
                     div_round_up(main_size.y, 4),
@@ -494,9 +491,9 @@ impl RestirRenderer {
             rg.new_compute("Ind. Spec. Temporal Filter")
                 .compute_shader("restir/ind_spec_temporal_filter.hlsl")
                 .texture("depth_buffer", gbuffer.depth.0)
-                .texture("prev_ind_spec_texture", prev_ind_spec)
-                .texture("curr_ind_spec_texture", indirect_specular)
-                .rw_texture("rw_filtered_ind_spec_texture", filtered_indirect_specular)
+                .texture("history_texture", prev_ind_spec)
+                .texture("source_texture", indirect_specular)
+                .rw_texture("rw_filtered_texture", filtered_indirect_specular)
                 .group_count(
                     div_round_up(main_size.x, 8),
                     div_round_up(main_size.y, 4),
