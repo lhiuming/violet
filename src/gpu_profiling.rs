@@ -1,3 +1,5 @@
+use std::collections::VecDeque;
+
 use crate::render_device::RenderDevice;
 use ash::vk;
 
@@ -103,16 +105,33 @@ impl QueryPool {
 
 struct ProfilingEntry {
     name: String,
-    total_time_ms: f64,
-    total_count: u32,
+    records_ns: VecDeque<u64>, // recent 16 records
+    sum_ns: u64,
 }
 
 impl ProfilingEntry {
     fn new(name: String) -> Self {
         Self {
             name,
-            total_time_ms: 0.0,
-            total_count: 0,
+            records_ns: VecDeque::with_capacity(16),
+            sum_ns: 0,
+        }
+    }
+
+    fn add_record_ns(&mut self, time_ns: u64) {
+        if self.records_ns.len() == self.records_ns.capacity() {
+            let front = self.records_ns.pop_front();
+            self.sum_ns -= front.unwrap();
+        }
+        self.records_ns.push_back(time_ns);
+        self.sum_ns += time_ns;
+    }
+
+    fn avg_time_ns(&self) -> f64 {
+        if self.records_ns.is_empty() {
+            0.0
+        } else {
+            self.sum_ns as f64 / self.records_ns.len() as f64
         }
     }
 }
@@ -236,9 +255,8 @@ impl NamedProfiling {
                     let end_tick = data_buffer[end_index as usize][0];
                     assert!(end_tick >= beg_tick);
                     // Accumulate to the entry
-                    let entry = &mut self.entries[entry_id];
-                    entry.total_time_ms += ((end_tick - beg_tick) as f64) * period / 1000_000.0;
-                    entry.total_count += 1;
+                    let timespan_ns = ((end_tick - beg_tick) as f64) * period;
+                    self.entries[entry_id].add_record_ns(timespan_ns as u64);
                 }
                 // put back to pool
                 self.timer_pool.release(batch.queries);
@@ -256,8 +274,8 @@ impl NamedProfiling {
         let width = (width + 3) / 4 * 4;
         println!("GPU Profiling: ({} entries)", count);
         for entry in self.entries.iter() {
-            let avg_time = entry.total_time_ms / (entry.total_count as f64);
-            println!("\t{:>width$}: {:.4}ms", entry.name, avg_time);
+            let avg_time_ms = entry.avg_time_ns() / 1000_000.0;
+            println!("\t{:>width$}: {:.4}ms", entry.name, avg_time_ms);
         }
     }
 }
