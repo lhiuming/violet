@@ -283,7 +283,6 @@ impl RestirRenderer {
             .compute_shader("restir/ind_diff_temporal_resample.hlsl")
             .texture("prev_gbuffer_depth", prev_depth)
             .texture_view("gbuffer_depth", gbuffer.depth.1)
-            .texture_view("gbuffer_color", gbuffer.color.1)
             .buffer("new_sample_buffer", indirect_diffuse_new_sample_buffer)
             .buffer("prev_reservoir_buffer", prev_diffuse_reservoir_buffer)
             .buffer(

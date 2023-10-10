@@ -12,7 +12,7 @@
 
 Texture2D<float> prev_gbuffer_depth;
 Texture2D<float> gbuffer_depth;
-Texture2D<uint4> gbuffer_color;
+//Texture2D<uint4> gbuffer_color;
 StructuredBuffer<RestirSample> new_sample_buffer;
 StructuredBuffer<Reservoir> prev_reservoir_buffer;
 RWStructuredBuffer<Reservoir> rw_temporal_reservoir_buffer;
@@ -55,7 +55,6 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     // Reproject previous frame reservoir
     //
 
-    GBuffer gbuffer = decode_gbuffer(gbuffer_color[dispatch_id.xy]);
     float3 position_ws = cs_depth_to_position(dispatch_id, buffer_size, depth);
 
     float4 hpos_reproj = mul(frame_params.prev_view_proj, float4(position_ws, 1.0f));
@@ -160,6 +159,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     rw_temporal_reservoir_buffer[buffer_index] = reservoir;
 
 #if 0
+    GBuffer gbuffer = decode_gbuffer(gbuffer_color[dispatch_id.xy]);
     float3 selected_dir = normalize(reservoir.z.hit_pos - position_ws);
     float NoL = saturate(dot(gbuffer.normal, selected_dir));
     float brdf = ONE_OVER_PI;

@@ -10,8 +10,8 @@ use violet::{
     },
     render_graph::*,
     render_loop::{
-        div_round_up, imgui_pass::ImGUIPass, rg_util, FrameParams, JitterInfo, PrevView,
-        RenderLoop, StreamLinedFrameResource, ViewInfo, FRAME_DESCRIPTOR_SET_INDEX,
+        div_round_up, imgui_pass::ImGUIPass, FrameParams, JitterInfo, PrevView, RenderLoop,
+        StreamLinedFrameResource, ViewInfo, FRAME_DESCRIPTOR_SET_INDEX,
     },
     render_scene::{RenderScene, UploadContext, SCENE_DESCRIPTOR_SET_INDEX},
     shader::{Shaders, ShadersConfig},
@@ -228,17 +228,6 @@ impl RenderLoop for RestirRenderLoop {
             (FRAME_DESCRIPTOR_SET_INDEX, frame_descriptor_set),
         ]);
 
-        // a reused debug texture
-        let debug_texture = rg_util::create_texture_and_view(
-            &mut rg,
-            TextureDesc::new_2d(
-                main_size.x,
-                main_size.y,
-                vk::Format::R16G16B16A16_SFLOAT,
-                vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
-            ),
-        );
-
         // Pass: Skycube update
         let skycube;
         {
@@ -305,7 +294,6 @@ impl RenderLoop for RestirRenderLoop {
         rg.new_compute("Post Processing")
             .compute_shader("post_processing.hlsl")
             .texture_view("src_color_texture", scene_color_view)
-            .texture_view("debug_texture", debug_texture.1)
             .rw_texture_view("rw_target_buffer", present_target.1)
             .push_constant(&exposure_scale)
             .group_count(

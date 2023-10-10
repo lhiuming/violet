@@ -1,10 +1,8 @@
 #include "display.hlsl"
 
 #define DISPLAY_MAPPING 1
-#define DEBUG_VIEW 0
 
 Texture2D<float3> src_color_texture;
-Texture2D<float4> debug_texture;
 RWTexture2D<float4> rw_target_buffer;
 
 struct PushConstants
@@ -34,12 +32,4 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     float3 display_encoded = srgb_eotf_inv_float3(display_referred);
 
     rw_target_buffer[dispatch_id.xy] = float4(display_encoded, 1.0f);
-
-#if DEBUG_VIEW
-    {
-        float3 debug_color = debug_texture[dispatch_id.xy].rgb;
-        rw_target_buffer[dispatch_id.xy] = float4(debug_color, 1.0);
-        return;
-    }
-#endif
 }

@@ -122,6 +122,17 @@ impl Shaders {
         }
     }
 
+    pub fn shader_debug(&self) -> bool {
+        self.shader_loader.shader_debug
+    }
+
+    pub fn set_shader_debug(&mut self, value: bool) {
+        if self.shader_loader.shader_debug != value {
+            self.shader_loader.shader_debug = value;
+            self.reload_all();
+        }
+    }
+
     #[inline]
     fn add_pipeline(&mut self, pipeline: Pipeline) -> Handle<Pipeline> {
         let id = self.pipelines.len();
@@ -471,6 +482,8 @@ struct ShaderLoader {
     compiler: hassle_rs::DxcCompiler,
     library: hassle_rs::DxcLibrary,
     _dxc: hassle_rs::Dxc, // delacare this last to drop it after {compiler, library}
+
+    shader_debug: bool,
 }
 
 impl ShaderLoader {
@@ -482,6 +495,7 @@ impl ShaderLoader {
             compiler,
             library,
             _dxc: dxc,
+            shader_debug: false,
         }
     }
 
@@ -571,20 +585,28 @@ impl ShaderLoader {
         };
 
         // NOTE: -fspv-debug=vulkan-with-source requires extended instruction set support form the reflector
-        let args = [
+        let mut args = vec![
             // output spirv
             "-spirv",
             // Warning as Error
             "-WX",
-            // no optimization
-            "-Od",
-            // Debug Info
-            "-Zi",
             // NOTE: requires Google extention in vulkan
             //"-fspv-reflect",
             // Enable Raytracing ("Vulkan 1.1 with SPIR-V 1.4 is required for Raytracing" is printed by DXC)
             "-fspv-target-env=vulkan1.1spirv1.4",
         ];
+        if self.shader_debug {
+            // Disable Optimizations
+            args.push("-Od");
+            // Debug Info
+            args.push("-Zi");
+        } else {
+            // All Optimizations
+            args.push("-O3");
+            // Ignore NaN and +-Infs in arithemethic
+            args.push("-ffinite-math-only");
+        }
+
         let result = self.compiler.compile(
             &blob,
             source_name,

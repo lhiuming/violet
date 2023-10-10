@@ -603,19 +603,3 @@ pub fn halton(index: u32, base: u32) -> f32 {
     }
     r
 }
-
-pub mod rg_util {
-    use crate::{
-        render_device::{Texture, TextureDesc, TextureView},
-        render_graph::{RGHandle, RenderGraphBuilder},
-    };
-
-    pub fn create_texture_and_view(
-        rg: &mut RenderGraphBuilder,
-        desc: TextureDesc,
-    ) -> (RGHandle<Texture>, RGHandle<TextureView>) {
-        let tex = rg.create_texutre(desc);
-        let view = rg.create_texture_view(tex, None);
-        (tex, view)
-    }
-}

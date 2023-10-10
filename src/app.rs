@@ -257,6 +257,12 @@ where
         let imgui_output = if show_gui {
             Some(imgui.run(window_size, &window, |ctx| {
                 imgui::Window::new("Render Loop").show(ctx, |ui| {
+                    // Shader
+                    let mut shader_debug = shaders.shader_debug();
+                    ui.toggle_value(&mut shader_debug, "shader_debug");
+                    shaders.set_shader_debug(shader_debug);
+
+                    // Render Loop
                     render_loop.ui(ui);
                 });
             }))
