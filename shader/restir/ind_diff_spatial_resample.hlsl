@@ -61,6 +61,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     // early out if not geometry
     if (has_no_geometry_via_depth(depth))
     {
+        rw_lighting_texture[dispatch_id] = 0.0;
         return;
     }
 

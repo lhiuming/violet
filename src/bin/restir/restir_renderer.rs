@@ -475,6 +475,7 @@ impl RestirRenderer {
             .texture("hit_pos_texture", ind_spec_hit_pos)
             .texture("hit_radiance_texture", ind_spec_hit_radiance)
             .rw_texture("rw_lighting_texture", indirect_specular)
+            .push_constant::<u32>(&frame_index)
             .group_count(
                 div_round_up(main_size.x, 8),
                 div_round_up(main_size.y, 4),
