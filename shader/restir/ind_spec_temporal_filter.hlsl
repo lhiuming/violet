@@ -94,7 +94,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 
     // Blend
     // TODO Box clamping to reduce ghosting
-    const float BLEND_FACTOR = 1.0 / 16.0f;
+    const float BLEND_FACTOR = 1.0 / 8.0f;
     float3 filtered = lerp(history, source, BLEND_FACTOR);
 
     rw_filtered_texture[dispatch_id] = filtered;
