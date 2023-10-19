@@ -288,7 +288,14 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
             reservoir_target_function = reservoir_target_function_n;
         }
         reservoir.M += reservoir_n.M;
-        reservoir.W = w_sum / reservoir_target_function; 
+        if (reservoir_target_function > 0.0)
+        {
+            reservoir.W = w_sum / reservoir_target_function; 
+        }
+        else
+        {
+            reservoir.W = 0.0;
+        }
     }
 
     #endif
