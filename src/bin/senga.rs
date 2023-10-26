@@ -16,14 +16,14 @@ use violet::{
 };
 
 pub struct SengaRenderLoop {
-    render_graph_cache: RenderGraphCache,
+    render_graph_cache: Option<RenderGraphCache>,
     stream_lined: StreamLinedFrameResource,
 }
 
 impl RenderLoop for SengaRenderLoop {
     fn new(rd: &mut RenderDevice) -> Option<Self> {
         Some(Self {
-            render_graph_cache: RenderGraphCache::new(rd),
+            render_graph_cache: Some(RenderGraphCache::new(rd)),
             stream_lined: StreamLinedFrameResource::new(rd),
         })
     }
@@ -48,7 +48,8 @@ impl RenderLoop for SengaRenderLoop {
             self.stream_lined.get_set_layout(),
         );
 
-        let mut rg = RenderGraphBuilder::new(&mut self.render_graph_cache, shader_config);
+        let mut rg =
+            RenderGraphBuilder::new(self.render_graph_cache.take().unwrap(), shader_config);
 
         let frame_descritpr_set = self.stream_lined.get_frame_desciptor_set();
         rg.add_global_descriptor_sets(&[
@@ -110,11 +111,12 @@ impl RenderLoop for SengaRenderLoop {
             rd.begin_command_buffer(command_buffer);
 
             let cb = CommandBuffer::new(rd, command_buffer);
-            rg.execute(rd, &cb, shaders, &mut self.render_graph_cache);
+            rg.execute(rd, &cb, shaders);
 
             // End
             rd.end_command_buffer(command_buffer);
         }
+        self.render_graph_cache.replace(rg.done());
 
         // Wait for swapchain ready, submit, and present
         self.stream_lined

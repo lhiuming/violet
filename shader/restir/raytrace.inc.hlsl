@@ -6,12 +6,20 @@
 #include "../raytrace/shadow_ray.inc.hlsl"
 #include "../sampling.hlsl"
 
+#include "hash_grid_cache.inc.hlsl"
+
 #define RAYTRACE_INC_FIREFLY_SUPPRESS 1
 
 RaytracingAccelerationStructure scene_tlas;
 TextureCube<float4> skycube;
 Texture2D<float3> prev_indirect_diffuse_texture;
 Texture2D<float> prev_depth_texture;
+
+#if 0
+RWBuffer<uint4> rw_hash_grid_query_buffer;
+RWBuffer<uint> rw_hash_grid_query_counter_buffer;
+#endif
+RWStructuredBuffer<HashGridCell> hash_grid_storage_buffer;
 
 // return: miss or not
 bool trace_shadow(float3 ray_origin, float3 ray_dir)
@@ -116,6 +124,7 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
         // Indirect lighting (diffuse only)
         // 1. try to read from prev frame color
         // 2. TODO use world cache instead of screen
+        bool sample_world_radiance_cache = true;
         if (bool(has_prev_frame)) { 
             float4 prev_hpos = mul(frame_params.prev_view_proj, float4(payload.position_ws, 1.0f));
             float2 ndc = prev_hpos.xy / prev_hpos.w - frame_params.jitter.zw;
@@ -136,9 +145,55 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
                 float DEPTH_TOLERANCE = 0.0001f; 
                 if (abs(reproj_depth - prev_depth_value) < DEPTH_TOLERANCE) {
                     radiance += diffuse_rho * prev_indirect_diffuse_texture[prev_pixcoord].rgb;
+                    sample_world_radiance_cache = false;
                 }
             }
         } 
+
+        if (sample_world_radiance_cache)
+        {
+            // TODO jittering 
+            uint lod = hash_grid_cell_lod(payload.position_ws, frame_params.view_pos.xyz);
+            VertexDescriptor vert = { payload.position_ws, ray_dir, lod };
+
+            #if 0
+            // record the query 
+            uint write_addr;
+            InterlockedAdd(rw_hash_grid_query_counter_buffer[0], 1, write_addr);
+            QueryRecord query = { payload.position_ws, ray_dir };
+            rw_hash_grid_query_buffer[write_addr] = query.encode();
+            #endif
+
+            #if 0
+
+            // try to fetch radiacne 
+            HashGridCell cell;
+            if ( hash_grid_find(hash_grid_storage_buffer, vert.hash(), vert.checksum(), /*out*/ cell) )
+            {
+                radiance += diffuse_rho * cell.radiance;
+            }
+            #else
+
+            // Insert a fake cell
+            float3 new_radiance = float3(0, 5, 0);
+            uint cell_addr;
+            if ( hash_grid_find_or_insert(hash_grid_storage_buffer, vert.hash(), vert.checksum(), cell_addr) )
+            {
+                HashGridCell cell = hash_grid_storage_buffer[cell_addr];
+                radiance += diffuse_rho * cell.radiance;
+
+                // fake radiance 
+                cell.radiance = new_radiance;
+                hash_grid_storage_buffer[cell_addr] = cell;
+            }
+            else
+            {
+                // Overflow Debug
+                radiance += diffuse_rho * float3(0, 0, 5);
+            }
+
+            #endif
+        }
     }
 
     RadianceTraceResult ret;

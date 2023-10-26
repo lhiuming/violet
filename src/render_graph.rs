@@ -770,7 +770,7 @@ pub struct RenderGraphCache {
     // Temporal Resources
     temporal_textures: HashMap<usize, Texture>,
     temporal_buffers: HashMap<usize, Buffer>,
-    next_temporal_id: Option<usize>,
+    next_temporal_id: usize,
 
     // Resource pool
     texture_pool: ResPool<TextureDesc, Texture>,
@@ -798,7 +798,7 @@ impl RenderGraphCache {
             free_vk_descriptor_sets: Vec::new(),
             temporal_textures: HashMap::new(),
             temporal_buffers: HashMap::new(),
-            next_temporal_id: Some(0),
+            next_temporal_id: 0,
             texture_pool: ResPool::new(),
             texture_view_pool: ResPool::new(),
             buffer_pool: ResPool::new(),
@@ -910,7 +910,7 @@ pub struct RenderGraphBuilder<'render> {
     passes: Vec<RenderPass<'render>>,
 
     shader_config: shader::ShadersConfig,
-    next_temporal_id: usize,
+    cache: RenderGraphCache,
 
     // Descriptor sets that would be bound for all passes
     // Exist for ergonomics reason; descriptors set like per-frame stuffs can be specify as this.
@@ -1034,12 +1034,12 @@ impl<'a> RenderGraphBuilder<'a> {
 
 // Interface
 impl<'a> RenderGraphBuilder<'a> {
-    pub fn new(cache: &mut RenderGraphCache, shader_config: ShadersConfig) -> Self {
+    pub fn new(cache: RenderGraphCache, shader_config: ShadersConfig) -> Self {
         Self {
             passes: Vec::new(),
 
             shader_config,
-            next_temporal_id: cache.next_temporal_id.take().unwrap(),
+            cache,
 
             global_descriptor_sets: Vec::new(),
 
@@ -1185,8 +1185,8 @@ impl<'a> RenderGraphBuilder<'a> {
             temporal_id = prev_temporal_id
         } else {
             // alocate a new one
-            temporal_id = self.next_temporal_id;
-            self.next_temporal_id += 1;
+            temporal_id = self.cache.next_temporal_id;
+            self.cache.next_temporal_id += 1;
         };
 
         // record for later caching
@@ -1250,7 +1250,9 @@ impl<'a> RenderGraphBuilder<'a> {
     pub fn get_texture_desc_from_view(&self, texture_view: RGHandle<TextureView>) -> &TextureDesc {
         match &self.texture_views[texture_view.id] {
             RenderResource::Virtual(virtual_view) => self.get_texture_desc(virtual_view.texture),
-            RenderResource::Temporal(_) => panic!("Temporal resources are in cache"),
+            RenderResource::Temporal(temporal_id) => {
+                &self.cache.temporal_textures[temporal_id].desc
+            }
             RenderResource::External(texture_view) => &texture_view.texture.desc,
         }
     }
@@ -1258,7 +1260,7 @@ impl<'a> RenderGraphBuilder<'a> {
     pub fn get_buffer_desc(&self, buffer: RGHandle<Buffer>) -> &BufferDesc {
         match &self.buffers[buffer.id] {
             RenderResource::Virtual(desc) => desc,
-            RenderResource::Temporal(_) => todo!("Temporal resources are in cache"),
+            RenderResource::Temporal(temporal_id) => &self.cache.temporal_buffers[temporal_id].desc,
             RenderResource::External(buffer) => &buffer.desc,
         }
     }
@@ -1803,29 +1805,35 @@ impl RenderGraphBuilder<'_> {
         }
     }
 
+    pub fn done(self) -> RenderGraphCache {
+        self.cache
+    }
+
     pub fn execute(
         &mut self,
         rd: &RenderDevice,
         command_buffer: &CommandBuffer,
         shaders: &mut Shaders,
-        cache: &mut RenderGraphCache,
     ) {
         let mut exec_context = RenderGraphExecuteContext::new();
 
         command_buffer.insert_label(&CString::new("RenderGraph Begin").unwrap(), None);
 
         // Update GPU profiling queries
-        cache.pass_profiling.update(rd);
+        self.cache.pass_profiling.update(rd);
 
         // Prepare for this frame
         let query_pool = {
-            let batch = cache.pass_profiling.new_batch(self.passes.len() as u32 + 1);
+            let batch = self
+                .cache
+                .pass_profiling
+                .new_batch(self.passes.len() as u32 + 1);
             command_buffer.reset_queries(batch.pool(), batch.query(0).0, batch.size());
             batch.pool()
         };
 
         // Whole Frame timer
-        let (frame_beg, frame_end) = cache.pass_profiling.new_timer("[Frame]");
+        let (frame_beg, frame_end) = self.cache.pass_profiling.new_timer("[Frame]");
         command_buffer.write_time_stamp(
             vk::PipelineStageFlags::TOP_OF_PIPE,
             query_pool,
@@ -1880,14 +1888,15 @@ impl RenderGraphBuilder<'_> {
             let texture = match texture_resource {
                 // Create texture
                 RenderResource::Virtual(desc) => {
-                    let tex = cache
+                    let tex = self
+                        .cache
                         .texture_pool
                         .pop(&desc)
                         .unwrap_or_else(|| rd.create_texture(*desc).unwrap());
                     Some(tex)
                 }
                 RenderResource::Temporal(temporal_id) => {
-                    let tex = cache.temporal_textures.remove(temporal_id).unwrap();
+                    let tex = self.cache.temporal_textures.remove(temporal_id).unwrap();
                     Some(tex)
                 }
                 RenderResource::External(_) => None,
@@ -1903,7 +1912,8 @@ impl RenderGraphBuilder<'_> {
                     let view_desc = virtual_view
                         .desc
                         .unwrap_or_else(|| TextureViewDesc::auto(&texture.desc));
-                    let view = cache
+                    let view = self
+                        .cache
                         .texture_view_pool
                         .pop(&(texture, view_desc))
                         .unwrap_or_else(|| rd.create_texture_view(texture, view_desc).unwrap());
@@ -1918,14 +1928,15 @@ impl RenderGraphBuilder<'_> {
             let res = &self.buffers[i];
             let buffer = match res {
                 RenderResource::Virtual(desc) => {
-                    let buf = cache
+                    let buf = self
+                        .cache
                         .buffer_pool
                         .pop(&desc)
                         .unwrap_or_else(|| rd.create_buffer(*desc).unwrap());
                     Some(buf)
                 }
                 RenderResource::Temporal(temporal_id) => {
-                    let buf = cache.temporal_buffers.remove(temporal_id).unwrap();
+                    let buf = self.cache.temporal_buffers.remove(temporal_id).unwrap();
                     Some(buf)
                 }
                 RenderResource::External(_) => None,
@@ -1948,7 +1959,7 @@ impl RenderGraphBuilder<'_> {
                         vk::DescriptorSet::null()
                     } else {
                         let set_layout = pipeline.set_layouts[pass.descriptor_set_index as usize];
-                        cache.allocate_dessriptor_set(rd, set_layout)
+                        self.cache.allocate_dessriptor_set(rd, set_layout)
                     }
                 }
                 None => {
@@ -1969,7 +1980,8 @@ impl RenderGraphBuilder<'_> {
         for (pass_index, pass) in self.passes.iter().enumerate() {
             let pass_sbt = match &pass.ty {
                 RenderPassType::RayTracing(rt) => {
-                    let mut sbt = cache
+                    let mut sbt = self
+                        .cache
                         .sbt_pool
                         .pop(&sbt_frame_index) // hack
                         .unwrap_or_else(|| PassShaderBindingTable::new(rd));
@@ -2053,7 +2065,7 @@ impl RenderGraphBuilder<'_> {
             }
 
             // Timestamp: before executing the work
-            let (timer_beg, timer_end) = cache.pass_profiling.new_timer(&pass.name);
+            let (timer_beg, timer_end) = self.cache.pass_profiling.new_timer(&pass.name);
             command_buffer.write_time_stamp(
                 vk::PipelineStageFlags::TOP_OF_PIPE,
                 query_pool,
@@ -2129,19 +2141,19 @@ impl RenderGraphBuilder<'_> {
         // Process all textures converted to temporals
         for (handle, temporal_handle) in &self.transient_to_temporal_textures {
             let tex = exec_context.textures[handle.id].take().unwrap();
-            let conflict = cache.temporal_textures.insert(temporal_handle.id, tex);
+            let conflict = self.cache.temporal_textures.insert(temporal_handle.id, tex);
             assert!(conflict.is_none());
         }
         self.transient_to_temporal_textures.clear();
         for (handle, temporal_handle) in &self.transient_to_temporal_buffers {
             let buf = exec_context.buffers[handle.id].take().unwrap();
-            let conflict = cache.temporal_buffers.insert(temporal_handle.id, buf);
+            let conflict = self.cache.temporal_buffers.insert(temporal_handle.id, buf);
             assert!(conflict.is_none());
         }
 
         // puch back temporal id allocator
-        assert!(cache.next_temporal_id.is_none());
-        cache.next_temporal_id = Some(self.next_temporal_id);
+        //assert!(cache.next_temporal_id.is_none());
+        //cache.next_temporal_id = Some(self.next_temporal_id);
 
         // Pool back all resource objects
         for view in exec_context
@@ -2149,19 +2161,19 @@ impl RenderGraphBuilder<'_> {
             .drain(0..exec_context.texture_views.len())
         {
             if let Some(view) = view {
-                cache
+                self.cache
                     .texture_view_pool
                     .push((view.texture, view.desc), view);
             }
         }
         for texture in exec_context.textures.drain(0..exec_context.textures.len()) {
             if let Some(texture) = texture {
-                cache.texture_pool.push(texture.desc, texture);
+                self.cache.texture_pool.push(texture.desc, texture);
             }
         }
         for buffer in exec_context.buffers.drain(0..exec_context.buffers.len()) {
             if let Some(buffer) = buffer {
-                cache.buffer_pool.push(buffer.desc, buffer);
+                self.cache.buffer_pool.push(buffer.desc, buffer);
             }
         }
         for set in exec_context
@@ -2170,7 +2182,7 @@ impl RenderGraphBuilder<'_> {
         {
             if set != vk::DescriptorSet::null() {
                 // TODO may be need some frame buffering, because it may be still using?
-                cache.release_descriptor_set(rd, set);
+                self.cache.release_descriptor_set(rd, set);
             }
         }
         for sbt in exec_context
@@ -2178,7 +2190,7 @@ impl RenderGraphBuilder<'_> {
             .drain(0..exec_context.shader_binding_tables.len())
         {
             if let Some(sbt) = sbt {
-                cache.sbt_pool.push(sbt_frame_index, sbt);
+                self.cache.sbt_pool.push(sbt_frame_index, sbt);
             }
         }
 

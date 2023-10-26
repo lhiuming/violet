@@ -11,7 +11,7 @@ use violet::{
 
 pub struct ImGUIDemoRenderLoop {
     stream_lined: StreamLinedFrameResource,
-    render_graph_cache: RenderGraphCache,
+    render_graph_cache: Option<RenderGraphCache>,
 
     imgui_pass: ImGUIPass,
 
@@ -22,7 +22,7 @@ impl RenderLoop for ImGUIDemoRenderLoop {
     fn new(rd: &mut RenderDevice) -> Option<Self> {
         Some(Self {
             stream_lined: StreamLinedFrameResource::new(rd),
-            render_graph_cache: RenderGraphCache::new(rd),
+            render_graph_cache: Some(RenderGraphCache::new(rd)),
             imgui_pass: ImGUIPass::new(rd),
             upload_context: UploadContext::new(rd),
         })
@@ -43,7 +43,8 @@ impl RenderLoop for ImGUIDemoRenderLoop {
             FRAME_DESCRIPTOR_SET_INDEX,
             self.stream_lined.get_set_layout(),
         );
-        let mut rg = RenderGraphBuilder::new(&mut self.render_graph_cache, shader_config);
+        let mut rg =
+            RenderGraphBuilder::new(self.render_graph_cache.take().unwrap(), shader_config);
         rg.add_global_descriptor_sets(&[(
             FRAME_DESCRIPTOR_SET_INDEX,
             self.stream_lined.get_frame_desciptor_set(),
@@ -78,10 +79,11 @@ impl RenderLoop for ImGUIDemoRenderLoop {
             let command_buffer = CommandBuffer::new(rd, vk_command_buffer);
             rd.begin_command_buffer(command_buffer.command_buffer);
 
-            rg.execute(rd, &command_buffer, shaders, &mut self.render_graph_cache);
+            rg.execute(rd, &command_buffer, shaders);
 
             rd.end_command_buffer(command_buffer.command_buffer);
         }
+        self.render_graph_cache = Some(rg.done());
 
         // Present
         self.stream_lined

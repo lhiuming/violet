@@ -13,6 +13,7 @@ use crate::{
  */
 pub mod gbuffer_pass;
 pub mod imgui_pass;
+pub mod util_passes;
 
 /*
  * Basic Traits

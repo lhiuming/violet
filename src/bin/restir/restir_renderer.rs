@@ -6,7 +6,7 @@ use violet::{
     imgui::Ui,
     render_device::{Buffer, BufferDesc, RenderDevice, Texture, TextureDesc, TextureViewDesc},
     render_graph::*,
-    render_loop::{div_round_up, div_round_up_uvec2, gbuffer_pass::*},
+    render_loop::{div_round_up, div_round_up_uvec2, gbuffer_pass::*, util_passes::clear_buffer},
     render_scene::RenderScene,
 };
 
@@ -79,6 +79,9 @@ pub struct RestirRenderer {
     prev_gbuffer_color: Option<RGTemporal<Texture>>,
 
     ao_history: Option<RGTemporal<Texture>>,
+
+    hash_grid_cache_history: Option<RGTemporal<Buffer>>,
+    clear_hash_grid_cache: bool,
 }
 
 impl RestirRenderer {
@@ -94,6 +97,8 @@ impl RestirRenderer {
             prev_gbuffer_color: None,
 
             ao_history: None,
+            hash_grid_cache_history: None,
+            clear_hash_grid_cache: false,
         }
     }
 
@@ -126,6 +131,10 @@ impl RestirRenderer {
                 item(DebugView::IndSpec);
                 item(DebugView::IndSpecFiltered);
             });
+
+        if ui.button("Clear Hash Grid Cache").clicked() {
+            self.clear_hash_grid_cache = true;
+        }
     }
 
     pub fn add_passes<'render>(
@@ -148,6 +157,25 @@ impl RestirRenderer {
 
         // Pass: GBuffer
         add_gbuffer_pass(rg, rd, scene, &gbuffer);
+
+        // Hash Grid Cache history
+        let hash_grid_storage = match self.hash_grid_cache_history.take() {
+            Some(buffer) => {
+                let buffer = rg.convert_to_transient(buffer);
+                if self.clear_hash_grid_cache {
+                    // Clear for debug
+                    clear_buffer(rd, rg, buffer, "Debug Clear Hash Grid Cache");
+                }
+                buffer
+            }
+            None => {
+                // Initialize the buffer
+                let buffer = rg.create_buffer(BufferDesc::compute(65536 * 16 * 4 * 4));
+                clear_buffer(rd, rg, buffer, "Clear Hash Grid Cache");
+                buffer
+            }
+        };
+        self.clear_hash_grid_cache = false;
 
         // depth buffer from last frame
         let has_prev_depth = self.taa.prev_depth.is_some();
@@ -199,6 +227,7 @@ impl RestirRenderer {
                 .texture_view("gbuffer_depth", gbuffer.depth.1)
                 .texture_view("gbuffer_color", gbuffer.color.1)
                 .buffer("rw_new_sample_buffer", indirect_diffuse_new_sample_buffer)
+                .buffer("hash_grid_storage_buffer", hash_grid_storage)
                 //.rw_texture("rw_debug_texture", debug_texture.1)
                 .push_constant(&input.frame_index)
                 .push_constant(&has_prev_frame)
@@ -221,6 +250,7 @@ impl RestirRenderer {
                 )
                 .texture("prev_depth_texture", prev_depth)
                 .rw_buffer("rw_prev_reservoir_buffer", prev_diffuse_reservoir_buffer)
+                .buffer("hash_grid_storage_buffer", hash_grid_storage)
                 //.rw_texture("rw_debug_texture", debug_texture.1)
                 .dimension(main_size.x, main_size.y, 1);
         }
@@ -388,6 +418,7 @@ impl RestirRenderer {
                 .rw_texture("rw_hit_pos_texture", ind_spec_hit_pos)
                 .rw_texture("rw_hit_normal_texture", ind_spec_hit_normal)
                 .rw_texture("rw_hit_radiance_texture", ind_spec_hit_radiance)
+                .buffer("hash_grid_storage_buffer", hash_grid_storage)
                 .push_constant::<u32>(&frame_index)
                 .push_constant::<u32>(&has_prev_frame)
                 .dimension(main_size.x, main_size.y, 1);
@@ -431,8 +462,12 @@ impl RestirRenderer {
                 .rw_texture("rw_prev_reservoir_texture", prev_ind_spec_reservoir)
                 .rw_texture("rw_prev_hit_pos_texture", prev_ind_spec_hit_pos)
                 .rw_texture("rw_prev_hit_radiance_texture", prev_ind_spec_hit_radiance)
+                .buffer("hash_grid_storage_buffer", hash_grid_storage)
                 .dimension(main_size.x, main_size.y, 1);
         }
+
+        self.hash_grid_cache_history
+            .replace(rg.convert_to_temporal(hash_grid_storage));
 
         let has_prev_gbuffer_color = self.prev_gbuffer_color.is_some();
         let prev_gbuffer_color = match self.prev_gbuffer_color.take() {

@@ -92,7 +92,7 @@ pub struct SceneRendererInput<'a> {
 }
 
 pub struct RestirRenderLoop {
-    render_graph_cache: RenderGraphCache,
+    render_graph_cache: Option<RenderGraphCache>,
     stream_lined: StreamLinedFrameResource,
     default_res: DefaultResources,
     frame_index: u32,
@@ -122,7 +122,7 @@ impl RenderLoop for RestirRenderLoop {
         }
 
         Some(Self {
-            render_graph_cache: RenderGraphCache::new(rd),
+            render_graph_cache: Some(RenderGraphCache::new(rd)),
             stream_lined: StreamLinedFrameResource::new(rd),
             default_res: DefaultResources::new(rd),
             frame_index: 0,
@@ -179,7 +179,11 @@ impl RenderLoop for RestirRenderLoop {
         avg_ms("Present", self.total_present_duration);
         avg_ms("UI (last).", self.last_ui_duration);
 
-        self.render_graph_cache.pass_profiling.print();
+        self.render_graph_cache
+            .as_ref()
+            .unwrap()
+            .pass_profiling
+            .print();
     }
 
     fn render(
@@ -216,7 +220,8 @@ impl RenderLoop for RestirRenderLoop {
         let main_extent = rd.swapchain.extent;
         let main_size = UVec2::new(main_extent.width, main_extent.height);
 
-        let mut rg = RenderGraphBuilder::new(&mut self.render_graph_cache, shader_config);
+        let mut rg =
+            RenderGraphBuilder::new(self.render_graph_cache.take().unwrap(), shader_config);
 
         // HACK: render graph should not use this; currently using it for SBT pooling
         rg.set_frame_index(self.frame_index);
@@ -353,11 +358,12 @@ impl RenderLoop for RestirRenderLoop {
             rd.begin_command_buffer(command_buffer);
 
             let cb = CommandBuffer::new(rd, command_buffer);
-            rg.execute(rd, &cb, shaders, &mut self.render_graph_cache);
+            rg.execute(rd, &cb, shaders);
 
             // End
             rd.end_command_buffer(command_buffer);
         }
+        self.render_graph_cache.replace(rg.done());
 
         // Submit, Present and stuff
         let (wait_duration, present_duration) = self
