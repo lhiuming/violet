@@ -21,7 +21,7 @@ use crate::{reference_path_tracer::ReferencePathTracer, restir_renderer::RestirR
 
 pub struct DefaultResources {
     pub dummy_buffer: Buffer,
-    pub dummy_texture: (Texture, TextureView),
+    pub dummy_texture: Texture,
     pub dummy_uint_texture: Texture,
     //pub black_texture: (Texture, TextureView),
 }
@@ -36,20 +36,14 @@ impl DefaultResources {
             })
             .unwrap();
 
-        let dummy_texture = {
-            let tex = rd
-                .create_texture(TextureDesc::new_2d(
-                    1,
-                    1,
-                    vk::Format::R8G8B8A8_UNORM,
-                    vk::ImageUsageFlags::SAMPLED,
-                ))
-                .unwrap();
-            let view_desc = TextureViewDesc {
-                ..TextureViewDesc::auto(&tex.desc)
-            };
-            (tex, rd.create_texture_view(tex, view_desc).unwrap())
-        };
+        let dummy_texture = rd
+            .create_texture(TextureDesc::new_2d(
+                1,
+                1,
+                vk::Format::R8G8B8A8_UNORM,
+                vk::ImageUsageFlags::SAMPLED,
+            ))
+            .unwrap();
 
         let dummy_uint_texture = rd
             .create_texture(TextureDesc::new_2d(

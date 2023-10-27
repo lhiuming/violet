@@ -5,7 +5,7 @@ use std::marker::{Copy, PhantomData};
 use std::ops::FnOnce;
 
 use ash::vk;
-use glam::UVec3;
+use glam::{UVec2, UVec3};
 
 use crate::command_buffer::CommandBuffer;
 use crate::gpu_profiling::NamedProfiling;
@@ -476,6 +476,11 @@ impl<'a, 'render> ComputePassBuilder<'a, 'render> {
 
     pub fn group_count_uvec3(&mut self, group_count: UVec3) -> &mut Self {
         self.compute().group_count = group_count;
+        self
+    }
+
+    pub fn group_count_uvec2(&mut self, group_count: UVec2) -> &mut Self {
+        self.compute().group_count = group_count.extend(1);
         self
     }
 }

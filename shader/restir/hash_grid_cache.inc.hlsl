@@ -1,12 +1,15 @@
 #pragma once
 
+// Hash functions
+#include "../rand.hlsl"
+
 #define HASH_GRID_CAPACITY 65536
 #define HASH_GRID_CAPACITY_MASK 0xFFFF
 
 #define HASH_GRID_BUCKET_SIZE 16
 #define HASH_GRID_BUCKET_SIZE_BITSHIFT 4
 
-#define HASH_GRID_BASE_CELL_SIZE 0.25
+#define HASH_GRID_BASE_CELL_SIZE 0.125
 
 struct QueryRecord
 {
@@ -27,11 +30,12 @@ struct QueryRecord
     }
 };
 
+// TODO adaptive cell size by ray length
 uint hash_grid_cell_lod(float3 pos, float3 camera_pos)
 {
     float3 delta = pos - camera_pos;
     float dist_sq = dot(delta, delta);
-    float lod = max(0.5 * log2(dist_sq) + log2(4.0), 0.0);
+    float lod = max(0.5 * log2(dist_sq), 0.0);
     return uint(lod);
 }
 
@@ -41,34 +45,37 @@ struct VertexDescriptor
     float3 dir_in; // incoming directin / "view" direction for hit point
     uint lod;
 
+    // todo quantize at ini
+    static VertexDescriptor create(float3 camera_pos, float3 position, float3 dir_in)
+    {
+        uint lod = hash_grid_cell_lod(position, camera_pos);
+        VertexDescriptor vert = { position, dir_in, lod };
+        return vert;
+    }
+
     // Hash used to access grid cell
     uint hash()
     {
-        // TODO adaptive cell size
+        // quantize
         float cell_size = HASH_GRID_BASE_CELL_SIZE * float(1u << lod);
-
         float3 pos_quant = floor(pos / cell_size);
 
         // hashing
-        // TODO better hash function
-        uint3 pos_u32 = asuint(pos_quant);
-        uint hash = pos_u32.x ^ pos_u32.y ^ pos_u32.z;
-        return hash;
+        // TODO try pcg3d16
+        uint3 pos_u32 = asuint(int3(pos_quant));
+        return XXHash32::init(pos_u32.z).add(pos_u32.y).add(pos_u32.x).eval();
     }
 
     // Hash used for linear probing
     uint checksum()
     {
-        // TODO adaptive cell size
+        // quantize
         float cell_size = HASH_GRID_BASE_CELL_SIZE * float(1u << lod);
-
         float3 pos_quant = floor(pos / cell_size);
 
         // hashing
-        // TODO better hash function
-        uint3 pos_u32 = asuint(pos_quant);
-        uint hash = pos_u32.x ^ pos_u32.y ^ pos_u32.z;
-        hash = hash ^ (hash >> 16);
+        uint3 pos_u32 = asuint(int3(pos_quant));
+        uint hash = pcg_hash(pos_u32.x + pcg_hash(pos_u32.y + pcg_hash(pos_u32.z)));
         // NOTE: zero is reserved to indicate empty cell
         return hash | 0x1;
     }
@@ -81,12 +88,13 @@ struct HashGridCell
     float3 radiance; 
 };
 
-bool hash_grid_find(StructuredBuffer<HashGridCell> buffer, uint hash, uint checksum, out HashGridCell cell)
+bool hash_grid_find(StructuredBuffer<HashGridCell> buffer, uint hash, uint checksum, out HashGridCell cell, out uint addr)
 {
     // linear probing in the bucket
     uint addr_beg = (hash & HASH_GRID_CAPACITY_MASK) << HASH_GRID_BUCKET_SIZE_BITSHIFT;
     uint addr_end = addr_beg + HASH_GRID_BUCKET_SIZE;
-    for (uint addr = addr_beg; addr < addr_end; ++addr)
+    addr = addr_beg;
+    for ( ; addr < addr_end; ++addr)
     {
         cell = buffer[addr];
         if (cell.checksum == checksum)

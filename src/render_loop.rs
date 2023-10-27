@@ -591,6 +591,16 @@ pub fn div_round_up_uvec2(a: UVec2, b: UVec2) -> UVec2 {
     (a + (b - UVec2::new(1, 1))) / b
 }
 
+pub trait DivRoundUp {
+    fn div_round_up(self, b: Self) -> Self;
+}
+
+impl DivRoundUp for UVec2 {
+    fn div_round_up(self, b: Self) -> Self {
+        (self + (b - 1)) / b
+    }
+}
+
 // Naive impelementation of Halton sequence; proper only for small indices.
 // ref: https://en.wikipedia.org/wiki/Halton_sequence
 pub fn halton(index: u32, base: u32) -> f32 {

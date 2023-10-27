@@ -1,5 +1,23 @@
 use ash::vk;
 
+pub struct TextureUsage {
+    vk: vk::ImageUsageFlags,
+}
+
+impl TextureUsage {
+    pub fn from_vk(flags: vk::ImageUsageFlags) -> TextureUsage {
+        TextureUsage { vk: flags }
+    }
+
+    pub fn compute() -> TextureUsage {
+        Self::from_vk(vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED)
+    }
+
+    pub fn to_vk(self) -> vk::ImageUsageFlags {
+        self.vk
+    }
+}
+
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub struct TextureDesc {
     pub width: u32,

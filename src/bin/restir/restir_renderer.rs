@@ -4,9 +4,14 @@ use glam::UVec2;
 use violet::{
     command_buffer::StencilOps,
     imgui::Ui,
-    render_device::{Buffer, BufferDesc, RenderDevice, Texture, TextureDesc, TextureViewDesc},
+    render_device::{
+        texture::TextureUsage, Buffer, BufferDesc, RenderDevice, Texture, TextureDesc,
+        TextureViewDesc,
+    },
     render_graph::*,
-    render_loop::{div_round_up, div_round_up_uvec2, gbuffer_pass::*, util_passes::clear_buffer},
+    render_loop::{
+        div_round_up, div_round_up_uvec2, gbuffer_pass::*, util_passes::clear_buffer, DivRoundUp,
+    },
     render_scene::RenderScene,
 };
 
@@ -35,6 +40,7 @@ enum DebugView {
     IndDiffFiltered,
     IndSpec,
     IndSpecFiltered,
+    HashGridView,
 }
 
 pub struct RestirConfig {
@@ -130,6 +136,7 @@ impl RestirRenderer {
                 item(DebugView::IndDiffFiltered);
                 item(DebugView::IndSpec);
                 item(DebugView::IndSpecFiltered);
+                item(DebugView::HashGridView);
             });
 
         if ui.button("Clear Hash Grid Cache").clicked() {
@@ -181,14 +188,14 @@ impl RestirRenderer {
         let has_prev_depth = self.taa.prev_depth.is_some();
         let prev_depth = match self.taa.prev_depth.take() {
             Some(tex) => rg.convert_to_transient(tex),
-            None => rg.register_texture(default_res.dummy_texture.0),
+            None => rg.register_texture(default_res.dummy_texture),
         };
 
         // indirect diffuse from last frame
         let has_prev_indirect_diffuse = self.prev_indirect_diffuse_texture.is_some();
         let prev_indirect_diffuse_texture = match self.prev_indirect_diffuse_texture.take() {
             Some(tex) => rg.convert_to_transient(tex),
-            None => rg.register_texture(default_res.dummy_texture.0),
+            None => rg.register_texture(default_res.dummy_texture),
         };
 
         // indirect diffuse reservior buffer from last frame
@@ -261,7 +268,7 @@ impl RestirRenderer {
         let has_prev_ao = self.ao_history.is_some() as u32;
         let prev_ao_texture = match self.ao_history.take() {
             Some(temporal) => rg.convert_to_transient(temporal),
-            None => rg.register_texture(default_res.dummy_texture.0),
+            None => rg.register_texture(default_res.dummy_texture),
         };
         let curr_ao_texture = rg.create_texutre(TextureDesc::new_2d(
             main_size.x,
@@ -438,9 +445,9 @@ impl RestirRenderer {
             }
             None => {
                 prev_ind_spec_reservoir = rg.register_texture(default_res.dummy_uint_texture);
-                prev_ind_spec_hit_pos = rg.register_texture(default_res.dummy_texture.0);
-                prev_ind_spec_hit_radiance = rg.register_texture(default_res.dummy_texture.0);
-                prev_ind_spec = rg.register_texture(default_res.dummy_texture.0);
+                prev_ind_spec_hit_pos = rg.register_texture(default_res.dummy_texture);
+                prev_ind_spec_hit_radiance = rg.register_texture(default_res.dummy_texture);
+                prev_ind_spec = rg.register_texture(default_res.dummy_texture);
             }
         }
 
@@ -643,11 +650,8 @@ impl RestirRenderer {
 
         let has_prev_color = self.taa.prev_color.is_some() as u32;
         let prev_color = match self.taa.prev_color.take() {
-            Some(tex) => {
-                let tex = rg.convert_to_transient(tex);
-                rg.create_texture_view(tex, None)
-            }
-            None => rg.register_texture_view(default_res.dummy_texture.1),
+            Some(tex) => rg.convert_to_transient(tex),
+            None => rg.register_texture(default_res.dummy_texture),
         };
 
         // Pass: TAA
@@ -670,7 +674,7 @@ impl RestirRenderer {
                 .compute_shader("temporal_aa.hlsl")
                 .texture_view("gbuffer_depth", gbuffer.depth.1)
                 .texture_view("source_texture", scene_color.1)
-                .texture_view("history_texture", prev_color)
+                .texture("history_texture", prev_color)
                 .rw_texture_view("rw_target", post_taa_color.1)
                 .push_constant(&has_prev_color)
                 .group_count(
@@ -682,6 +686,27 @@ impl RestirRenderer {
             post_taa_color = scene_color;
         }
 
+        // Pass: HashGrid Debug Visualization
+        let hash_grid_vis = if self.config.debug_view == DebugView::HashGridView {
+            let show_color_color = 1u32;
+            let tex = rg.create_texutre(TextureDesc::new_2d(
+                main_size.x,
+                main_size.y,
+                vk::Format::B10G11R11_UFLOAT_PACK32,
+                TextureUsage::compute().to_vk(),
+            ));
+            rg.new_compute("Hash Grid Vis")
+                .compute_shader("restir/hash_grid_visualize.hlsl")
+                .texture("gbuffer_depth", gbuffer.depth.0)
+                .buffer("hash_grid_storage_buffer", hash_grid_storage)
+                .rw_texture("rw_color", tex)
+                .push_constant(&show_color_color)
+                .group_count_uvec2(main_size.div_round_up(UVec2::new(8, 8)));
+            tex
+        } else {
+            rg.register_texture(default_res.dummy_texture)
+        };
+
         // Pass: debug view
         if self.config.debug_view != DebugView::None {
             let color_texture = match self.config.debug_view {
@@ -691,7 +716,8 @@ impl RestirRenderer {
                 DebugView::IndDiffFiltered => filtered_indirect_diffuse,
                 DebugView::IndSpec => indirect_specular,
                 DebugView::IndSpecFiltered => filtered_indirect_specular,
-                DebugView::None => rg.register_texture(default_res.dummy_texture.0),
+                DebugView::HashGridView => hash_grid_vis,
+                DebugView::None => rg.register_texture(default_res.dummy_texture),
             };
             rg.new_compute("Debug View")
                 .compute_shader("restir/debug_view.hlsl")
