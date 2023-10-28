@@ -29,7 +29,8 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     float3 position = cs_depth_to_position(dispatch_id.xy, buffer_size, depth);
     float3 view_dir = normalize(position - frame_params.view_pos.xyz);
 
-    VertexDescriptor vert = VertexDescriptor::create(frame_params.view_pos.xyz, position, view_dir);
+    // TODO search with all lod (may be up to 12)
+    VertexDescriptor vert = VertexDescriptor::create(position, view_dir);
     HashGridCell cell;
     uint addr;
     if ( hash_grid_find(hash_grid_storage_buffer, vert.hash(), vert.checksum(), cell, addr) )
@@ -37,7 +38,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         float3 color;
         if (bool(pc.color_code))
         {
-            uint code = vert.hash();
+            uint code = vert.checksum(); // none zero, good for color code
             color.r = (code & 0xFF) / 255.0;
             color.g = ((code >> 8) & 0xFF) / 255.0;
             color.b = (((code >> 16) ^ (code >> 24)) & 0xFF) / 255.0;

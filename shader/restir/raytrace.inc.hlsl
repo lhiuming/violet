@@ -19,7 +19,8 @@ Texture2D<float> prev_depth_texture;
 RWBuffer<uint4> rw_hash_grid_query_buffer;
 RWBuffer<uint> rw_hash_grid_query_counter_buffer;
 #endif
-RWStructuredBuffer<HashGridCell> hash_grid_storage_buffer;
+RWStructuredBuffer<HashGridCell> rw_hash_grid_storage_buffer;
+RWBuffer<uint> rw_hash_grid_decay_buffer;
 
 // return: miss or not
 bool trace_shadow(float3 ray_origin, float3 ray_dir)
@@ -153,8 +154,7 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
         if (sample_world_radiance_cache)
         {
             // TODO jittering 
-            uint lod = hash_grid_cell_lod(payload.position_ws, frame_params.view_pos.xyz);
-            VertexDescriptor vert = { payload.position_ws, ray_dir, lod };
+            VertexDescriptor vert = VertexDescriptor::create(payload.position_ws, ray.Direction);
 
             #if 0
             // record the query 
@@ -177,14 +177,17 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
             // Insert a fake cell
             float3 new_radiance = float3(0, 5, 0);
             uint cell_addr;
-            if ( hash_grid_find_or_insert(hash_grid_storage_buffer, vert.hash(), vert.checksum(), cell_addr) )
+            if ( hash_grid_find_or_insert(rw_hash_grid_storage_buffer, vert.hash(), vert.checksum(), cell_addr) )
             {
-                HashGridCell cell = hash_grid_storage_buffer[cell_addr];
+                HashGridCell cell = rw_hash_grid_storage_buffer[cell_addr];
                 radiance += diffuse_rho * cell.radiance;
 
                 // fake radiance 
                 cell.radiance = new_radiance;
-                hash_grid_storage_buffer[cell_addr] = cell;
+                rw_hash_grid_storage_buffer[cell_addr] = cell;
+
+                // refresh
+                rw_hash_grid_decay_buffer[cell_addr] = 10;
             }
             else
             {

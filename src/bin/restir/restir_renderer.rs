@@ -17,6 +17,8 @@ use violet::{
 
 use crate::restir_render_loop::SceneRendererInput;
 
+static HG_CACHE_MAX_NUM_CELLS: u32 = 65536 * 16;
+
 struct TAAPass {
     prev_color: Option<RGTemporal<Texture>>,
     prev_depth: Option<RGTemporal<Texture>>,
@@ -73,6 +75,11 @@ struct IndirectSpecularTextures {
     lighting: RGTemporal<Texture>,
 }
 
+struct HashGridCacheResrouces<BufferHandle> {
+    storage: BufferHandle,
+    decay: BufferHandle,
+}
+
 // Render the scene using ReSTIR lighting
 pub struct RestirRenderer {
     config: RestirConfig,
@@ -86,7 +93,7 @@ pub struct RestirRenderer {
 
     ao_history: Option<RGTemporal<Texture>>,
 
-    hash_grid_cache_history: Option<RGTemporal<Buffer>>,
+    hash_grid_cache_history: Option<HashGridCacheResrouces<RGTemporal<Buffer>>>,
     clear_hash_grid_cache: bool,
 }
 
@@ -165,24 +172,39 @@ impl RestirRenderer {
         // Pass: GBuffer
         add_gbuffer_pass(rg, rd, scene, &gbuffer);
 
-        // Hash Grid Cache history
-        let hash_grid_storage = match self.hash_grid_cache_history.take() {
-            Some(buffer) => {
-                let buffer = rg.convert_to_transient(buffer);
-                if self.clear_hash_grid_cache {
-                    // Clear for debug
-                    clear_buffer(rd, rg, buffer, "Debug Clear Hash Grid Cache");
-                }
-                buffer
-            }
+        // Get Hash Grid Cache history
+        let hg_cache_decay_format = vk::Format::R8_UINT;
+        let hg_cache = match self.hash_grid_cache_history.take() {
+            Some(temporal) => HashGridCacheResrouces {
+                storage: rg.convert_to_transient(temporal.storage),
+                decay: rg.convert_to_transient(temporal.decay),
+            },
             None => {
-                // Initialize the buffer
-                let buffer = rg.create_buffer(BufferDesc::compute(65536 * 16 * 4 * 4));
-                clear_buffer(rd, rg, buffer, "Clear Hash Grid Cache");
-                buffer
+                self.clear_hash_grid_cache = true; // reuse the flag for initialization
+                HashGridCacheResrouces {
+                    storage: rg
+                        .create_buffer(BufferDesc::compute(HG_CACHE_MAX_NUM_CELLS as u64 * 4 * 4)),
+                    decay: rg.create_buffer(BufferDesc::compute_with_usage(
+                        HG_CACHE_MAX_NUM_CELLS as u64,
+                        vk::BufferUsageFlags::STORAGE_BUFFER
+                            | vk::BufferUsageFlags::STORAGE_TEXEL_BUFFER,
+                    )),
+                }
             }
         };
-        self.clear_hash_grid_cache = false;
+        if self.clear_hash_grid_cache {
+            clear_buffer(rd, rg, hg_cache.storage, "Clear HashGridCache Storage");
+            clear_buffer(rd, rg, hg_cache.decay, "Clear HashGridCache Decay");
+            self.clear_hash_grid_cache = false;
+        }
+
+        // Pass: HashGridCache decay
+        rg.new_compute("HashGridCache Decay")
+            .compute_shader("restir/hash_grid_cache_decay.hlsl")
+            .rw_buffer("rw_decay_buffer", hg_cache.decay)
+            .rw_buffer("rw_storage_buffer", hg_cache.storage)
+            // NOTE: see NUM_CELLS_PER_GROUP in shader
+            .group_count(div_round_up(HG_CACHE_MAX_NUM_CELLS, 1024), 1, 1);
 
         // depth buffer from last frame
         let has_prev_depth = self.taa.prev_depth.is_some();
@@ -234,7 +256,12 @@ impl RestirRenderer {
                 .texture_view("gbuffer_depth", gbuffer.depth.1)
                 .texture_view("gbuffer_color", gbuffer.color.1)
                 .buffer("rw_new_sample_buffer", indirect_diffuse_new_sample_buffer)
-                .buffer("hash_grid_storage_buffer", hash_grid_storage)
+                .rw_buffer("rw_hash_grid_storage_buffer", hg_cache.storage)
+                .rw_buffer_with_format(
+                    "rw_hash_grid_decay_buffer",
+                    hg_cache.decay,
+                    hg_cache_decay_format,
+                )
                 //.rw_texture("rw_debug_texture", debug_texture.1)
                 .push_constant(&input.frame_index)
                 .push_constant(&has_prev_frame)
@@ -257,7 +284,12 @@ impl RestirRenderer {
                 )
                 .texture("prev_depth_texture", prev_depth)
                 .rw_buffer("rw_prev_reservoir_buffer", prev_diffuse_reservoir_buffer)
-                .buffer("hash_grid_storage_buffer", hash_grid_storage)
+                .rw_buffer("rw_hash_grid_storage_buffer", hg_cache.storage)
+                .rw_buffer_with_format(
+                    "rw_hash_grid_decay_buffer",
+                    hg_cache.decay,
+                    hg_cache_decay_format,
+                )
                 //.rw_texture("rw_debug_texture", debug_texture.1)
                 .dimension(main_size.x, main_size.y, 1);
         }
@@ -425,7 +457,12 @@ impl RestirRenderer {
                 .rw_texture("rw_hit_pos_texture", ind_spec_hit_pos)
                 .rw_texture("rw_hit_normal_texture", ind_spec_hit_normal)
                 .rw_texture("rw_hit_radiance_texture", ind_spec_hit_radiance)
-                .buffer("hash_grid_storage_buffer", hash_grid_storage)
+                .rw_buffer("rw_hash_grid_storage_buffer", hg_cache.storage)
+                .rw_buffer_with_format(
+                    "rw_hash_grid_decay_buffer",
+                    hg_cache.decay,
+                    hg_cache_decay_format,
+                )
                 .push_constant::<u32>(&frame_index)
                 .push_constant::<u32>(&has_prev_frame)
                 .dimension(main_size.x, main_size.y, 1);
@@ -469,12 +506,14 @@ impl RestirRenderer {
                 .rw_texture("rw_prev_reservoir_texture", prev_ind_spec_reservoir)
                 .rw_texture("rw_prev_hit_pos_texture", prev_ind_spec_hit_pos)
                 .rw_texture("rw_prev_hit_radiance_texture", prev_ind_spec_hit_radiance)
-                .buffer("hash_grid_storage_buffer", hash_grid_storage)
+                .rw_buffer("rw_hash_grid_storage_buffer", hg_cache.storage)
+                .rw_buffer_with_format(
+                    "rw_hash_grid_decay_buffer",
+                    hg_cache.decay,
+                    hg_cache_decay_format,
+                )
                 .dimension(main_size.x, main_size.y, 1);
         }
-
-        self.hash_grid_cache_history
-            .replace(rg.convert_to_temporal(hash_grid_storage));
 
         let has_prev_gbuffer_color = self.prev_gbuffer_color.is_some();
         let prev_gbuffer_color = match self.prev_gbuffer_color.take() {
@@ -698,7 +737,7 @@ impl RestirRenderer {
             rg.new_compute("Hash Grid Vis")
                 .compute_shader("restir/hash_grid_visualize.hlsl")
                 .texture("gbuffer_depth", gbuffer.depth.0)
-                .buffer("hash_grid_storage_buffer", hash_grid_storage)
+                .buffer("hash_grid_storage_buffer", hg_cache.storage)
                 .rw_texture("rw_color", tex)
                 .push_constant(&show_color_color)
                 .group_count_uvec2(main_size.div_round_up(UVec2::new(8, 8)));
@@ -729,6 +768,13 @@ impl RestirRenderer {
                     1,
                 );
         }
+
+        // Keep HashGridCache
+        self.hash_grid_cache_history
+            .replace(HashGridCacheResrouces {
+                storage: rg.convert_to_temporal(hg_cache.storage),
+                decay: rg.convert_to_temporal(hg_cache.decay),
+            });
 
         // Cache scene buffer for next frame (TAA, temporal restir, etc.)
         self.taa

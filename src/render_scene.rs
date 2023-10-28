@@ -239,7 +239,7 @@ impl RenderScene {
             .unwrap(),
         );
         let index_buffer_view = rd
-            .create_buffer_view(index_buffer.buffer.handle, vk::Format::R16_UINT)
+            .create_buffer_view(index_buffer.buffer, vk::Format::R16_UINT)
             .unwrap();
         let vertex_buffer = AllocBuffer::new(
             rd.create_buffer(BufferDesc {
@@ -251,7 +251,7 @@ impl RenderScene {
             .unwrap(),
         );
         let vertex_buffer_view = rd
-            .create_buffer_view(vertex_buffer.buffer.handle, vk::Format::R32_UINT)
+            .create_buffer_view(vertex_buffer.buffer, vk::Format::R32_UINT)
             .unwrap();
 
         // Material Parameters buffer
@@ -363,13 +363,13 @@ impl RenderScene {
                 .dst_set(descriptor_set)
                 .dst_binding(VERTEX_BUFFER_BINDING_INDEX)
                 .descriptor_type(vk::DescriptorType::UNIFORM_TEXEL_BUFFER)
-                .texel_buffer_view(slice::from_ref(&vertex_buffer_view))
+                .texel_buffer_view(slice::from_ref(&vertex_buffer_view.handle))
                 .build();
             let write_ibuffer = vk::WriteDescriptorSet::builder()
                 .dst_set(descriptor_set)
                 .dst_binding(INDEX_BUFFER_BINDING_INDEX)
                 .descriptor_type(vk::DescriptorType::UNIFORM_TEXEL_BUFFER)
-                .texel_buffer_view(slice::from_ref(&index_buffer_view))
+                .texel_buffer_view(slice::from_ref(&index_buffer_view.handle))
                 .build();
             let mat_buffer_info = vk::DescriptorBufferInfo::builder()
                 .buffer(material_param_buffer.handle)

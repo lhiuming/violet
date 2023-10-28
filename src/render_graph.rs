@@ -9,6 +9,7 @@ use glam::{UVec2, UVec3};
 
 use crate::command_buffer::CommandBuffer;
 use crate::gpu_profiling::NamedProfiling;
+use crate::render_device::buffer::{BufferView, BufferViewDesc};
 use crate::render_device::{
     AccelerationStructure, Buffer, BufferDesc, RenderDevice, Texture, TextureDesc, TextureView,
     TextureViewDesc,
@@ -214,8 +215,9 @@ pub struct RenderPass<'render> {
     textures: Vec<(&'static str, RGHandle<TextureView>)>,
     buffers: Vec<(&'static str, RGHandle<Buffer>)>,
     accel_structs: Vec<(&'static str, RGHandle<AccelerationStructure>)>,
-    rw_buffers: Vec<(&'static str, RGHandle<Buffer>)>,
     rw_textures: Vec<(&'static str, RGHandle<TextureView>)>,
+    rw_buffers: Vec<(&'static str, RGHandle<Buffer>)>,
+    rw_texel_buffers: Vec<(&'static str, RGHandle<BufferView>)>,
     push_constants: PushConstantsBuilder,
     set_layout_override: Option<(u32, vk::DescriptorSetLayout)>,
     render: Option<Box<dyn 'render + FnOnce(&CommandBuffer, &Pipeline)>>,
@@ -230,8 +232,9 @@ impl RenderPass<'_> {
             textures: Vec::new(),
             buffers: Vec::new(),
             accel_structs: Vec::new(),
-            rw_buffers: Vec::new(),
             rw_textures: Vec::new(),
+            rw_buffers: Vec::new(),
+            rw_texel_buffers: Vec::new(),
             push_constants: PushConstantsBuilder::new(),
             set_layout_override: None,
             render: None,
@@ -286,6 +289,17 @@ pub trait PassBuilderTrait<'render>: PrivatePassBuilderTrait<'render> {
 
     fn rw_buffer(&mut self, name: &'static str, buffer: RGHandle<Buffer>) -> &mut Self {
         self.inner().rw_buffers.push((name, buffer));
+        self
+    }
+
+    fn rw_buffer_with_format(
+        &mut self,
+        name: &'static str,
+        buffer: RGHandle<Buffer>,
+        format: vk::Format,
+    ) -> &mut Self {
+        let view = self.rg().create_buffer_view(buffer, format);
+        self.inner().rw_texel_buffers.push((name, view));
         self
     }
 
@@ -781,6 +795,7 @@ pub struct RenderGraphCache {
     texture_pool: ResPool<TextureDesc, Texture>,
     texture_view_pool: ResPool<(Texture, TextureViewDesc), TextureView>,
     buffer_pool: ResPool<BufferDesc, Buffer>,
+    buffer_view_pool: ResPool<(Buffer, BufferViewDesc), BufferView>,
     sbt_pool: ResPool<u32, PassShaderBindingTable>,
 
     // Accumulated pass profilng info
@@ -807,6 +822,7 @@ impl RenderGraphCache {
             texture_pool: ResPool::new(),
             texture_view_pool: ResPool::new(),
             buffer_pool: ResPool::new(),
+            buffer_view_pool: ResPool::new(),
             sbt_pool: ResPool::new(),
             pass_profiling: NamedProfiling::new(rd),
         }
@@ -854,6 +870,7 @@ struct RenderGraphExecuteContext {
     pub textures: Vec<Option<Texture>>,          // by handle::id
     pub texture_views: Vec<Option<TextureView>>, // by handle::id
     pub buffers: Vec<Option<Buffer>>,            // by handle::id
+    pub buffer_views: Vec<Option<BufferView>>,   // by handle::id
 
     // Per-pass created pipeline
     pub pipelines: Vec<Handle<Pipeline>>,
@@ -871,6 +888,7 @@ impl RenderGraphExecuteContext {
             textures: Vec::new(),
             texture_views: Vec::new(),
             buffers: Vec::new(),
+            buffer_views: Vec::new(),
             pipelines: Vec::new(),
             descriptor_sets: Vec::new(),
             shader_binding_tables: Vec::new(),
@@ -887,6 +905,11 @@ enum RenderResource<V, E> {
 struct VirtualTextureView {
     pub texture: RGHandle<Texture>,
     pub desc: Option<TextureViewDesc>, // if none, use ::auto::(texture::desc)
+}
+
+struct VirtualBufferView {
+    pub buffer: RGHandle<Buffer>,
+    pub desc: BufferViewDesc,
 }
 
 pub enum ResTypeEnum {
@@ -928,6 +951,7 @@ pub struct RenderGraphBuilder<'render> {
     textures: Vec<RenderResource<TextureDesc, Texture>>,
     texture_views: Vec<RenderResource<VirtualTextureView, TextureView>>,
     buffers: Vec<RenderResource<BufferDesc, Buffer>>,
+    buffer_views: Vec<RenderResource<VirtualBufferView, BufferView>>,
     accel_structs: Vec<RenderResource<(), AccelerationStructure>>,
 
     hack_frame_index: u32,
@@ -1054,6 +1078,7 @@ impl<'a> RenderGraphBuilder<'a> {
             textures: Vec::new(),
             texture_views: Vec::new(),
             buffers: Vec::new(),
+            buffer_views: Vec::new(),
             accel_structs: Vec::new(),
 
             hack_frame_index: 0,
@@ -1075,6 +1100,15 @@ impl<'a> RenderGraphBuilder<'a> {
         texture: RGHandle<Texture>,
         desc: Option<TextureViewDesc>,
     ) -> RGHandle<TextureView> {
+        // Check if already created
+        for handle_id in 0..self.texture_views.len() {
+            if let RenderResource::Virtual(virtual_view) = &self.texture_views[handle_id] {
+                if virtual_view.desc == desc && virtual_view.texture == texture {
+                    return RGHandle::new(handle_id);
+                }
+            }
+        }
+
         let id = self.texture_views.len();
         self.texture_views
             .push(RenderResource::Virtual(VirtualTextureView {
@@ -1126,6 +1160,26 @@ impl<'a> RenderGraphBuilder<'a> {
     pub fn create_buffer(&mut self, desc: BufferDesc) -> RGHandle<Buffer> {
         let id = self.buffers.len();
         self.buffers.push(RenderResource::Virtual(desc));
+        RGHandle::new(id)
+    }
+
+    pub fn create_buffer_view(
+        &mut self,
+        buffer: RGHandle<Buffer>,
+        desc: BufferViewDesc,
+    ) -> RGHandle<BufferView> {
+        // Check if already created
+        for handle_id in 0..self.buffer_views.len() {
+            if let RenderResource::Virtual(virtual_view) = &self.buffer_views[handle_id] {
+                if virtual_view.desc == desc && virtual_view.buffer == buffer {
+                    return RGHandle::new(handle_id);
+                }
+            }
+        }
+
+        let id = self.buffer_views.len();
+        self.buffer_views
+            .push(RenderResource::Virtual(VirtualBufferView { buffer, desc }));
         RGHandle::new(id)
     }
 
@@ -1343,6 +1397,19 @@ impl RenderGraphBuilder<'_> {
     }
 
     #[inline]
+    fn get_buffer_view(
+        &self,
+        ctx: &RenderGraphExecuteContext,
+        handle: RGHandle<BufferView>,
+    ) -> BufferView {
+        match &self.buffer_views[handle.id] {
+            RenderResource::Virtual(_) => ctx.buffer_views[handle.id].unwrap(),
+            RenderResource::Temporal(_) => ctx.buffer_views[handle.id].unwrap(),
+            RenderResource::External(view) => *view,
+        }
+    }
+
+    #[inline]
     fn get_accel_struct(&self, handle: RGHandle<AccelerationStructure>) -> AccelerationStructure {
         let accel_struct = &self.accel_structs[handle.id];
         match accel_struct {
@@ -1499,6 +1566,10 @@ impl RenderGraphBuilder<'_> {
             for (name, handle) in &pass.rw_buffers {
                 let buffer = self.get_buffer(ctx, *handle);
                 builder.buffer(name, buffer.handle);
+            }
+            for (name, handle) in &pass.rw_texel_buffers {
+                let buffer_view = self.get_buffer_view(ctx, *handle);
+                builder.texel_buffer(name, buffer_view.handle);
             }
             for (name, handle) in &pass.accel_structs {
                 let accel_struct = self.get_accel_struct(*handle);
@@ -1748,6 +1819,12 @@ impl RenderGraphBuilder<'_> {
                             return Some((pass_index, vk::AccessFlags::SHADER_WRITE));
                         }
                     }
+                    for (_name, handle) in &pass.rw_texel_buffers {
+                        let texel_buffer = self.get_buffer_view(ctx, *handle);
+                        if texel_buffer.buffer.handle == vk_buffer {
+                            return Some((pass_index, vk::AccessFlags::SHADER_WRITE));
+                        }
+                    }
 
                     // Check all sampling
                     for (_name, handle) in &pass.buffers {
@@ -1800,6 +1877,13 @@ impl RenderGraphBuilder<'_> {
                 self.get_buffer(ctx, *handle).handle,
                 vk::AccessFlags::SHADER_WRITE,
             );
+        }
+
+        for (_name, handle) in &pass.rw_texel_buffers {
+            transition_to(
+                self.get_buffer_view(ctx, *handle).buffer.handle,
+                vk::AccessFlags::SHADER_WRITE,
+            )
         }
 
         for (_name, handle) in &pass.accel_structs {
@@ -1947,6 +2031,25 @@ impl RenderGraphBuilder<'_> {
                 RenderResource::External(_) => None,
             };
             exec_context.buffers.push(buffer);
+        }
+        for i in 0..self.buffer_views.len() {
+            let res = &self.buffer_views[i];
+            let view = match res {
+                // Create
+                RenderResource::Virtual(virtual_view) => {
+                    let buffer = self.get_buffer(&exec_context, virtual_view.buffer);
+                    let desc = virtual_view.desc;
+                    let view = self
+                        .cache
+                        .buffer_view_pool
+                        .pop(&(buffer, desc))
+                        .unwrap_or_else(|| rd.create_buffer_view(buffer, desc).unwrap());
+                    Some(view)
+                }
+                RenderResource::Temporal(_) => panic!("No temporal buffer view"),
+                RenderResource::External(_) => None,
+            };
+            exec_context.buffer_views.push(view);
         }
 
         // Create (temp) descriptor set for each pass
@@ -2179,6 +2282,16 @@ impl RenderGraphBuilder<'_> {
         for buffer in exec_context.buffers.drain(0..exec_context.buffers.len()) {
             if let Some(buffer) = buffer {
                 self.cache.buffer_pool.push(buffer.desc, buffer);
+            }
+        }
+        for view in exec_context
+            .buffer_views
+            .drain(0..exec_context.buffer_views.len())
+        {
+            if let Some(view) = view {
+                self.cache
+                    .buffer_view_pool
+                    .push((view.buffer, view.desc), view);
             }
         }
         for set in exec_context

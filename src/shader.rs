@@ -1279,7 +1279,7 @@ impl<'a> DescriptorSetWriteBuilder<'a> {
     }
 
     #[inline]
-    pub fn texel_buffer(&'a mut self, name: &'a str, buffer_view: vk::BufferView) -> &mut Self {
+    pub fn texel_buffer(&mut self, name: &'a str, buffer_view: vk::BufferView) -> &mut Self {
         self.buffer_views.push((name, buffer_view));
         self
     }

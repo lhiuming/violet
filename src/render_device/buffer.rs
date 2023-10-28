@@ -27,6 +27,15 @@ impl BufferDesc {
         }
     }
 
+    // Read/Write in GPU, with fine-tuned usage flags
+    pub fn compute_with_usage(size: u64, usage: vk::BufferUsageFlags) -> Self {
+        Self {
+            size,
+            usage,
+            memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+        }
+    }
+
     // Write (typically once) in CPU, read in GPU
     pub fn shader_binding_table(size: u64) -> Self {
         Self {
@@ -46,6 +55,15 @@ pub struct Buffer {
     pub memory: vk::DeviceMemory,
     pub data: *mut u8, // TODO make optional
     pub device_address: Option<vk::DeviceAddress>,
+}
+
+pub type BufferViewDesc = vk::Format;
+
+#[derive(Clone, Copy, Hash, PartialEq, Eq)]
+pub struct BufferView {
+    pub buffer: Buffer,
+    pub desc: BufferViewDesc,
+    pub handle: vk::BufferView,
 }
 
 impl super::RenderDevice {
@@ -157,18 +175,18 @@ impl super::RenderDevice {
         }
     }
 
-    pub fn create_buffer_view(
-        &self,
-        buffer: vk::Buffer,
-        format: vk::Format,
-    ) -> Option<vk::BufferView> {
-        // Create SRV
+    pub fn create_buffer_view(&self, buffer: Buffer, desc: BufferViewDesc) -> Option<BufferView> {
+        // Create BufferView object
         let create_info = vk::BufferViewCreateInfo::builder()
-            .buffer(buffer)
-            .format(format)
+            .buffer(buffer.handle)
+            .format(desc)
             .offset(0)
             .range(vk::WHOLE_SIZE);
-        let srv = unsafe { self.device.create_buffer_view(&create_info, None) }.ok()?;
-        Some(srv)
+        let handle = unsafe { self.device.create_buffer_view(&create_info, None) }.ok()?;
+        Some(BufferView {
+            buffer,
+            desc,
+            handle,
+        })
     }
 }
