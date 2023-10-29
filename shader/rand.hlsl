@@ -16,6 +16,7 @@ uint jenkins_hash(uint x) {
 }
 
 // original: init_rng
+// TODO jenkins_hash(frame) can be done in CPU
 uint lcg_init(uint2 pixel_coords, uint2 resolution, uint frame) {
     uint rng_state = dot(pixel_coords, uint2(1, resolution.x)) ^ jenkins_hash(frame);
     return jenkins_hash(rng_state);

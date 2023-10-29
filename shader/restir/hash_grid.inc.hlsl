@@ -1,13 +1,17 @@
 #pragma once
 
-// Cemera position
+#include "../enc.inc.hlsl"
 #include "../frame_bindings.hlsl"
-// Hash functions
 #include "../rand.hlsl"
 
 // TODO try prime bucket size?
-#define HASH_GRID_NUM_BUCKETS 65536
+#if 1
+#define HASH_GRID_NUM_BUCKETS 65536 // 64 * 1024
 #define HASH_GRID_NUM_BUCKETS_BITMASK 0xFFFF
+#else
+#define HASH_GRID_NUM_BUCKETS (65536 / 2)
+#define HASH_GRID_NUM_BUCKETS_BITMASK 0x7FFF
+#endif
 
 // TODO experiment with different capacity, or open addressing (with lazy deletion?) instead of chaining? (lazy deletion seems hard to run parallel)
 #define HASH_GRID_BUCKET_SIZE 16
@@ -15,36 +19,19 @@
 
 #define HASH_GRID_NUM_CELLS (HASH_GRID_NUM_BUCKETS * HASH_GRID_BUCKET_SIZE)
 
-#define HASH_GRID_BASE_CELL_SIZE (1.0 / 16.0)
+#define HASH_GRID_BASE_CELL_SIZE (1.0 / 8.0)
 #define HASH_GRID_BASE_CELL_SIZE_INV (1.0 / HASH_GRID_BASE_CELL_SIZE)
 
-struct QueryRecord
-{
-    float3 pos;
-    float3 dir_in;
-
-    uint4 encode()
-    {
-        uint3 pos_u32 = asuint(pos);
-        return uint4(pos_u32, 0);
-    }
-
-    static QueryRecord decode(uint4 data)
-    {
-        float3 pos = asfloat(data.xyz);
-        QueryRecord ret = { pos, float3(0, 0, 0) };
-        return ret;
-    }
-};
+#define HASH_GRID_MAX_NUM_QUERIES (128 * 1024)
 
 uint hash_grid_cell_lod(float3 pos, float3 camera_pos)
 {
     float3 delta = pos - camera_pos;
     float dist_sq = dot(delta, delta);
 
-    #if 0
+    #if 1
     // clip-map style log2(distance) LOD
-    //float lod = max(0.5 * log2(dist_sq), 0.0); 
+    float lod = max(0.5 * log2(dist_sq), 0.0); 
     #else
     // somewhat evenly distributed on screen (tuned on current FOV (90 deg))
     float lod = max(0.38 * log2(dist_sq), 0.0); 
@@ -63,11 +50,19 @@ struct VertexDescriptor
 
     static VertexDescriptor create(float3 pos, float3 dir_in)
     {
-        // quantize
+        // quanize pos before calculating distance-based lod, to reduce overlapping hash cells at LOD boundary
+        // TODO check load factor
+        float3 lod_pos = pos;
+        #if 0
+        lod_pos = round(pos * 4.0) * 0.25;
+        #endif
+
         // TODO adaptive cell size (LOD) by ray length
-        uint lod = hash_grid_cell_lod(pos, frame_params.view_pos.xyz);
-        #if 1
+        uint lod = hash_grid_cell_lod(lod_pos, frame_params.view_pos.xyz);
+
+        // quantize
         float cell_size = HASH_GRID_BASE_CELL_SIZE * float(1u << lod);
+        #if 1
         int3 pos_quant = int3(floor(pos / cell_size));
         #else
         int3 pos_quant = int3(floor(pos * HASH_GRID_BASE_CELL_SIZE_INV)) >> lod;
@@ -90,7 +85,12 @@ struct VertexDescriptor
     uint checksum()
     {
         uint3 pos_u32 = asuint(pos);
+        #if 0
         uint hash = pcg_hash(pos_u32.x + pcg_hash(pos_u32.y + pcg_hash(pos_u32.z)));
+        hash = pcg_hash(hash + lod);
+        #else
+        uint hash = XXHash32::init(pos_u32.y).add(lod).add(pos_u32.z).add(pos_u32.x).eval();
+        #endif
         // NOTE: zero is reserved to indicate empty cell
         return hash | 0x1;
     }
@@ -100,16 +100,41 @@ struct VertexDescriptor
 struct HashGridCell
 {
     uint checksum; // "hash2" / "verification hash"
-    float3 radiance; 
+    uint radiance_acc_r; // NOTE: using uint3 has some layout problem (not figured out yet)
+    uint radiance_acc_g; 
+    uint radiance_acc_b; 
+    uint weight_acc;
+
+    static uint3 radiance_scale(float3 radiance, float weight)
+    {
+        return uint3(round(radiance * (4096.0 * weight)));
+    }
+
+    static float3 radiance_unscale(uint3 radiance, float weight)
+    {
+        return float3(radiance) / (4096.0 * weight);
+    }
 
     static HashGridCell empty() 
     {
-        HashGridCell ret = { 0, float3(0, 0, 0) };
+        HashGridCell ret = { 0, 0, 0, 0, 0  };
         return ret;
+    }
+
+    float3 radiance()
+    {
+        if (weight_acc == 0)
+        {
+            return 0.0;
+        }
+        uint3 radiance = uint3(radiance_acc_r, radiance_acc_g, radiance_acc_b);
+        return radiance_unscale(radiance, float(weight_acc));
     }
 };
 
-bool hash_grid_find(StructuredBuffer<HashGridCell> buffer, uint hash, uint checksum, out HashGridCell cell, out uint addr)
+//bool hash_grid_find(StructuredBuffer<HashGridCell> buffer, uint hash, uint checksum, out HashGridCell cell, out uint addr)
+template<typename CellBuffer>
+bool hash_grid_find(CellBuffer buffer, uint hash, uint checksum, out HashGridCell cell, out uint addr)
 {
     // linear probing in the bucket
     uint addr_beg = hash << HASH_GRID_BUCKET_SIZE_BITSHIFT;
@@ -159,8 +184,35 @@ bool hash_grid_find_or_insert(RWStructuredBuffer<HashGridCell> buffer, uint hash
                 // insert successfully (maybe by another thread)
                 return true;
             }
+            else
+            {
+                // a different cell is inserted; continue probing.
+            }
         }
     }
 
     return false;
 }
+
+struct HashGridQuery {
+    float3 hit_position;
+    uint hit_normal_encoded;
+    uint cell_hash;
+    uint cell_checksum;
+
+    static uint encode_normal(float3 n)
+    {
+        return normal_encode_oct_u32(n);
+    }
+
+    static HashGridQuery create(uint hash, uint checksum, float3 pos, float3 normal)
+    {
+        HashGridQuery ret = { pos, encode_normal(normal), hash, checksum };
+        return ret;
+    }
+
+    float3 hit_normal() 
+    {
+        return normal_decode_oct_u32(hit_normal_encoded);
+    }
+};

@@ -34,7 +34,7 @@ float3 normal_decode_oct( float2 f )
 uint normal_encode_oct_u32(float3 n)
 {
     float2 normal_enc = normal_encode_oct(n);
-    uint2 normal_unorm= uint2(normal_enc * 65535.0f);
+    uint2 normal_unorm = uint2(normal_enc * 65535.0f);
     return normal_unorm.x | normal_unorm.y << 16;
 }
  

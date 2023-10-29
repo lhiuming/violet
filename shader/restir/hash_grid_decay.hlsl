@@ -1,4 +1,4 @@
-#include "hash_grid_cache.inc.hlsl"
+#include "hash_grid.inc.hlsl"
 
 #define ENABLE_DECAY 1
 
@@ -53,12 +53,9 @@ void main(uint dispatch_id: SV_DispatchThreadID, uint group_id: SV_GroupID, uint
             decay = decay - 1;
             if (decay == 0)
             {
-                // Deallocate the cell
+                // Deallocate (and reset) the cell
                 uint addr = set_addr + i;
-                // TODO move checksum to a sepearted buffer?
-                HashGridCell cell = rw_storage_buffer[addr];
-                cell.checksum = 0;
-                rw_storage_buffer[addr] = cell;
+                rw_storage_buffer[addr] = HashGridCell::empty();
             }
             else
             {
@@ -109,7 +106,7 @@ void main(uint dispatch_id: SV_DispatchThreadID, uint group_id: SV_GroupID, uint
                 HashGridCell cell = rw_storage_buffer[addr_offset + last_cell_index];
                 // assign
                 rw_storage_buffer[addr_offset + first_space_index] = cell;
-                // clear (the checksum)
+                // clear (the checksum and storage)
                 rw_storage_buffer[addr_offset + last_cell_index] = HashGridCell::empty();
 
                 // Update occupation mask

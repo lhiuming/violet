@@ -6,7 +6,9 @@
 #include "../raytrace/shadow_ray.inc.hlsl"
 #include "../sampling.hlsl"
 
-#include "hash_grid_cache.inc.hlsl"
+#include "hash_grid.inc.hlsl"
+
+#define RAYTRACE_INC_SAMPLE_WORLD_RADIANCE_CACHE 1
 
 #define RAYTRACE_INC_FIREFLY_SUPPRESS 1
 
@@ -15,12 +17,13 @@ TextureCube<float4> skycube;
 Texture2D<float3> prev_indirect_diffuse_texture;
 Texture2D<float> prev_depth_texture;
 
-#if 0
-RWBuffer<uint4> rw_hash_grid_query_buffer;
-RWBuffer<uint> rw_hash_grid_query_counter_buffer;
+#ifndef RAYTRACE_INC_HASH_GRID_STORATE_BUFFER
+#define RAYTRACE_INC_HASH_GRID_STORATE_BUFFER hash_grid_storage_buffer
+StructuredBuffer<HashGridCell> hash_grid_storage_buffer;
 #endif
-RWStructuredBuffer<HashGridCell> rw_hash_grid_storage_buffer;
-RWBuffer<uint> rw_hash_grid_decay_buffer;
+
+RWStructuredBuffer<HashGridQuery> rw_hash_grid_query_buffer;
+RWStructuredBuffer<uint> rw_hash_grid_query_counter_buffer;
 
 // return: miss or not
 bool trace_shadow(float3 ray_origin, float3 ray_dir)
@@ -122,10 +125,9 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
             radiance = 0.0f;
         }
 
-        // Indirect lighting (diffuse only)
-        // 1. try to read from prev frame color
-        // 2. TODO use world cache instead of screen
         bool sample_world_radiance_cache = true;
+
+        // Indirect lighting from screen (diffuse only)
         if (bool(has_prev_frame)) { 
             float4 prev_hpos = mul(frame_params.prev_view_proj, float4(payload.position_ws, 1.0f));
             float2 ndc = prev_hpos.xy / prev_hpos.w - frame_params.jitter.zw;
@@ -151,52 +153,32 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
             }
         } 
 
+        #if RAYTRACE_INC_SAMPLE_WORLD_RADIANCE_CACHE
+
+        // Indirect lighting from world space cache (fallback from screen)
         if (sample_world_radiance_cache)
         {
             // TODO jittering 
             VertexDescriptor vert = VertexDescriptor::create(payload.position_ws, ray.Direction);
 
-            #if 0
-            // record the query 
-            uint write_addr;
-            InterlockedAdd(rw_hash_grid_query_counter_buffer[0], 1, write_addr);
-            QueryRecord query = { payload.position_ws, ray_dir };
-            rw_hash_grid_query_buffer[write_addr] = query.encode();
-            #endif
-
-            #if 0
-
             // try to fetch radiacne 
             HashGridCell cell;
-            if ( hash_grid_find(hash_grid_storage_buffer, vert.hash(), vert.checksum(), /*out*/ cell) )
-            {
-                radiance += diffuse_rho * cell.radiance;
-            }
-            #else
-
-            // Insert a fake cell
-            float3 new_radiance = float3(0, 5, 0);
             uint cell_addr;
-            if ( hash_grid_find_or_insert(rw_hash_grid_storage_buffer, vert.hash(), vert.checksum(), cell_addr) )
+            if ( hash_grid_find(RAYTRACE_INC_HASH_GRID_STORATE_BUFFER, vert.hash(), vert.checksum(), /*out*/ cell, /*out*/ cell_addr) )
             {
-                HashGridCell cell = rw_hash_grid_storage_buffer[cell_addr];
-                radiance += diffuse_rho * cell.radiance;
-
-                // fake radiance 
-                cell.radiance = new_radiance;
-                rw_hash_grid_storage_buffer[cell_addr] = cell;
-
-                // refresh
-                rw_hash_grid_decay_buffer[cell_addr] = 10;
-            }
-            else
-            {
-                // Overflow Debug
-                radiance += diffuse_rho * float3(0, 0, 5);
+                radiance += diffuse_rho * cell.radiance();
             }
 
-            #endif
+            // Record the sample (to be used in a cache update pass)
+            uint query_offset;
+            InterlockedAdd(rw_hash_grid_query_counter_buffer[0], 1, query_offset);
+            if (query_offset < HASH_GRID_MAX_NUM_QUERIES)
+            {
+                rw_hash_grid_query_buffer[query_offset] = HashGridQuery::create(vert.hash(), vert.checksum(), payload.position_ws, payload.normal_geo_ws); 
+            }
         }
+
+        #endif
     }
 
     RadianceTraceResult ret;

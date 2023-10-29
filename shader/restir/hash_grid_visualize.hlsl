@@ -1,7 +1,7 @@
 #include "../frame_bindings.hlsl"
 #include "../util.hlsl"
 
-#include "hash_grid_cache.inc.hlsl"
+#include "hash_grid.inc.hlsl"
 
 Texture2D<float> gbuffer_depth;
 StructuredBuffer<HashGridCell> hash_grid_storage_buffer;
@@ -45,7 +45,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         }
         else
         {
-            color = cell.radiance;
+            color = cell.radiance();
         }
         rw_color[dispatch_id] = color;
     }

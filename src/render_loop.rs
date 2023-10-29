@@ -614,3 +614,12 @@ pub fn halton(index: u32, base: u32) -> f32 {
     }
     r
 }
+
+pub fn jenkins_hash(mut x: u32) -> u32 {
+    x = x.wrapping_add(x << 10);
+    x ^= x >> 6;
+    x = x.wrapping_add(x << 3);
+    x ^= x >> 11;
+    x = x.wrapping_add(x << 15);
+    x
+}
