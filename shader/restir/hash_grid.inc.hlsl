@@ -23,6 +23,11 @@
 #define HASH_GRID_BASE_CELL_SIZE_INV (1.0 / HASH_GRID_BASE_CELL_SIZE)
 
 #define HASH_GRID_MAX_NUM_QUERIES (128 * 1024)
+#define HASH_GRID_MAX_NUM_QUERIES_BITSHIFT 17
+
+//
+// Vertex Descriptor and Quantization
+//
 
 uint hash_grid_cell_lod(float3 pos, float3 camera_pos)
 {
@@ -96,14 +101,15 @@ struct VertexDescriptor
     }
 };
 
+//
+// Hash Grid Storage
+//
+
 // TODO break checksum into separate buffer, to reduce cache trashing?
 struct HashGridCell
 {
     uint checksum; // "hash2" / "verification hash"
-    uint radiance_acc_r; // NOTE: using uint3 has some layout problem (not figured out yet)
-    uint radiance_acc_g; 
-    uint radiance_acc_b; 
-    uint weight_acc;
+    float3 radiance;
 
     static uint3 radiance_scale(float3 radiance, float weight)
     {
@@ -117,18 +123,8 @@ struct HashGridCell
 
     static HashGridCell empty() 
     {
-        HashGridCell ret = { 0, 0, 0, 0, 0  };
+        HashGridCell ret = { 0, float3(0.0, 0.0, 0.0) };
         return ret;
-    }
-
-    float3 radiance()
-    {
-        if (weight_acc == 0)
-        {
-            return 0.0;
-        }
-        uint3 radiance = uint3(radiance_acc_r, radiance_acc_g, radiance_acc_b);
-        return radiance_unscale(radiance, float(weight_acc));
     }
 };
 

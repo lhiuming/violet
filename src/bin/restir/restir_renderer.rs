@@ -264,10 +264,41 @@ impl RestirRenderer {
             has_buffers && ((frame_index % 6) == 0) && self.config.ind_diff_validate
         };
 
-        let frame_hash = jenkins_hash(input.frame_index);
-
-        // Pass: HashGridCache Update
+        // HashGridCache Radiance Update Passes
         if has_prev_depth && has_prev_indirect_diffuse {
+            let query_selection = rg.create_buffer(BufferDesc::compute(HG_CACHE_NUM_CELLS * 4));
+            clear_buffer(rd, rg, query_selection, "Clear Query Selection Buffer");
+
+            let frame_hash = jenkins_hash(input.frame_index.wrapping_mul(13));
+
+            // Pass: HashGridCache Query Select
+            rg.new_compute("HashGridCache Query Select")
+                .compute_shader("restir/hash_grid_query_select.hlsl")
+                .buffer("hash_grid_query_buffer", hg_cache.query)
+                .buffer("hash_grid_query_counter_buffer", hg_cache.query_counter)
+                .rw_buffer("rw_hash_grid_storage_buffer", hg_cache.storage)
+                .rw_buffer("rw_hash_grid_query_selection_buffer", query_selection)
+                .push_constant(&frame_hash)
+                .group_count(div_round_up(HG_CACHE_MAX_NUM_QUERIES, 32) as u32, 1, 1);
+
+            // TODO size should be min(HG_CACHE_NUM_CELLS, HG_CACHE_MAX_NUM_QUERIES)
+            let compact_query_index =
+                rg.create_buffer(BufferDesc::compute(HG_CACHE_MAX_NUM_QUERIES * 4));
+            let compact_query_cell_addr =
+                rg.create_buffer(BufferDesc::compute(HG_CACHE_MAX_NUM_QUERIES * 4));
+            let compact_query_counter = rg.create_buffer(BufferDesc::compute(4));
+            clear_buffer(rd, rg, compact_query_counter, "Clear Compact Query Counter");
+
+            // Pass: HashGridCache Query Compact
+            rg.new_compute("HashGridCache Query Compact")
+                .compute_shader("restir/hash_grid_query_compact.hlsl")
+                .buffer("hash_grid_query_selection_buffer", query_selection)
+                .rw_buffer("rw_compact_query_index_buffer", compact_query_index)
+                .rw_buffer("rw_compact_query_cell_addr_buffer", compact_query_cell_addr)
+                .rw_buffer("rw_compact_query_counter_buffer", compact_query_counter)
+                // NOTE: see NUM_CELLS_PER_GROUP in compute shader
+                .group_count(div_round_up(HG_CACHE_NUM_CELLS, 128) as u32, 1, 1);
+
             let new_query = rg.create_buffer(BufferDesc::compute(
                 HG_CACHE_MAX_NUM_QUERIES * HG_CACHE_QUERY_SIZE,
             ));
@@ -280,8 +311,11 @@ impl RestirRenderer {
                 "Clear New HashGridCache Query Counter",
             );
 
-            rg.new_raytracing("HashGridCache Radiance Update")
-                .raygen_shader("restir/hash_grid_radiance_update.hlsl")
+            let frame_hash = jenkins_hash(frame_hash.wrapping_mul(71));
+
+            // Pass: HashGridCache Raygen
+            rg.new_raytracing("HashGridCache Raygen")
+                .raygen_shader("restir/hash_grid_raygen.hlsl")
                 .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
                 .closest_hit_shader("raytrace/geometry.rchit.hlsl")
                 // raytrace.inc.hlsl
@@ -297,7 +331,9 @@ impl RestirRenderer {
                 // hash_grid_radiance_update.hlsl
                 .rw_buffer("rw_hash_grid_storage_buffer", hg_cache.storage)
                 .buffer("hash_grid_query_buffer", hg_cache.query)
-                .buffer("hash_grid_query_counter_buffer", hg_cache.query_counter)
+                .buffer("compact_query_counter_buffer", compact_query_counter)
+                .buffer("compact_query_index_buffer", compact_query_index)
+                .buffer("compact_query_cell_addr_buffer", compact_query_cell_addr)
                 .rw_buffer_with_format(
                     "rw_hash_grid_decay_buffer",
                     hg_cache.decay,

@@ -2199,6 +2199,17 @@ impl RenderGraphBuilder<'_> {
                     }
                     RenderPassType::Compute(compute) => {
                         let group_count = &compute.group_count;
+
+                        let max_group_count = UVec3::from_array(
+                            rd.physical.properties.limits.max_compute_work_group_count,
+                        );
+                        if (group_count.x > max_group_count.x)
+                            || (group_count.y > max_group_count.y)
+                            || (group_count.z > max_group_count.z)
+                        {
+                            print!("Error[RenderGraph]: compute group count exceed hardware limit {} > {}", group_count, max_group_count);
+                        }
+
                         command_buffer.dispatch(group_count.x, group_count.y, group_count.z);
                     }
                     RenderPassType::RayTracing(rt) => {

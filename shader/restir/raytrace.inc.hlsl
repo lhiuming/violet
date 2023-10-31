@@ -10,6 +10,8 @@
 
 #define RAYTRACE_INC_SAMPLE_WORLD_RADIANCE_CACHE 1
 
+#define RAYTRACE_INC_SAMPLE_SCREEN_RADIANCE_CACHE 1
+
 #define RAYTRACE_INC_FIREFLY_SUPPRESS 1
 
 RaytracingAccelerationStructure scene_tlas;
@@ -127,6 +129,8 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
 
         bool sample_world_radiance_cache = true;
 
+        #if RAYTRACE_INC_SAMPLE_SCREEN_RADIANCE_CACHE
+
         // Indirect lighting from screen (diffuse only)
         if (bool(has_prev_frame)) { 
             float4 prev_hpos = mul(frame_params.prev_view_proj, float4(payload.position_ws, 1.0f));
@@ -153,6 +157,8 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
             }
         } 
 
+        #endif
+
         #if RAYTRACE_INC_SAMPLE_WORLD_RADIANCE_CACHE
 
         // Indirect lighting from world space cache (fallback from screen)
@@ -166,15 +172,17 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
             uint cell_addr;
             if ( hash_grid_find(RAYTRACE_INC_HASH_GRID_STORATE_BUFFER, vert.hash(), vert.checksum(), /*out*/ cell, /*out*/ cell_addr) )
             {
-                radiance += diffuse_rho * cell.radiance();
+                radiance += diffuse_rho * cell.radiance;
             }
 
-            // Record the sample (to be used in a cache update pass)
-            uint query_offset;
-            InterlockedAdd(rw_hash_grid_query_counter_buffer[0], 1, query_offset);
-            if (query_offset < HASH_GRID_MAX_NUM_QUERIES)
+            // Allocate a slot to store the query
+            uint query_index;
+            InterlockedAdd(rw_hash_grid_query_counter_buffer[0], 1, query_index);
+
+            // Record the query vertex (to be used in a cache update pass)
+            if (query_index < HASH_GRID_MAX_NUM_QUERIES)
             {
-                rw_hash_grid_query_buffer[query_offset] = HashGridQuery::create(vert.hash(), vert.checksum(), payload.position_ws, payload.normal_geo_ws); 
+                rw_hash_grid_query_buffer[query_index] = HashGridQuery::create(vert.hash(), vert.checksum(), payload.position_ws, payload.normal_geo_ws); 
             }
         }
 

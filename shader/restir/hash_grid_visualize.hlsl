@@ -45,7 +45,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         }
         else
         {
-            color = cell.radiance();
+            color = cell.radiance;
         }
         rw_color[dispatch_id] = color;
     }

@@ -4,12 +4,15 @@
 
 #include "hash_grid.inc.hlsl"
 
+// TODO remove the rw prefix (shader reflection should check `Sampled` from SPIR-V, and warn if not bound correctly)
 RWStructuredBuffer<HashGridCell> rw_hash_grid_storage_buffer;
 #define RAYTRACE_INC_HASH_GRID_STORATE_BUFFER rw_hash_grid_storage_buffer
 #include "raytrace.inc.hlsl"
 
 StructuredBuffer<HashGridQuery> hash_grid_query_buffer;
-StructuredBuffer<uint> hash_grid_query_counter_buffer;
+StructuredBuffer<uint> compact_query_counter_buffer;
+StructuredBuffer<uint> compact_query_index_buffer;
+StructuredBuffer<uint> compact_query_cell_addr_buffer;
 
 RWBuffer<uint> rw_hash_grid_decay_buffer; // R8_UINT
 
@@ -23,23 +26,18 @@ void main()
 {
     uint dispatch_id = DispatchRaysIndex().x;
 
-    // TODO indirect dispatch
-    if (dispatch_id >= hash_grid_query_counter_buffer[0])
+    // TODO indirect trace?
+    if (dispatch_id >= compact_query_counter_buffer[0])
     {
         return;
     }
 
-    HashGridQuery query = hash_grid_query_buffer[dispatch_id];
-
-    // Find or allocate a cell
-    // Nothing to do if the hash grid is full
-    uint cell_addr;
-    if ( !hash_grid_find_or_insert(rw_hash_grid_storage_buffer, query.cell_hash, query.cell_checksum, cell_addr) )
-    {
-        return;
-    }
+    uint query_index = compact_query_index_buffer[dispatch_id];
+    uint cell_addr = compact_query_cell_addr_buffer[dispatch_id];
 
     uint lcg_state = jenkins_hash(dispatch_id ^ pc.frame_hash);
+
+    HashGridQuery query = hash_grid_query_buffer[query_index];
     float3 normal = query.hit_normal();
 
     // Genreate new sample for the query
@@ -70,13 +68,12 @@ void main()
     radiance += float3(0, 1, 0);
     #endif
 
-    // TODO average and pack to r11g11b10 in later pass
-    float weight = 1.0f;
-    uint3 radiance_u = HashGridCell::radiance_scale(radiance, weight);
-    InterlockedAdd(rw_hash_grid_storage_buffer[cell_addr].radiance_acc_r, radiance_u.r);
-    InterlockedAdd(rw_hash_grid_storage_buffer[cell_addr].radiance_acc_g, radiance_u.g);
-    InterlockedAdd(rw_hash_grid_storage_buffer[cell_addr].radiance_acc_b, radiance_u.b);
-    InterlockedAdd(rw_hash_grid_storage_buffer[cell_addr].weight_acc, uint(weight));
+    // Store radiance 
+    // TODO temporal filtering
+    float3 prev_radiance = rw_hash_grid_storage_buffer[cell_addr].radiance;
+    float blend_factor = 1.0f;
+    float3 blend_radiance = radiance * blend_factor + prev_radiance * (1.0 - blend_factor);
+    rw_hash_grid_storage_buffer[cell_addr].radiance = blend_radiance;
 
     // Refresh cell decay
     rw_hash_grid_decay_buffer[cell_addr] = 10;
