@@ -71,9 +71,16 @@ void main()
     // Store radiance 
     // TODO temporal filtering
     float3 prev_radiance = rw_hash_grid_storage_buffer[cell_addr].radiance;
-    float blend_factor = 1.0f;
+    float blend_factor = 1.0 / 16;
     float3 blend_radiance = radiance * blend_factor + prev_radiance * (1.0 - blend_factor);
     rw_hash_grid_storage_buffer[cell_addr].radiance = blend_radiance;
+
+    // Debug Cell Collision
+    #if 0
+    float3 pos = floor(query.hit_position * HASH_GRID_BASE_CELL_SIZE_INV) * HASH_GRID_BASE_CELL_SIZE;
+    float3 pos_color = pos / 128.0f;
+    rw_hash_grid_storage_buffer[cell_addr].radiance = pos_color;
+    #endif
 
     // Refresh cell decay
     rw_hash_grid_decay_buffer[cell_addr] = 10;

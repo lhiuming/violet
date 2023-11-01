@@ -19,7 +19,7 @@
 
 #define HASH_GRID_NUM_CELLS (HASH_GRID_NUM_BUCKETS * HASH_GRID_BUCKET_SIZE)
 
-#define HASH_GRID_BASE_CELL_SIZE (1.0 / 8.0)
+#define HASH_GRID_BASE_CELL_SIZE (1.0 / 16.0)
 #define HASH_GRID_BASE_CELL_SIZE_INV (1.0 / HASH_GRID_BASE_CELL_SIZE)
 
 #define HASH_GRID_MAX_NUM_QUERIES (128 * 1024)
@@ -50,6 +50,7 @@ uint hash_grid_cell_lod(float3 pos, float3 camera_pos)
 struct VertexDescriptor
 {
     int3 pos; // quantized hit point
+    uint2 pos_packed;
     float3 dir_in; // incoming directin / "view" direction for hit point
     uint lod;
 
@@ -68,12 +69,16 @@ struct VertexDescriptor
         // quantize
         float cell_size = HASH_GRID_BASE_CELL_SIZE * float(1u << lod);
         #if 1
-        int3 pos_quant = int3(floor(pos / cell_size));
+        int3 pos_quant = int3(floor(pos * rcp(cell_size)));
         #else
         int3 pos_quant = int3(floor(pos * HASH_GRID_BASE_CELL_SIZE_INV)) >> lod;
         #endif
 
-        VertexDescriptor vert = { pos_quant, dir_in, lod };
+        // Pack xyz to 64 bits (x: 22 bits, y: 22 bits, z: 20 bits)
+        uint3 pos_u = asuint(pos_quant);
+        uint2 pos_packed = uint2(pos_u.x ^ (pos_u.y << 22), (pos_u.y >> 10) ^ (pos_u.z << 22));
+
+        VertexDescriptor vert = { pos_quant, pos_packed, dir_in, lod };
         return vert;
     }
 
@@ -81,20 +86,18 @@ struct VertexDescriptor
     uint hash()
     {
         // TODO try pcg3d16?
-        uint3 pos_u32 = asuint(pos);
-        uint hash = XXHash32::init(pos_u32.x).add(pos_u32.y).add(pos_u32.z).add(lod).eval();
+        uint hash = XXHash32::init(pos_packed.x).add(pos_packed.y).add(lod).eval();
         return hash & HASH_GRID_NUM_BUCKETS_BITMASK;
     }
 
     // Hash used for linear probing
     uint checksum()
     {
+        #if 1
         uint3 pos_u32 = asuint(pos);
-        #if 0
-        uint hash = pcg_hash(pos_u32.x + pcg_hash(pos_u32.y + pcg_hash(pos_u32.z)));
-        hash = pcg_hash(hash + lod);
+        uint hash = XXHash32::init(pos_u32.y).add(pos_u32.z).add(pos_u32.x).add(lod).eval();
         #else
-        uint hash = XXHash32::init(pos_u32.y).add(lod).add(pos_u32.z).add(pos_u32.x).eval();
+        uint hash = XXHash32::init(pos_packed.y).add(lod).add(pos_packed.x).eval();
         #endif
         // NOTE: zero is reserved to indicate empty cell
         return hash | 0x1;
@@ -110,16 +113,6 @@ struct HashGridCell
 {
     uint checksum; // "hash2" / "verification hash"
     float3 radiance;
-
-    static uint3 radiance_scale(float3 radiance, float weight)
-    {
-        return uint3(round(radiance * (4096.0 * weight)));
-    }
-
-    static float3 radiance_unscale(uint3 radiance, float weight)
-    {
-        return float3(radiance) / (4096.0 * weight);
-    }
 
     static HashGridCell empty() 
     {

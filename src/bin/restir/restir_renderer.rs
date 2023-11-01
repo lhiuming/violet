@@ -218,7 +218,6 @@ impl RestirRenderer {
         if self.clear_hash_grid_cache {
             clear_buffer(rd, rg, hg_cache.storage, "Clear HashGridCache Storage");
             clear_buffer(rd, rg, hg_cache.decay, "Clear HashGridCache Decay");
-            clear_buffer(rd, rg, hg_cache.query, "Clear HashGridCache Query");
             clear_buffer(
                 rd,
                 rg,
@@ -303,7 +302,6 @@ impl RestirRenderer {
                 HG_CACHE_MAX_NUM_QUERIES * HG_CACHE_QUERY_SIZE,
             ));
             let new_query_counter = rg.create_buffer(BufferDesc::compute(4));
-            clear_buffer(rd, rg, new_query, "Clear New HashGridCache Query Buffer");
             clear_buffer(
                 rd,
                 rg,
