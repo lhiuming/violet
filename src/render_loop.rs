@@ -4,6 +4,7 @@ use ash::vk;
 use glam::{Mat4, UVec2, Vec2, Vec3, Vec4, Vec4Swizzles};
 
 use crate::{
+    gpu_profiling::NamedProfiling,
     imgui,
     render_device::{Buffer, BufferDesc, RenderDevice},
 };
@@ -24,6 +25,12 @@ pub trait RenderLoop: Sized {
 
     fn ui(&mut self, _ui: &mut imgui::Ui) {}
 
+    fn print_stat(&self) {}
+
+    fn gpu_stat(&self) -> Option<&NamedProfiling> {
+        None
+    }
+
     fn render(
         &mut self,
         rd: &mut RenderDevice,
@@ -32,8 +39,6 @@ pub trait RenderLoop: Sized {
         view_info: &ViewInfo,
         imgui: Option<&imgui::ImGUIOuput>,
     );
-
-    fn print_stat(&self) {}
 }
 
 /*

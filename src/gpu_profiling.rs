@@ -129,16 +129,19 @@ impl ProfilingEntry {
         let frame_exists;
         if !self.records_ns.is_empty() {
             let latest_frame = self.records_ns.back().unwrap().0;
-            let new_frames = frame.saturating_sub(latest_frame);
+            // num of padding frames + the adding frame
+            let new_frames = frame
+                .saturating_sub(latest_frame)
+                .min(self.records_ns.capacity() as u32);
 
             // remove
-            if (self.records_ns.len() + new_frames as usize) > self.records_ns.capacity() {
-                for _ in 0..new_frames {
-                    let entry = self.records_ns.pop_front().unwrap();
-                    if entry.1 > 0 {
-                        self.sum_ns -= entry.1;
-                        self.non_zeros -= 1;
-                    }
+            let out_of_cap = (self.records_ns.len() + new_frames as usize)
+                .saturating_sub(self.records_ns.capacity());
+            for _ in 0..out_of_cap {
+                let entry = self.records_ns.pop_front().unwrap();
+                if entry.1 > 0 {
+                    self.sum_ns -= entry.1;
+                    self.non_zeros -= 1;
                 }
             }
 
@@ -167,8 +170,12 @@ impl ProfilingEntry {
         self.sum_ns += time_ns;
     }
 
+    pub fn name<'a>(&'a self) -> &'a str {
+        &self.name
+    }
+
     // (average time in ns, average frequency)
-    fn avg(&self, latest_frame: u32) -> (f64, f32) {
+    pub fn avg(&self, latest_frame: u32) -> (f64, f32) {
         let mut sum_ns = self.sum_ns;
         let mut count = self.non_zeros;
 
@@ -343,18 +350,27 @@ impl NamedProfiling {
         self.latest_ready_frame = latest_ready_frame.min(pending_frame_min.saturating_sub(1));
     }
 
-    pub fn sorted_entries<'a>(&'a self) -> EntryItertor<'a> {
-        let mut entry_indices: Vec<_> = (0..self.entries.len() as u32).collect();
-        entry_indices.sort_by_key(|entry_index| {
-            u64::MAX
-                - self.entries[*entry_index as usize]
-                    .avg(self.latest_ready_frame)
-                    .0 as u64
-        });
+    pub fn latest_ready_frame(&self) -> u32 {
+        self.latest_ready_frame
+    }
+
+    pub fn entries<'a>(&'a self, sorted: bool) -> EntryItertor<'a> {
+        let sorting = if sorted {
+            let mut entry_indices: Vec<_> = (0..self.entries.len() as u32).collect();
+            entry_indices.sort_by_key(|entry_index| {
+                u64::MAX
+                    - self.entries[*entry_index as usize]
+                        .avg(self.latest_ready_frame)
+                        .0 as u64
+            });
+            Some(entry_indices)
+        } else {
+            None
+        };
         EntryItertor {
             entries: &self.entries,
             index: 0,
-            sorting: entry_indices,
+            sorting,
         }
     }
 
@@ -364,7 +380,7 @@ impl NamedProfiling {
         let width = (width + 3) / 4 * 4;
         println!("GPU Profiling: ({} entries)", count);
         //for entry in self.entries.iter() {
-        for entry in self.sorted_entries() {
+        for entry in self.entries(true) {
             let (avg_time_ns, avg_freq) = entry.avg(self.latest_ready_frame);
             println!(
                 "\t{:>width$}: {:.4}ms ({:.2})",
@@ -379,18 +395,22 @@ impl NamedProfiling {
 pub struct EntryItertor<'a> {
     entries: &'a Vec<ProfilingEntry>,
     index: usize,
-    sorting: Vec<u32>,
+    sorting: Option<Vec<u32>>,
 }
 
 impl<'a> Iterator for EntryItertor<'a> {
     type Item = &'a ProfilingEntry;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.index >= self.sorting.len() {
+        if self.index >= self.entries.len() {
             return None;
         }
-        let curr = self.sorting[self.index];
+        let curr = if let Some(sorting) = &self.sorting {
+            sorting[self.index] as usize
+        } else {
+            self.index
+        };
         self.index += 1;
-        Some(&self.entries[curr as usize])
+        Some(&self.entries[curr])
     }
 }

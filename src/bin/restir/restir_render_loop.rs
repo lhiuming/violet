@@ -3,6 +3,7 @@ use glam::{UVec2, Vec3};
 
 use violet::{
     command_buffer::CommandBuffer,
+    gpu_profiling::NamedProfiling,
     imgui::{ImGUIOuput, Ui},
     render_device::{
         AccelerationStructure, Buffer, BufferDesc, RenderDevice, Texture, TextureDesc, TextureView,
@@ -178,6 +179,14 @@ impl RenderLoop for RestirRenderLoop {
             .unwrap()
             .pass_profiling
             .print();
+    }
+
+    fn gpu_stat<'a>(&'a self) -> Option<&'a NamedProfiling> {
+        if let Some(rgc) = self.render_graph_cache.as_ref() {
+            Some(&rgc.pass_profiling)
+        } else {
+            None
+        }
     }
 
     fn render(
