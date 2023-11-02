@@ -1916,7 +1916,7 @@ impl RenderGraphBuilder<'_> {
             let batch = self
                 .cache
                 .pass_profiling
-                .new_batch(self.passes.len() as u32 + 1);
+                .new_batch(self.passes.len() as u32 + 1, self.hack_frame_index);
             command_buffer.reset_queries(batch.pool(), batch.query(0).0, batch.size());
             batch.pool()
         };
