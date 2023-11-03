@@ -44,6 +44,13 @@ fn char_to_egui_key(char: u8) -> Option<Key> {
 impl ImGUI {
     pub fn new() -> Self {
         let egui_ctx = egui::Context::default();
+        // Setup style
+        let mut style = egui::Style::default();
+        style
+            .override_text_style
+            .replace(egui::TextStyle::Monospace);
+        style.visuals.window_shadow = epaint::Shadow::NONE;
+        egui_ctx.set_style(style);
         Self {
             egui_ctx,
             curr_pixels_per_point: 1.0,
@@ -132,11 +139,6 @@ impl ImGUI {
         add_ui: impl FnOnce(&egui::Context),
     ) -> ImGUIOuput {
         self.begin(self.gather_input(window_size, window));
-        let mut style = egui::Style::default();
-        style
-            .override_text_style
-            .replace(egui::TextStyle::Monospace);
-        self.egui_ctx.set_style(style);
         add_ui(&self.egui_ctx);
         self.end()
     }

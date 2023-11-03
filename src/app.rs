@@ -101,7 +101,7 @@ where
     // Add ImGUI
     let mut imgui = imgui::ImGUI::new();
     let mut show_gui = true;
-    let mut full_stat = true;
+    let mut full_stat = false;
 
     // Init camera
     // NOTE:
@@ -263,57 +263,60 @@ where
                 });
 
                 // Performance
-                imgui::Window::new("Perf.").show(ctx, |ui| {
-                    // shader debug
-                    let mut shader_debug = shaders.shader_debug();
-                    ui.toggle_value(&mut shader_debug, "shader_debug");
-                    shaders.set_shader_debug(shader_debug);
+                imgui::Window::new("Perf.")
+                    .default_open(false)
+                    .show(ctx, |ui| {
+                        // shader debug
+                        let mut shader_debug = shaders.shader_debug();
+                        ui.toggle_value(&mut shader_debug, "shader_debug");
+                        shaders.set_shader_debug(shader_debug);
 
-                    // stat
-                    if let Some(stat) = render_loop.gpu_stat() {
-                        ui.toggle_value(&mut full_stat, "full_stat");
+                        // stat
+                        if let Some(stat) = render_loop.gpu_stat() {
+                            ui.toggle_value(&mut full_stat, "full_stat");
 
-                        let hline_stroke =
-                            egui::Stroke::new(1.0, egui::Color32::from_rgb(160, 64, 224));
+                            let hline_stroke =
+                                egui::Stroke::new(1.0, egui::Color32::from_rgb(160, 64, 224));
 
-                        let latest_frame = stat.latest_ready_frame();
-                        let entries = stat.entries(false);
-                        let max_time_ns = entries
-                            .max_by_key(|e| e.avg(latest_frame).0 as u64)
-                            .map(|e| e.avg(latest_frame).0);
+                            let latest_frame = stat.latest_ready_frame();
+                            let entries = stat.entries(false);
+                            let max_time_ns = entries
+                                .max_by_key(|e| e.avg(latest_frame).0 as u64)
+                                .map(|e| e.avg(latest_frame).0);
 
-                        for entry in stat.entries(false) {
-                            let (avg_time_ns, avg_freq) = entry.avg(latest_frame);
-                            let avg_time_ms = avg_time_ns / 1_000_000.0;
-                            // skip
-                            if !full_stat {
-                                if (avg_time_ms < 0.005) || (avg_freq <= 0.0) {
-                                    continue;
+                            for entry in stat.entries(false) {
+                                let (avg_time_ns, avg_freq) = entry.avg(latest_frame);
+                                let avg_time_ms = avg_time_ns / 1_000_000.0;
+                                // skip
+                                if !full_stat {
+                                    if (avg_time_ms < 0.005) || (avg_freq <= 0.0) {
+                                        continue;
+                                    }
+                                }
+                                // Text
+                                ui.label(format!(
+                                    "{:>5.2} {} ({:.2})",
+                                    avg_time_ms,
+                                    entry.name(),
+                                    avg_freq
+                                ));
+                                // Under line (similar to Seperator)
+                                let percent = (avg_time_ns / max_time_ns.unwrap()) as f32;
+                                let available_space = ui.available_size_before_wrap();
+                                let size = egui::vec2(available_space.x * percent, 1.0);
+                                let (rect, response) =
+                                    ui.allocate_at_least(size, egui::Sense::hover());
+                                if ui.is_rect_visible(response.rect) {
+                                    let painter = ui.painter();
+                                    painter.hline(
+                                        rect.left()..=rect.right(),
+                                        painter.round_to_pixel(rect.center().y),
+                                        hline_stroke,
+                                    );
                                 }
                             }
-                            // Text
-                            ui.label(format!(
-                                "{:>5.2} {} ({:.2})",
-                                avg_time_ms,
-                                entry.name(),
-                                avg_freq
-                            ));
-                            // Under line (similar to Seperator)
-                            let percent = (avg_time_ns / max_time_ns.unwrap()) as f32;
-                            let available_space = ui.available_size_before_wrap();
-                            let size = egui::vec2(available_space.x * percent, 1.0);
-                            let (rect, response) = ui.allocate_at_least(size, egui::Sense::hover());
-                            if ui.is_rect_visible(response.rect) {
-                                let painter = ui.painter();
-                                painter.hline(
-                                    rect.left()..=rect.right(),
-                                    painter.round_to_pixel(rect.center().y),
-                                    hline_stroke,
-                                );
-                            }
                         }
-                    }
-                });
+                    });
             }))
         } else {
             None
