@@ -39,6 +39,45 @@ impl AllocBuffer {
     }
 }
 
+struct BufferCopiesBuilder {
+    staging_buffer: Buffer,
+    offset: u64,
+    alignemnt_mask: u64,
+    buffer_copies: Vec<vk::BufferCopy>,
+}
+
+impl BufferCopiesBuilder {
+    fn new(buffer: Buffer, alignment: u64) -> BufferCopiesBuilder {
+        assert!(alignment.is_power_of_two());
+        assert!(alignment >= 1);
+        BufferCopiesBuilder {
+            staging_buffer: buffer,
+            offset: 0,
+            buffer_copies: Vec::new(),
+            alignemnt_mask: alignment - 1,
+        }
+    }
+
+    fn alloc<T>(&mut self, count: usize, dst_offset: u64) -> &mut [T] {
+        let size = count as u64 * size_of::<T>() as u64;
+        assert!(self.offset + size <= self.staging_buffer.desc.size);
+        // new copy task
+        self.buffer_copies.push(vk::BufferCopy {
+            src_offset: self.offset,
+            dst_offset,
+            size,
+        });
+        // make host alice
+        let dst = unsafe {
+            let dst_ptr = self.staging_buffer.data.offset(self.offset as isize);
+            std::slice::from_raw_parts_mut(dst_ptr as *mut T, count)
+        };
+        // bump
+        self.offset += (size + self.alignemnt_mask) & !self.alignemnt_mask;
+        dst
+    }
+}
+
 // Struct for asset uploading to GPU
 pub struct UploadContext {
     pub command_pool: vk::CommandPool,
@@ -232,9 +271,9 @@ impl RenderScene {
                 size: ib_size,
                 usage: vk::BufferUsageFlags::INDEX_BUFFER
                     | vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_DST
                     | accel_struct_usage,
-                memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | vk::MemoryPropertyFlags::HOST_COHERENT, // TODO staing buffer
+                memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
             })
             .unwrap(),
         );
@@ -244,9 +283,10 @@ impl RenderScene {
         let vertex_buffer = AllocBuffer::new(
             rd.create_buffer(BufferDesc {
                 size: vb_size,
-                usage: vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER | accel_struct_usage,
-                memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | vk::MemoryPropertyFlags::HOST_COHERENT, // TODO staging buffer
+                usage: vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_DST
+                    | accel_struct_usage,
+                memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
             })
             .unwrap(),
         );
@@ -259,9 +299,8 @@ impl RenderScene {
         let material_param_buffer = rd
             .create_buffer(BufferDesc {
                 size: material_param_size * 1024,
-                usage: vk::BufferUsageFlags::STORAGE_BUFFER,
-                memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | vk::MemoryPropertyFlags::HOST_COHERENT, // TODO staging buffer
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
             })
             .unwrap();
 
@@ -270,9 +309,8 @@ impl RenderScene {
         let mesh_param_buffer = rd
             .create_buffer(BufferDesc {
                 size: mesh_param_size * 1024,
-                usage: vk::BufferUsageFlags::STORAGE_BUFFER,
-                memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
-                    | vk::MemoryPropertyFlags::HOST_COHERENT,
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
             })
             .unwrap();
 
@@ -427,7 +465,7 @@ impl RenderScene {
 
     pub fn add(&mut self, rd: &RenderDevice, model: &Model) {
         let upload_context = &mut self.upload_context;
-        //let material_texture = &mut self.material_texture;
+
         let index_buffer = &mut self.index_buffer;
         let vertex_buffer = &mut self.vertex_buffer;
 
@@ -457,18 +495,11 @@ impl RenderScene {
                 .unwrap();
 
             // Create staging buffer
-            let staging_buffer = rd
-                .create_buffer(BufferDesc {
-                    size: texel_count as u64 * 4,
-                    usage: vk::BufferUsageFlags::TRANSFER_SRC,
-                    memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
-                        | vk::MemoryPropertyFlags::HOST_COHERENT,
-                })
-                .unwrap();
+            let staging_buffer = upload_context.borrow_staging_buffer(rd, texel_count as u64 * 4);
 
             // Read to staging buffer
             let staging_slice = unsafe {
-                std::slice::from_raw_parts_mut(staging_buffer.data, texel_count as usize * 4)
+                std::slice::from_raw_parts_mut(staging_buffer.0.data, texel_count as usize * 4)
             };
             staging_slice.copy_from_slice(&image.data);
 
@@ -521,7 +552,7 @@ impl RenderScene {
                 unsafe {
                     rd.device.cmd_copy_buffer_to_image(
                         command_buffer,
-                        staging_buffer.handle,
+                        staging_buffer.0.handle,
                         texture.image,
                         dst_image_layout,
                         &regions,
@@ -551,6 +582,15 @@ impl RenderScene {
                         &[],
                         &[],
                         &[*barrier],
+                    );
+                }
+
+                // Return the staging buffer
+                unsafe {
+                    rd.device.cmd_set_event(
+                        command_buffer,
+                        staging_buffer.1,
+                        vk::PipelineStageFlags::TRANSFER,
                     );
                 }
             });
@@ -599,20 +639,53 @@ impl RenderScene {
         }
 
         // Upload new material params
-        unsafe {
+        {
             let param_size = std::mem::size_of::<MaterialParams>();
             let param_count = self.material_parmas.len() - material_index_offset as usize;
             let data_offset = material_index_offset as isize * param_size as isize;
             let data_size = param_size * param_count;
-            let src = std::slice::from_raw_parts(
-                (self.material_parmas.as_ptr() as *const u8).offset(data_offset),
-                data_size,
-            );
-            let dst = std::slice::from_raw_parts_mut(
-                self.material_param_buffer.data.offset(data_offset),
-                data_size,
-            );
-            dst.copy_from_slice(src);
+
+            let staging_buffer = upload_context.borrow_staging_buffer(rd, data_size as u64);
+
+            unsafe {
+                let src = std::slice::from_raw_parts(
+                    (self.material_parmas.as_ptr() as *const u8).offset(data_offset),
+                    data_size,
+                );
+                let dst = std::slice::from_raw_parts_mut(
+                    //self.material_param_buffer.data.offset(data_offset),
+                    staging_buffer.0.data,
+                    data_size,
+                );
+                dst.copy_from_slice(src);
+            }
+
+            // Transfer to global buffer
+            upload_context.immediate_submit(rd, |command_buffer| {
+                // Copy buffer
+                let buffer_copy = vk::BufferCopy::builder()
+                    .dst_offset(data_offset as u64)
+                    .size(data_size as u64)
+                    .size(data_size as u64)
+                    .build();
+                unsafe {
+                    rd.device.cmd_copy_buffer(
+                        command_buffer,
+                        staging_buffer.0.handle,
+                        self.material_param_buffer.handle,
+                        std::slice::from_ref(&buffer_copy),
+                    )
+                }
+
+                // Return the staging buffer
+                unsafe {
+                    rd.device.cmd_set_event(
+                        command_buffer,
+                        staging_buffer.1,
+                        vk::PipelineStageFlags::TRANSFER,
+                    );
+                }
+            })
         }
 
         // Add new texture view to bindless texture array
@@ -639,66 +712,109 @@ impl RenderScene {
             }
         }
 
+        let align_4 = |pos: usize| (pos + 3) & !3;
+
+        // Collect mesh data sizes
+        let mut total_index_bytesize = 0usize;
+        let mut total_vertex_bytesize = 0usize;
+        for mesh in &model.meshes {
+            let index_count = mesh.indicies.len();
+            total_index_bytesize += align_4(index_count * size_of::<u16>());
+            let vertex_count = mesh.positions.len();
+            let vertex_size = size_of::<[f32; 3]>() // position
+                + (mesh.normals.is_some() as usize) * size_of::<[f32; 3]>() // normal
+                + (mesh.texcoords.is_some() as usize) * size_of::<[f32; 2]>() // texcoords
+                + (mesh.tangents.is_some() as usize) * size_of::<[f32; 4]>() // tangent
+                ;
+            total_vertex_bytesize += vertex_count * vertex_size;
+        }
+
+        // Get staging buffer for all meshes
+        let index_staging_buffer =
+            upload_context.borrow_staging_buffer(rd, total_index_bytesize as u64);
+        let vertex_staging_buffer =
+            upload_context.borrow_staging_buffer(rd, total_vertex_bytesize as u64);
+        let mut index_copy_buider = BufferCopiesBuilder::new(index_staging_buffer.0, 4);
+        let mut vertex_copy_buider = BufferCopiesBuilder::new(vertex_staging_buffer.0, 4);
+
         let mut blas_geometries = Vec::<vk::AccelerationStructureGeometryKHR>::new();
         let mut blas_range_infos = Vec::<vk::AccelerationStructureBuildRangeInfoKHR>::new();
         let mut max_primitive_counts = Vec::<u32>::new(); // or blas_primitive_counts, since the scratch buffer is allocated for this blas exclusively
         let mesh_index_offset = self.mesh_params.len();
         for (material_index, mesh) in model.meshes.iter().enumerate() {
             // Upload indices
-            let index_offset;
+            let index_count = mesh.indicies.len();
+            let index_offset_by_u16;
             let index_offset_bytes;
-            let index_count;
             {
-                index_count = mesh.indicies.len() as u32;
-                let (dst, offset) = index_buffer.alloc(index_count);
-                index_offset = offset / 2;
-                dst.copy_from_slice(&mesh.indicies);
+                // allocate
+                let (_, offset) = index_buffer.alloc::<u16>(index_count as u32);
                 index_offset_bytes = offset;
+                index_offset_by_u16 = offset / 2;
+                // copy
+                let dst = index_copy_buider.alloc::<u16>(index_count, offset as u64);
+                dst.copy_from_slice(&mesh.indicies);
             }
             // Upload position
-            let positions_offset;
+            let positions_offset_by_f32;
             let positions_offset_bytes;
             {
-                let (dst, offset) = vertex_buffer.alloc::<[f32; 3]>(mesh.positions.len() as u32);
-                positions_offset = offset / 4;
-                dst.copy_from_slice(&mesh.positions);
+                // alloc
+                let count = mesh.positions.len();
+                let (_, offset) = vertex_buffer.alloc::<[f32; 3]>(count as u32);
+                positions_offset_by_f32 = offset / 4;
                 positions_offset_bytes = offset;
+                // copy
+                let dst = vertex_copy_buider.alloc::<[f32; 3]>(count, offset as u64);
+                dst.copy_from_slice(&mesh.positions);
             }
             // Upload normal
-            let normals_offset;
+            let normals_offset_by_f32;
             if let Some(normals) = &mesh.normals {
-                let (dst, offset) = vertex_buffer.alloc::<[f32; 3]>(normals.len() as u32);
-                normals_offset = offset / 4;
+                // alloc
+                let count = normals.len();
+                let (_, offset) = vertex_buffer.alloc::<[f32; 3]>(count as u32);
+                normals_offset_by_f32 = offset / 4;
+                // copy
+                let dst = vertex_copy_buider.alloc::<[f32; 3]>(count, offset as u64);
                 dst.copy_from_slice(&normals);
             } else {
-                normals_offset = u32::MAX;
+                normals_offset_by_f32 = u32::MAX;
             }
             // Upload texcoords
-            let texcoords_offset;
+            let texcoords_offset_by_f32;
             if let Some(texcoords) = &mesh.texcoords {
-                let (dst, offset) = vertex_buffer.alloc::<[f32; 2]>(texcoords.len() as u32);
-                texcoords_offset = offset / 4;
+                // alloc
+                let count = texcoords.len();
+                let (_, offset) = vertex_buffer.alloc::<[f32; 2]>(count as u32);
+                texcoords_offset_by_f32 = offset / 4;
+                // copy
+                let dst = vertex_copy_buider.alloc::<[f32; 2]>(count, offset as u64);
                 dst.copy_from_slice(&texcoords);
             } else {
-                texcoords_offset = u32::MAX;
+                texcoords_offset_by_f32 = u32::MAX;
             }
             // Upload tangents
-            let tangents_offset;
+            let tangents_offset_by_f32;
             if let Some(tangents) = &mesh.tangents {
-                let (dst, offset) = vertex_buffer.alloc::<[f32; 4]>(tangents.len() as u32);
-                tangents_offset = offset / 4;
+                // alloc
+                let count = tangents.len();
+                let (_, offset) = vertex_buffer.alloc::<[f32; 4]>(count as u32);
+                tangents_offset_by_f32 = offset / 4;
+                // copy
+                let dst = vertex_copy_buider.alloc::<[f32; 4]>(count, offset as u64);
                 dst.copy_from_slice(&tangents);
             } else {
-                tangents_offset = u32::MAX;
+                tangents_offset_by_f32 = u32::MAX;
             }
 
             self.mesh_params.push(MeshParams {
-                index_offset,
-                index_count,
-                positions_offset,
-                normals_offset,
-                texcoords_offset,
-                tangents_offset,
+                index_offset: index_offset_by_u16,
+                index_count: index_count as u32,
+                positions_offset: positions_offset_by_f32,
+                normals_offset: normals_offset_by_f32,
+                texcoords_offset: texcoords_offset_by_f32,
+                tangents_offset: tangents_offset_by_f32,
                 material_index: material_index_offset + material_index as u32,
                 pad: 0,
             });
@@ -709,7 +825,7 @@ impl RenderScene {
 
             // Collect BLAS info //
 
-            let triangle_count = index_count / 3;
+            let triangle_count = (index_count / 3) as u32;
 
             // TODO assert index type
             let vertex_data = vk::DeviceOrHostAddressConstKHR {
@@ -747,21 +863,82 @@ impl RenderScene {
             max_primitive_counts.push(triangle_count);
         }
 
+        // Transfer mesh data to global buffer
+        upload_context.immediate_submit(rd, |command_buffer| {
+            // index
+            unsafe {
+                rd.device.cmd_copy_buffer(
+                    command_buffer,
+                    index_staging_buffer.0.handle,
+                    index_buffer.buffer.handle,
+                    &index_copy_buider.buffer_copies,
+                );
+            }
+            // vertex
+            unsafe {
+                rd.device.cmd_copy_buffer(
+                    command_buffer,
+                    vertex_staging_buffer.0.handle,
+                    vertex_buffer.buffer.handle,
+                    &vertex_copy_buider.buffer_copies,
+                );
+            }
+            // return staging buffers
+            unsafe {
+                rd.device.cmd_set_event(
+                    command_buffer,
+                    index_staging_buffer.1,
+                    vk::PipelineStageFlags::TRANSFER,
+                );
+                rd.device.cmd_set_event(
+                    command_buffer,
+                    vertex_staging_buffer.1,
+                    vk::PipelineStageFlags::TRANSFER,
+                );
+            }
+        });
+
         // Upload new mesh params
-        unsafe {
+        {
             let param_size = std::mem::size_of::<MeshParams>();
             let param_count = self.mesh_params.len() - mesh_index_offset;
-            let data_offset = mesh_index_offset as isize * param_size as isize;
+            let data_offset = mesh_index_offset as usize * param_size;
             let data_size = param_size * param_count;
-            let src = std::slice::from_raw_parts(
-                (self.mesh_params.as_ptr() as *const u8).offset(data_offset),
-                data_size,
-            );
-            let dst = std::slice::from_raw_parts_mut(
-                self.mesh_param_buffer.data.offset(data_offset),
-                data_size,
-            );
-            dst.copy_from_slice(src);
+
+            let staging_buffer = upload_context.borrow_staging_buffer(rd, data_size as u64);
+
+            unsafe {
+                let src = std::slice::from_raw_parts(
+                    (self.mesh_params.as_ptr() as *const u8).offset(data_offset as isize),
+                    data_size,
+                );
+                let dst = std::slice::from_raw_parts_mut(staging_buffer.0.data, data_size);
+                dst.copy_from_slice(src);
+            }
+
+            upload_context.immediate_submit(rd, |command_buffer| {
+                let buffer_copy = vk::BufferCopy {
+                    src_offset: 0,
+                    dst_offset: data_offset as u64,
+                    size: data_size as u64,
+                };
+                unsafe {
+                    rd.device.cmd_copy_buffer(
+                        command_buffer,
+                        staging_buffer.0.handle,
+                        self.mesh_param_buffer.handle,
+                        slice::from_ref(&buffer_copy),
+                    );
+                }
+
+                unsafe {
+                    rd.device.cmd_set_event(
+                        command_buffer,
+                        staging_buffer.1,
+                        vk::PipelineStageFlags::TRANSFER,
+                    );
+                }
+            })
         }
 
         if !rd.support_raytracing {
@@ -839,6 +1016,8 @@ impl RenderScene {
                 };
             });
 
+            rd.destroy_buffer(scratch_buffer);
+
             self.mesh_bottom_level_accel_structs.push(accel_struct);
         }
     }
@@ -855,7 +1034,8 @@ impl RenderScene {
         let instance_buffer = rd
             .create_buffer(BufferDesc {
                 size: (size_of::<vk::AccelerationStructureInstanceKHR>() * num_blas) as u64,
-                usage: vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                usage: vk::BufferUsageFlags::TRANSFER_DST
+                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
                     | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
                 memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
                     | vk::MemoryPropertyFlags::HOST_COHERENT,
@@ -985,6 +1165,9 @@ impl RenderScene {
                 )
             };
         });
+
+        rd.destroy_buffer(instance_buffer);
+        rd.destroy_buffer(scratch_buffer);
 
         self.scene_top_level_accel_struct.replace(accel_struct);
 
