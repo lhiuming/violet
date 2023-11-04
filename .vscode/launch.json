@@ -12,6 +12,8 @@
 			"program": "${workspaceFolder}/target/debug/restir.exe",
 			"args": [
 				"./assets/Sponza/Sponza.gltf",
+				"--camera-preset",
+				"1.8,3.5,2.0,-75.0,0.0,6.0,-0.35,5.0,-80.0,-16.0,8.5,0.5,0.15,-80.0,30.0",
 			],
 			"stopAtEntry": false,
 			"cwd": "${workspaceFolder}",

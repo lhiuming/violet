@@ -23,6 +23,8 @@ glam = "0.24"
 renderdoc-sys = "0.7"
 # ImGUI 
 egui = "0.22"
+# CLI args parsing 
+clap = { version = "4.4.7", features = ["derive"] }
 
 [dependencies.windows-sys]
 version = "0.28.0"
