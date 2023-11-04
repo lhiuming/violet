@@ -15,7 +15,16 @@
 			],
 			"stopAtEntry": false,
 			"cwd": "${workspaceFolder}",
-			"environment": [],
+			"environment": [
+				{
+					"name": "VIOLET_BREAKPOINT",
+					"value": "1"
+				},
+				{
+					"name": "VIOLET_VALIDATION_LAYER",
+					"value": "1"
+				},
+			],
 			"console": "integratedTerminal"
 		},
 		{

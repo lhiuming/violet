@@ -49,6 +49,11 @@ impl super::RenderDevice {
         let instance = {
             let app_info = vk::ApplicationInfo::builder().api_version(vk::API_VERSION_1_3);
 
+            let enable_validation_layer = match std::env::var_os("VIOLET_VALIDATION_LAYER") {
+                Some(val) => val != "0",
+                None => false,
+            };
+
             let validation_layer_name =
                 CStr::from_bytes_with_nul(b"VK_LAYER_KHRONOS_validation\0").unwrap();
             let layer_names = [
@@ -63,7 +68,7 @@ impl super::RenderDevice {
 
             let create_info = vk::InstanceCreateInfo::builder()
                 .application_info(&app_info)
-                .enabled_layer_names(&layer_names)
+                .enabled_layer_names(&layer_names[..enable_validation_layer as usize])
                 .enabled_extension_names(&ext_names_raw);
 
             print!("Vulkan: creating instance ... ");

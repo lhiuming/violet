@@ -8,17 +8,14 @@
 				"$rustc",
 				"$rust-panic"
 			],
-			"group": {
-				"kind": "build",
-				"isDefault": true
-			},
+			"group": "build",
 			"label": "rust: cargo build"
 		},
 		{
 			"type": "cargo",
 			"command": "+nightly",
 			"args": [
-				"build",
+				"build"
 			],
 			"problemMatcher": [
 				"$rustc",
@@ -26,7 +23,7 @@
 			],
 			"group": {
 				"kind": "build",
-				"isDefault": false
+				"isDefault": true
 			},
 			"label": "rust: cargo build nightly"
 		}

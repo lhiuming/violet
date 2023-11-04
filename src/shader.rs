@@ -590,6 +590,8 @@ impl ShaderLoader {
             "-spirv",
             // Warning as Error
             "-WX",
+            // Embed debug info (symbols for debugging and profiling)
+            "-Zi",
             // NOTE: requires Google extention in vulkan
             //"-fspv-reflect",
             // Enable Raytracing ("Vulkan 1.1 with SPIR-V 1.4 is required for Raytracing" is printed by DXC)
@@ -598,8 +600,6 @@ impl ShaderLoader {
         if self.shader_debug {
             // Disable Optimizations
             args.push("-Od");
-            // Debug Info
-            args.push("-Zi");
         } else {
             // All Optimizations
             args.push("-O3");

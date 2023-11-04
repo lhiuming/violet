@@ -2,6 +2,8 @@ use std::borrow::Cow;
 use std::ffi::CStr;
 use std::os::raw::c_void;
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use ash::extensions::ext;
 use ash::vk;
 
@@ -52,8 +54,28 @@ pub(super) unsafe extern "system" fn vulkan_debug_report_callback(
     // Allow break on error
     // TODO insert command line option
     if message_severity >= vk::DebugUtilsMessageSeverityFlagsEXT::ERROR {
-        unsafe {
-            std::intrinsics::breakpoint();
+        // Mocking the implementation of Backtrace::enabled();
+        let breakpoint_enabled = {
+            static BREAKPOINT_ENABLED: AtomicUsize = AtomicUsize::new(0);
+            match BREAKPOINT_ENABLED.load(Ordering::Relaxed) {
+                0 => {
+                    let enabled = match std::env::var("VIOLET_BREAKPOINT") {
+                        Ok(val) => val != "0",
+                        Err(_) => false,
+                    };
+                    BREAKPOINT_ENABLED.store(enabled as usize + 1, Ordering::Relaxed);
+                    enabled
+                }
+                1 => false,
+                _ => true,
+            }
+        };
+        if breakpoint_enabled {
+            unsafe {
+                std::intrinsics::breakpoint();
+            }
+        } else {
+            println!("Backtrace:\n{}", std::backtrace::Backtrace::capture());
         }
     }
 
