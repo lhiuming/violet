@@ -174,6 +174,8 @@ impl RestirRenderer {
         scene: &'render RenderScene,
         input: SceneRendererInput<'_>,
     ) -> RGHandle<Texture> {
+        puffin::profile_function!();
+
         let frame_index = input.frame_index;
         let main_size = input.main_size;
         let default_res = input.default_res;

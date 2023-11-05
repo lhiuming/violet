@@ -443,7 +443,9 @@ where
                 delta_time_sum.as_secs_f64() * 1000.0 / frame_durations.len().max(1) as f64;
             println!("MainLoop: {}ms", avg_delta_time_ms);
 
-            render_loop.print_stat();
+            if let Some(stat) = render_loop.gpu_stat() {
+                stat.print();
+            }
         }
 
         // End Profiler Frame

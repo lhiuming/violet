@@ -140,6 +140,8 @@ impl ImGUIPass {
         imgui: &ImGUIOuput,
         clear: Option<vk::ClearColorValue>,
     ) {
+        puffin::profile_function!();
+
         // TODO calculate this properly
         let (index_data_size, vertex_data_size) = {
             let mut index_data_size = 0;
@@ -389,6 +391,7 @@ impl ImGUIPass {
         // Copy from staging buffer to rendering buffers/textures
         // TODO dont need to wait submit done; just sync before the ui draw
         if (index_data_size > 0) || (vertex_data_size > 0) || (copy_buffer_to_images.len() > 0) {
+            puffin::profile_scope!("imgui_submit_transfer");
             upload_context.immediate_submit(rd, |command_buffer| {
                 // image transition (for transfer)
                 if copy_buffer_to_images.len() > 0 {

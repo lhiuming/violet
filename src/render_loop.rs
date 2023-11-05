@@ -25,8 +25,6 @@ pub trait RenderLoop: Sized {
 
     fn ui(&mut self, _ui: &mut imgui::Ui) {}
 
-    fn print_stat(&self) {}
-
     fn gpu_stat(&self) -> Option<&NamedProfiling> {
         None
     }
@@ -390,13 +388,8 @@ impl StreamLinedFrameResource {
     }
 
     pub fn acquire_next_swapchain_image(&self, rd: &RenderDevice) -> u32 {
-        self.acquire_next_swapchain_image_with_duration(rd).0
-    }
+        puffin::profile_function!();
 
-    pub fn acquire_next_swapchain_image_with_duration(
-        &self,
-        rd: &RenderDevice,
-    ) -> (u32, std::time::Duration) {
         // temporary fence for this image
         let swapchain_ready_fence = self.present_finished_fences[self.render_index as usize];
 
@@ -414,7 +407,7 @@ impl StreamLinedFrameResource {
             println!("RenderDevice: acquire next image takes {} us!", elapsed_us);
         }
 
-        (index, elapsed)
+        index
     }
 
     fn delay_release_buffer(&mut self, buffer: Buffer) {
@@ -531,21 +524,23 @@ impl StreamLinedFrameResource {
         wait_begin.elapsed()
     }
 
-    pub fn wait_and_submit_and_present(
-        &self,
-        rd: &RenderDevice,
-        image_index: u32,
-    ) -> (std::time::Duration, std::time::Duration) {
+    pub fn wait_and_submit_and_present(&self, rd: &RenderDevice, image_index: u32) {
+        puffin::profile_function!();
+
         // Wait for swapchain image ready (before submit the GPU works modifying the image)
-        let wait_duration = {
+        {
+            puffin::profile_scope!("WaitSwapchain");
+
             // the same temporary fence in acquire_next_swapchain_image
             let swapchain_ready_fence = self.present_finished_fences[self.render_index as usize];
-            Self::wait_and_reset_fence(rd, swapchain_ready_fence)
-        };
+            Self::wait_and_reset_fence(rd, swapchain_ready_fence);
+        }
 
         // Submit the command buffer
         let present_ready = self.present_ready_semaphores[self.render_index as usize];
         {
+            puffin::profile_scope!("QueueSubmit");
+
             let command_buffer = self.command_buffers[self.render_index as usize];
             let submit_info = vk::SubmitInfo::builder()
                 .command_buffers(slice::from_ref(&command_buffer))
@@ -560,7 +555,9 @@ impl StreamLinedFrameResource {
         }
 
         // Present
-        let present_duration = {
+        {
+            puffin::profile_scope!("QueuePresent");
+
             let present_begin = std::time::Instant::now();
 
             let present_info = vk::PresentInfoKHR::builder()
@@ -572,8 +569,6 @@ impl StreamLinedFrameResource {
 
             present_begin.elapsed()
         };
-
-        (wait_duration, present_duration)
     }
 }
 

@@ -100,14 +100,6 @@ pub struct RestirRenderLoop {
     imgui_pass: ImGUIPass,
 
     upload_context: UploadContext,
-
-    last_start_time: Option<std::time::Instant>,
-    total_frame_duration: std::time::Duration,
-    total_frame_count: u32,
-    total_acquire_duration: std::time::Duration,
-    total_wait_duration: std::time::Duration,
-    total_present_duration: std::time::Duration,
-    last_ui_duration: std::time::Duration,
 }
 
 impl RenderLoop for RestirRenderLoop {
@@ -130,14 +122,6 @@ impl RenderLoop for RestirRenderLoop {
             imgui_pass: ImGUIPass::new(rd),
 
             upload_context: UploadContext::new(rd),
-
-            last_start_time: None,
-            total_frame_duration: std::time::Duration::ZERO,
-            total_frame_count: 0,
-            total_acquire_duration: std::time::Duration::ZERO,
-            total_wait_duration: std::time::Duration::ZERO,
-            total_present_duration: std::time::Duration::ZERO,
-            last_ui_duration: std::time::Duration::ZERO,
         })
     }
 
@@ -162,25 +146,6 @@ impl RenderLoop for RestirRenderLoop {
         });
     }
 
-    fn print_stat(&self) {
-        println!("CPU Profiling:");
-        let avg_ms = |name: &str, dur: std::time::Duration| {
-            let ms = dur.as_secs_f64() * 1000.0 / self.total_frame_count as f64;
-            println!("\t{:>16}: {:.4}ms", name, ms);
-        };
-        avg_ms("[Render]", self.total_frame_duration);
-        avg_ms("Acq. Swap.", self.total_acquire_duration);
-        avg_ms("Wait Swap.", self.total_wait_duration);
-        avg_ms("Present", self.total_present_duration);
-        avg_ms("UI (last).", self.last_ui_duration);
-
-        self.render_graph_cache
-            .as_ref()
-            .unwrap()
-            .pass_profiling
-            .print();
-    }
-
     fn gpu_stat<'a>(&'a self) -> Option<&'a NamedProfiling> {
         if let Some(rgc) = self.render_graph_cache.as_ref() {
             Some(&rgc.pass_profiling)
@@ -200,16 +165,6 @@ impl RenderLoop for RestirRenderLoop {
         puffin::profile_function!();
 
         self.stream_lined.advance_render_index();
-
-        // Update cpu profiling
-        {
-            let now = std::time::Instant::now();
-            if let Some(last) = self.last_start_time {
-                self.total_frame_duration += now - last;
-                self.total_frame_count += 1;
-            }
-            self.last_start_time = Some(now);
-        }
 
         // Shader config
         // TODO wrap into a ShaderPool/ShaderLibrary?
@@ -288,10 +243,7 @@ impl RenderLoop for RestirRenderLoop {
         };
 
         // Wait swapchain image
-        let (swapchain_image_index, acquire_swapchain_duratiaon) = self
-            .stream_lined
-            .acquire_next_swapchain_image_with_duration(rd);
-        self.total_acquire_duration += acquire_swapchain_duratiaon;
+        let swapchain_image_index = self.stream_lined.acquire_next_swapchain_image(rd);
         let present_target = (
             rg.register_texture(rd.swapchain.textures[swapchain_image_index as usize]),
             rg.register_texture_view(rd.swapchain.texture_views[swapchain_image_index as usize]),
@@ -314,7 +266,6 @@ impl RenderLoop for RestirRenderLoop {
 
         // Pass: UI
         if let Some(imgui) = imgui {
-            let ui_time = std::time::Instant::now();
             self.imgui_pass.add(
                 &mut rg,
                 rd,
@@ -324,7 +275,6 @@ impl RenderLoop for RestirRenderLoop {
                 imgui,
                 None,
             );
-            self.last_ui_duration = ui_time.elapsed();
         }
 
         // Pass: Output
@@ -371,11 +321,8 @@ impl RenderLoop for RestirRenderLoop {
         self.render_graph_cache.replace(rg.done());
 
         // Submit, Present and stuff
-        let (wait_duration, present_duration) = self
-            .stream_lined
+        self.stream_lined
             .wait_and_submit_and_present(rd, swapchain_image_index);
-        self.total_wait_duration += wait_duration;
-        self.total_present_duration += present_duration;
 
         self.frame_index += 1;
     }

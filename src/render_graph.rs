@@ -1904,6 +1904,8 @@ impl RenderGraphBuilder<'_> {
         command_buffer: &CommandBuffer,
         shaders: &mut Shaders,
     ) {
+        puffin::profile_function!();
+
         let mut exec_context = RenderGraphExecuteContext::new();
 
         command_buffer.insert_label(&CString::new("RenderGraph Begin").unwrap(), None);
