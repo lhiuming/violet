@@ -85,6 +85,7 @@ pub struct UploadContext {
     pub finished_fences: Vec<vk::Fence>,
     pub staging_buffers: Vec<Buffer>,
     pub staging_finished: Vec<vk::Event>,
+    pub general_events: Vec<(vk::Event, vk::Event)>,
 }
 
 impl UploadContext {
@@ -96,6 +97,7 @@ impl UploadContext {
             finished_fences: Vec::new(),
             staging_buffers: Vec::new(),
             staging_finished: Vec::new(),
+            general_events: Vec::new(),
         }
     }
 
@@ -151,6 +153,31 @@ impl UploadContext {
         }
     }
 
+    pub fn immediate_submit_no_wait<F>(&mut self, rd: &RenderDevice, f: F)
+    where
+        F: FnOnce(vk::CommandBuffer),
+    {
+        // TODO we will need semaphore to sync with rendering which will depends on operation here
+        let device = &rd.device;
+        let (command_buffer, finished_fence) = self.pick_command_buffer(rd);
+
+        let begin_info = vk::CommandBufferBeginInfo::builder()
+            .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+        unsafe { device.begin_command_buffer(command_buffer, &begin_info) }.unwrap();
+
+        f(command_buffer);
+
+        unsafe { device.end_command_buffer(command_buffer) }.unwrap();
+
+        let command_buffers = [command_buffer];
+        let submit_info = vk::SubmitInfo::builder().command_buffers(&command_buffers);
+        unsafe {
+            device
+                .queue_submit(rd.gfx_queue, &[*submit_info], finished_fence)
+                .unwrap();
+        }
+    }
+
     // Signaled the event to return the fence back to the pool
     pub fn borrow_staging_buffer(
         &mut self,
@@ -186,6 +213,27 @@ impl UploadContext {
         self.staging_buffers.push(buffer);
         self.staging_finished.push(event);
         (buffer, event)
+    }
+
+    // Borrow an general event object, with a auxilary event to signal when it's ready to be reused
+    pub fn borrow_event(&mut self, rd: &RenderDevice) -> (vk::Event, vk::Event) {
+        // Find reusable one
+        for (event, recycle) in self.general_events.iter() {
+            let can_recycle = unsafe { rd.device.get_event_status(*recycle).unwrap() };
+            if can_recycle {
+                unsafe {
+                    rd.device.reset_event(*event).unwrap();
+                    rd.device.reset_event(*recycle).unwrap();
+                }
+                return (*event, *recycle);
+            }
+        }
+
+        // Create New
+        let event = rd.create_event();
+        let recycle_state = rd.create_event();
+
+        (event, recycle_state)
     }
 }
 

@@ -54,6 +54,8 @@ impl StencilOps {
 }
 
 impl CommandBuffer {
+    // Synchronization //
+
     pub fn transition_image_layout(
         &self,
         image: vk::Image,
@@ -103,6 +105,8 @@ impl CommandBuffer {
             );
         }
     }
+
+    // Draw and Dispatch //
 
     pub fn dispatch(&self, group_count_x: u32, group_count_y: u32, group_count_z: u32) {
         unsafe {

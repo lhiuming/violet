@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::slice;
 
 use ash::vk;
 use glam::Vec2;
@@ -388,11 +389,13 @@ impl ImGUIPass {
         let index_buffer = self.index_buffer.unwrap();
         let vertex_buffer = self.vertex_buffer.unwrap();
 
+        // Event to sync transfer and ui draws
+        let transfer_finished_event = upload_context.borrow_event(rd);
+
         // Copy from staging buffer to rendering buffers/textures
-        // TODO dont need to wait submit done; just sync before the ui draw
         if (index_data_size > 0) || (vertex_data_size > 0) || (copy_buffer_to_images.len() > 0) {
             puffin::profile_scope!("imgui_submit_transfer");
-            upload_context.immediate_submit(rd, |command_buffer| {
+            upload_context.immediate_submit_no_wait(rd, |command_buffer| {
                 // image transition (for transfer)
                 if copy_buffer_to_images.len() > 0 {
                     let mut image_memory_barriers = Vec::new();
@@ -551,6 +554,15 @@ impl ImGUIPass {
                         vk::PipelineStageFlags::TRANSFER,
                     );
                 }
+
+                // Signal transfer-is-finished
+                unsafe {
+                    rd.device.cmd_set_event(
+                        command_buffer,
+                        transfer_finished_event.0,
+                        vk::PipelineStageFlags::TRANSFER,
+                    );
+                }
             });
         }
 
@@ -580,6 +592,33 @@ impl ImGUIPass {
                 }])
                 .blend_enabled(true)
                 .buffer("vertex_buffer", rg_vertex_buffer)
+                .pre_render(move |cb, _pipeline| {
+                    // Wait for transfer finished
+                    unsafe {
+                        let memory_barrier = vk::MemoryBarrier::builder()
+                            .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                            .dst_access_mask(
+                                vk::AccessFlags::SHADER_READ | vk::AccessFlags::INDEX_READ,
+                            );
+                        cb.device.cmd_wait_events(
+                            cb.command_buffer,
+                            slice::from_ref(&transfer_finished_event.0),
+                            vk::PipelineStageFlags::TRANSFER,
+                            vk::PipelineStageFlags::VERTEX_INPUT // index buffer
+                            | vk::PipelineStageFlags::VERTEX_SHADER // vertex buffer
+                            | vk::PipelineStageFlags::FRAGMENT_SHADER, // texture
+                            slice::from_ref(&memory_barrier),
+                            &[],
+                            &[],
+                        );
+                        // Return the borrowed event
+                        cb.device.cmd_set_event(
+                            cb.command_buffer,
+                            transfer_finished_event.1,
+                            vk::PipelineStageFlags::BOTTOM_OF_PIPE,
+                        );
+                    }
+                })
                 .render(move |cb, pipeline| {
                     // TODO make into gfx config
                     cb.set_depth_test_enable(false);
@@ -626,6 +665,7 @@ impl ImGUIPass {
                     }
 
                     // TODO should block further GPU mut to the buffers and textures..
+                    // e.g. block later transfer using submit info dst_stage_mask?
                 });
         }
     }

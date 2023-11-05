@@ -220,6 +220,7 @@ pub struct RenderPass<'render> {
     rw_texel_buffers: Vec<(&'static str, RGHandle<BufferView>)>,
     push_constants: PushConstantsBuilder,
     set_layout_override: Option<(u32, vk::DescriptorSetLayout)>,
+    pre_render: Option<Box<dyn 'render + FnOnce(&CommandBuffer, &Pipeline)>>,
     render: Option<Box<dyn 'render + FnOnce(&CommandBuffer, &Pipeline)>>,
 }
 
@@ -237,6 +238,7 @@ impl RenderPass<'_> {
             rw_texel_buffers: Vec::new(),
             push_constants: PushConstantsBuilder::new(),
             set_layout_override: None,
+            pre_render: None,
             render: None,
         }
     }
@@ -329,6 +331,15 @@ pub trait PassBuilderTrait<'render>: PrivatePassBuilderTrait<'render> {
         self.inner()
             .set_layout_override
             .replace((index, set_layout));
+        self
+    }
+
+    // Pre-Render function, call before the render pass instance
+    fn pre_render<F>(&mut self, f: F) -> &mut Self
+    where
+        F: 'render + FnOnce(&CommandBuffer, &Pipeline),
+    {
+        self.inner().pre_render = Some(Box::new(f));
         self
     }
 
@@ -2114,11 +2125,23 @@ impl RenderGraphBuilder<'_> {
 
         for pass_index in 0..self.passes.len() {
             // take the FnOnce callback before unmutable reference
+            let pre_render = self.passes[pass_index].pre_render.take();
             let render = self.passes[pass_index].render.take();
 
             let pass = &self.passes[pass_index];
 
             command_buffer.begin_label(&CString::new(pass.name.clone()).unwrap(), None);
+
+            let pipeline = shaders.get_pipeline(exec_context.pipelines[pass_index]);
+
+            // Some custom pre-render callback, to do external synchronization, etc.
+            if let Some(pre_render) = pre_render {
+                if let Some(pipeline) = pipeline {
+                    pre_render(command_buffer, pipeline);
+                } else {
+                    println!("Error[RenderGraph]: pre_render callback is ignored because not valid pipeline.");
+                }
+            }
 
             // TODO analysis of the DAG and sync properly
             self.ad_hoc_transition(command_buffer, &mut exec_context, pass_index as u32);
@@ -2128,8 +2151,6 @@ impl RenderGraphBuilder<'_> {
             if is_graphic {
                 self.begin_graphics(&exec_context, command_buffer, pass);
             }
-
-            let pipeline = shaders.get_pipeline(exec_context.pipelines[pass_index]);
 
             // Bind pipeline (if set)
             if let Some(pipeline) = pipeline {
