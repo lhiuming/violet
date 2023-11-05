@@ -22,9 +22,12 @@ glam = "0.24"
 # Debugging
 renderdoc-sys = "0.7"
 # ImGUI 
-egui = "0.22"
+egui = "0.23"
 # CLI args parsing 
 clap = { version = "4.4.7", features = ["derive"] }
+# Simple In-Game CPU profiling
+puffin = "0.17"
+puffin_egui = "0.23"
 
 [dependencies.windows-sys]
 version = "0.28.0"

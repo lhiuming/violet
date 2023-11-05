@@ -1,4 +1,5 @@
 use std::any::type_name;
+use std::collections::VecDeque;
 use std::f32::consts::PI;
 use std::path::Path;
 
@@ -57,6 +58,10 @@ struct Args {
     #[arg(long, default_value_t = false)]
     renderdoc: bool,
 
+    /// Enable in-game Profiler or not
+    #[arg(long, default_value_t = false)]
+    profiler: bool,
+
     /// Camera parameter presets (position Vec3 and angle Vec2)
     #[arg(long, num_args = 0..=45, value_delimiter = ',')]
     camera_preset: Vec<f32>,
@@ -113,11 +118,15 @@ where
 
     println!("Hello, rusty world!");
 
+    // Load RenderDoc
     let rdoc = if args.renderdoc {
         renderdoc::RenderDoc::new()
     } else {
         None
     };
+
+    // Enable in-game Profiler
+    puffin::set_scopes_on(args.profiler);
 
     // Create a system window
     // TODO implement Drop for Window
@@ -165,15 +174,20 @@ where
     // Init Camera
     static CAMERA_INIT_POS: Vec3 = Vec3::new(0.0, -4.0, 2.0);
     let mut camera = Camera::from_pos_angle(CAMERA_INIT_POS, Vec2::ZERO);
-    let mut prev_time = std::time::Instant::now();
 
     // Init sun
     let mut sun_dir_theta = -0.271f32;
     let mut sun_dir_phi = 0.524f32;
 
+    // Init time
+    let mut prev_time = std::time::Instant::now();
+    let mut frame_durations = VecDeque::<std::time::Duration>::new();
+
     // Render loop
     println!("Start RenderLoop: {:?}", type_name::<T>());
     while !window.should_close() {
+        puffin::profile_scope!("MainLoop");
+
         window.poll_events();
 
         // Reload shaders
@@ -206,7 +220,10 @@ where
             let delta_time = curr_time.duration_since(prev_time);
             prev_time = curr_time;
             delta_seconds = delta_time.as_secs_f32();
-            //println!("Violet: frame delta time: {}ms", delta_seconds / 1000.0);
+            if frame_durations.len() >= 32 {
+                frame_durations.resize(31, std::time::Duration::ZERO);
+            };
+            frame_durations.push_front(delta_time);
         }
 
         // Update camera
@@ -317,13 +334,18 @@ where
             show_gui = !show_gui;
         }
         let imgui_output = if show_gui {
+            puffin::profile_scope!("ImGUI");
+
             Some(imgui.run(window_size, &window, |ctx| {
                 // Render Loop
                 imgui::Window::new("Render Loop").show(ctx, |ui| {
                     render_loop.ui(ui);
                 });
 
-                // Performance
+                // Puffin Profiler
+                puffin_egui::profiler_window(ctx);
+
+                // Internal GPU Profiler
                 imgui::Window::new("Perf.")
                     .default_open(false)
                     .show(ctx, |ui| {
@@ -406,7 +428,17 @@ where
         }
 
         if window.clicked('p') {
+            let delta_time_sum: std::time::Duration = frame_durations.iter().sum();
+            let avg_delta_time_ms =
+                delta_time_sum.as_secs_f64() * 1000.0 / frame_durations.len().max(1) as f64;
+            println!("MainLoop: {}ms", avg_delta_time_ms);
+
             render_loop.print_stat();
+        }
+
+        // End Profiler Frame
+        if args.profiler {
+            puffin::GlobalProfiler::lock().new_frame()
         }
     }
 }

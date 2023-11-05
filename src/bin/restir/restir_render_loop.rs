@@ -168,7 +168,7 @@ impl RenderLoop for RestirRenderLoop {
             let ms = dur.as_secs_f64() * 1000.0 / self.total_frame_count as f64;
             println!("\t{:>16}: {:.4}ms", name, ms);
         };
-        avg_ms("[Frame]", self.total_frame_duration);
+        avg_ms("[Render]", self.total_frame_duration);
         avg_ms("Acq. Swap.", self.total_acquire_duration);
         avg_ms("Wait Swap.", self.total_wait_duration);
         avg_ms("Present", self.total_present_duration);
@@ -197,6 +197,8 @@ impl RenderLoop for RestirRenderLoop {
         view_info: &ViewInfo,
         imgui: Option<&ImGUIOuput>,
     ) {
+        puffin::profile_function!();
+
         self.stream_lined.advance_render_index();
 
         // Update cpu profiling
