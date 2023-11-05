@@ -432,6 +432,8 @@ impl StreamLinedFrameResource {
 
     // Wait for command buffer finished and reset it for recording.
     pub fn wait_and_reset_command_buffer(&mut self, rd: &RenderDevice) -> vk::CommandBuffer {
+        puffin::profile_function!();
+
         // Fence to make sure previous submit command buffer is finished
         let fence = self.command_buffer_finished_fences[self.render_index as usize];
 
@@ -528,6 +530,7 @@ impl StreamLinedFrameResource {
         puffin::profile_function!();
 
         // Wait for swapchain image ready (before submit the GPU works modifying the image)
+        // TODO we can move the swapchain-mutating work to a other command buffer, so only the last pass (submissiong) need to wait for this
         {
             puffin::profile_scope!("WaitSwapchain");
 
@@ -558,16 +561,12 @@ impl StreamLinedFrameResource {
         {
             puffin::profile_scope!("QueuePresent");
 
-            let present_begin = std::time::Instant::now();
-
             let present_info = vk::PresentInfoKHR::builder()
                 .wait_semaphores(slice::from_ref(&present_ready))
                 .swapchains(slice::from_ref(&rd.swapchain.handle))
                 .image_indices(slice::from_ref(&image_index))
                 .build();
             rd.queue_present(&present_info);
-
-            present_begin.elapsed()
         };
     }
 }

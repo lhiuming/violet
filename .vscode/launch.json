@@ -52,11 +52,20 @@
 			"preLaunchTask": "rust: cargo build nightly",
 			"program": "${workspaceFolder}/target/debug/imgui_demo.exe",
 			"args": [
-				"--nrenderdoc"
+				"--profiler",
 			],
 			"stopAtEntry": false,
 			"cwd": "${workspaceFolder}",
-			"environment": [],
+			"environment": [
+				{
+					"name": "VIOLET_BREAKPOINT",
+					"value": "1"
+				},
+				{
+					"name": "VIOLET_VALIDATION_LAYER",
+					"value": "1"
+				},
+			],
 			"console": "integratedTerminal"
 		},
 	]
