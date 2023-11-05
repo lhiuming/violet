@@ -41,6 +41,7 @@ pub fn create_swapchain(
     device: &ash::Device,
     pd: &PhysicalDevice,
     surface: &Surface,
+    vsync: bool,
 ) -> Swapchain {
     let cap = unsafe {
         khr_surface
@@ -91,7 +92,6 @@ pub fn create_swapchain(
     // TODO pick a proper image format
     let surface_format = surface_formats[0];
 
-    let vsync = true;
     let present_mode = if vsync {
         vk::PresentModeKHR::FIFO
     } else {

@@ -10,7 +10,7 @@ pub mod texture;
 
 // Re-exporting
 pub use self::buffer::{Buffer, BufferDesc};
-pub use self::core::RenderDevice;
+pub use self::core::{DeviceConfig, RenderDevice};
 pub use self::physical::PhysicalDevice;
 pub use self::raytracing::AccelerationStructure;
 pub use self::swapchain::{Surface, Swapchain};

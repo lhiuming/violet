@@ -11,6 +11,22 @@ use super::swapchain::{self, Surface, Swapchain};
 use super::debug_utils;
 use super::physical::{PhysicalDevice, PhysicalDeviceFeatures};
 
+pub struct DeviceConfig {
+    pub app_handle: u64,
+    pub window_handle: u64,
+    pub vsync: bool,
+}
+
+impl Default for DeviceConfig {
+    fn default() -> Self {
+        Self {
+            app_handle: 0,    // not valid
+            window_handle: 0, // not valid
+            vsync: true,
+        }
+    }
+}
+
 pub struct RenderDevice {
     pub entry: ash::Entry,
     pub instance: ash::Instance,
@@ -38,7 +54,7 @@ pub struct RenderDevice {
 }
 
 impl super::RenderDevice {
-    pub fn create(app_handle: u64, window_handle: u64) -> Option<Self> {
+    pub fn create(config: DeviceConfig) -> Option<Self> {
         // Load functions
         let entry = unsafe {
             ash::Entry::load()
@@ -207,9 +223,16 @@ impl super::RenderDevice {
         }
 
         // Create surface and swapchain
-        let surface = swapchain::create_surface(&khr_win32_surface, app_handle, window_handle);
-        let swapchain =
-            swapchain::create_swapchain(&khr_surface, &khr_swapchain, &device, &physical, &surface);
+        let surface =
+            swapchain::create_surface(&khr_win32_surface, config.app_handle, config.window_handle);
+        let swapchain = swapchain::create_swapchain(
+            &khr_surface,
+            &khr_swapchain,
+            &device,
+            &physical,
+            &surface,
+            config.vsync,
+        );
 
         Some(Self {
             entry,

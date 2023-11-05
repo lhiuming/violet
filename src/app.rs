@@ -9,7 +9,7 @@ use glam::{Mat4, UVec2, Vec2, Vec3, Vec4};
 use crate::imgui;
 use crate::{
     model,
-    render_device::RenderDevice,
+    render_device::{DeviceConfig, RenderDevice},
     render_loop::{RenderLoop, ViewInfo},
     render_scene::RenderScene,
     renderdoc,
@@ -54,12 +54,16 @@ struct Args {
     /// Relative Path for the glTF model to load
     path: Option<String>,
 
+    /// Enable V-Sync or not
+    #[arg(long)]
+    vsync: bool,
+
     /// Load RenderDoc or not
-    #[arg(long, default_value_t = false)]
+    #[arg(long)]
     renderdoc: bool,
 
     /// Enable in-game Profiler or not
-    #[arg(long, default_value_t = false)]
+    #[arg(long)]
     profiler: bool,
 
     /// Camera parameter presets (position Vec3 and angle Vec2)
@@ -133,8 +137,14 @@ where
     let window_size = UVec2::new(1920, 1080);
     let mut window = Window::new(window_size, "Rusty Violet");
 
-    let mut rd =
-        RenderDevice::create(Window::system_handle_for_module(), window.system_handle()).unwrap();
+    let mut rd = {
+        let config = DeviceConfig {
+            app_handle: Window::system_handle_for_module(),
+            window_handle: window.system_handle(),
+            vsync: args.vsync,
+        };
+        RenderDevice::create(config).unwrap()
+    };
 
     // Initialize shaders
     let mut shaders = Shaders::new(&rd);
