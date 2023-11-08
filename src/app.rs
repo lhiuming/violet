@@ -2,6 +2,7 @@ use std::any::type_name;
 use std::collections::VecDeque;
 use std::f32::consts::PI;
 use std::path::Path;
+use std::time;
 
 use clap::Parser;
 use glam::{Mat4, UVec2, Vec2, Vec3, Vec4};
@@ -190,8 +191,12 @@ where
     let mut sun_dir_phi = 0.524f32;
 
     // Init time
-    let mut prev_time = std::time::Instant::now();
-    let mut frame_durations = VecDeque::<std::time::Duration>::new();
+    let mut prev_time = time::Instant::now();
+    let mut frame_durations = VecDeque::<time::Duration>::new();
+    let avg_delta_time_ms = |durations: &VecDeque<time::Duration>| {
+        let delta_time_sum: time::Duration = durations.iter().sum();
+        delta_time_sum.as_secs_f64() * 1000.0 / durations.len().max(1) as f64
+    };
 
     // Render loop
     println!("Start RenderLoop: {:?}", type_name::<T>());
@@ -226,12 +231,12 @@ where
         // Time udpate
         let delta_seconds;
         {
-            let curr_time = std::time::Instant::now();
+            let curr_time = time::Instant::now();
             let delta_time = curr_time.duration_since(prev_time);
             prev_time = curr_time;
             delta_seconds = delta_time.as_secs_f32();
             if frame_durations.len() >= 32 {
-                frame_durations.resize(31, std::time::Duration::ZERO);
+                frame_durations.resize(31, time::Duration::ZERO);
             };
             frame_durations.push_front(delta_time);
         }
@@ -348,15 +353,19 @@ where
 
             Some(imgui.run(window_size, &window, |ctx| {
                 // Render Loop
-                imgui::Window::new("Render Loop").show(ctx, |ui| {
-                    render_loop.ui(ui);
-                });
+                imgui::Window::new("Render Loop")
+                    .default_open(false)
+                    .show(ctx, |ui| {
+                        render_loop.ui(ui);
+                    });
 
-                // Puffin Profiler
-                puffin_egui::profiler_window(ctx);
+                // Puffin CPU Profiler
+                imgui::Window::new("Puffin")
+                    .default_open(false)
+                    .show(ctx, puffin_egui::profiler_ui);
 
                 // Internal GPU Profiler
-                imgui::Window::new("Perf.")
+                imgui::Window::new("GPU")
                     .default_open(false)
                     .show(ctx, |ui| {
                         // shader debug
@@ -421,6 +430,21 @@ where
                             }
                         }
                     });
+
+                // Mini Stat Indicators
+                imgui::Window::new("STAT")
+                    .anchor(egui::Align2::RIGHT_BOTTOM, egui::Vec2::ZERO)
+                    .title_bar(false)
+                    .frame(
+                        egui::Frame::none()
+                            .inner_margin(egui::Margin::same(4.0))
+                            .rounding(egui::Rounding::from(4.0))
+                            .fill(egui::Color32::from_black_alpha(64)),
+                    )
+                    .show(ctx, |ui| {
+                        let avg_ms = avg_delta_time_ms(&frame_durations);
+                        ui.colored_label(egui::Color32::WHITE, format!("{:3.1}ms", avg_ms));
+                    });
             }))
         } else {
             None
@@ -438,10 +462,8 @@ where
         }
 
         if window.clicked('p') {
-            let delta_time_sum: std::time::Duration = frame_durations.iter().sum();
-            let avg_delta_time_ms =
-                delta_time_sum.as_secs_f64() * 1000.0 / frame_durations.len().max(1) as f64;
-            println!("MainLoop: {}ms", avg_delta_time_ms);
+            let avg_delta_time_ms = avg_delta_time_ms(&frame_durations);
+            println!("MainLoop: {:5.2}ms", avg_delta_time_ms);
 
             if let Some(stat) = render_loop.gpu_stat() {
                 stat.print();
