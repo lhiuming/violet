@@ -14,8 +14,8 @@
 
 #define ADAPTIVE_RADIUS 1
 
+GBUFFER_TEXTURE_TYPE gbuffer_color;
 Texture2D<float> gbuffer_depth;
-Texture2D<uint4> gbuffer_color;
 Texture2D<uint2> reservoir_texture;
 Texture2D<float4> hit_pos_texture;
 Texture2D<float3> hit_radiance_texture;
@@ -174,7 +174,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 
     const float3 position_ws = cs_depth_to_position(dispatch_id, buffer_size, depth);
 
-    GBuffer gbuffer = decode_gbuffer(gbuffer_color[dispatch_id.xy]);
+    GBuffer gbuffer = load_gbuffer(gbuffer_color, dispatch_id.xy);
 
     ReservoirSimple reservoir = reservoir_decode_u32(reservoir_texture[dispatch_id.xy]);
     float4 hit_pos_xyzw = hit_pos_texture[dispatch_id.xy];
@@ -214,7 +214,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
             continue;
         }
 
-        GBuffer gbuffer_n = decode_gbuffer(gbuffer_color[pixcoord_n]);
+        GBuffer gbuffer_n = load_gbuffer(gbuffer_color, pixcoord_n);
         float depth_n = gbuffer_depth[pixcoord_n];
 
         // Geometry similarity test

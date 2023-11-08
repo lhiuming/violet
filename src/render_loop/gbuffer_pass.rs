@@ -3,44 +3,38 @@ use glam::UVec2;
 
 use crate::{
     command_buffer::StencilOps,
-    render_device::{texture, RenderDevice, Texture, TextureDesc, TextureView},
+    render_device::{texture::TextureUsage, RenderDevice, Texture, TextureDesc},
     render_graph::*,
     render_scene::RenderScene,
     shader::PushConstantsBuilder,
 };
 
-type GBufferTexture = (RGHandle<Texture>, RGHandle<TextureView>);
+pub static GBUFFER_COLOR_ARRAY_LEN: u32 = 4;
 
 pub struct GBuffer {
-    pub depth: GBufferTexture,
-    pub color: GBufferTexture,
+    pub depth: RGHandle<Texture>,
+    pub color: RGHandle<Texture>,
     pub color_clear: vk::ClearColorValue,
     pub size: UVec2,
 }
 
 pub fn create_gbuffer_textures(rg: &mut RenderGraphBuilder, size: UVec2) -> GBuffer {
-    // helper
-    let mut create_gbuffer = |format: vk::Format| {
-        let is_depth = texture::format_has_depth(format);
-        let usage: vk::ImageUsageFlags = if is_depth {
-            vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
-        } else {
-            vk::ImageUsageFlags::COLOR_ATTACHMENT
-        } | vk::ImageUsageFlags::SAMPLED;
-        let desc = TextureDesc::new_2d(size.x, size.y, format, usage);
-        let texture = rg.create_texutre(desc);
-        let view = rg.create_texture_view(texture, None);
-
-        (texture, view)
-    };
-
-    // define
-    let depth = create_gbuffer(vk::Format::D24_UNORM_S8_UINT);
-    let color = create_gbuffer(vk::Format::R32G32B32A32_UINT);
+    let depth = rg.create_texutre(TextureDesc::new_2d(
+        size.x,
+        size.y,
+        vk::Format::D24_UNORM_S8_UINT,
+        TextureUsage::new().depth_stencil().sampled().into(),
+    ));
+    let color = rg.create_texutre(TextureDesc::new_2d_array(
+        size.x,
+        size.y,
+        GBUFFER_COLOR_ARRAY_LEN,
+        vk::Format::R32_UINT,
+        TextureUsage::new().color().sampled().into(),
+    ));
     let color_clear = vk::ClearColorValue {
         uint32: [0, 0, 0, 0],
     };
-
     GBuffer {
         depth,
         color,
@@ -56,15 +50,22 @@ pub fn add_gbuffer_pass<'a, 'render>(
     gbuffer: &GBuffer,
 ) {
     let viewport_extent = rd.swapchain.extent;
+    let color_targets = (0..GBUFFER_COLOR_ARRAY_LEN)
+        .map(|layer| ColorTarget {
+            tex: gbuffer.color,
+            layer,
+            load_op: ColorLoadOp::Clear(gbuffer.color_clear),
+            ..Default::default()
+        })
+        .collect::<Vec<_>>();
+
     rg.new_graphics("GBuffer_Gen")
         .vertex_shader_with_ep("mesh_gbuffer.hlsl", "vs_main")
         .pixel_shader_with_ep("mesh_gbuffer.hlsl", "ps_main")
-        .color_targets(&[ColorTarget {
-            view: gbuffer.color.1,
-            load_op: ColorLoadOp::Clear(gbuffer.color_clear),
-        }])
+        .color_targets(&color_targets)
         .depth_stencil(DepthStencilTarget {
-            view: gbuffer.depth.1,
+            tex: gbuffer.depth,
+            aspect: vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
             load_op: DepthLoadOp::Clear(vk::ClearDepthStencilValue {
                 depth: 0.0,
                 stencil: 0,

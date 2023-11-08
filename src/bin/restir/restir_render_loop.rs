@@ -24,6 +24,7 @@ pub struct DefaultResources {
     pub dummy_buffer: Buffer,
     pub dummy_texture: Texture,
     pub dummy_uint_texture: Texture,
+    pub dummy_uint_texture_array: Texture,
     //pub black_texture: (Texture, TextureView),
 }
 
@@ -55,10 +56,21 @@ impl DefaultResources {
             ))
             .unwrap();
 
+        let dummy_uint_texture_array = rd
+            .create_texture(TextureDesc::new_2d_array(
+                1,
+                1,
+                2,
+                vk::Format::R8G8B8A8_UINT,
+                vk::ImageUsageFlags::SAMPLED,
+            ))
+            .unwrap();
+
         Self {
             dummy_buffer,
             dummy_texture,
             dummy_uint_texture,
+            dummy_uint_texture_array,
         }
     }
 }

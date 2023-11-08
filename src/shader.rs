@@ -1090,21 +1090,27 @@ pub fn create_graphics_pipeline(
         .rasterization_samples(vk::SampleCountFlags::TYPE_1);
     let depth_stencil =
         vk::PipelineDepthStencilStateCreateInfo::builder().depth_compare_op(vk::CompareOp::GREATER);
-    let mut attachment = vk::PipelineColorBlendAttachmentState::builder()
-        .blend_enable(desc.blend_enabled)
-        .color_write_mask(vk::ColorComponentFlags::RGBA)
-        .build();
-    if desc.blend_enabled {
-        // NOTE: currently the only use case if pre-multiplied alpha (UI)
-        attachment.src_color_blend_factor = vk::BlendFactor::ONE;
-        attachment.dst_color_blend_factor = vk::BlendFactor::ONE_MINUS_SRC_ALPHA;
-        attachment.color_blend_op = vk::BlendOp::ADD;
-        attachment.src_alpha_blend_factor = vk::BlendFactor::ONE;
-        attachment.dst_alpha_blend_factor = vk::BlendFactor::ONE_MINUS_SRC_ALPHA;
-        attachment.alpha_blend_op = vk::BlendOp::ADD;
-    }
-    let color_blend = vk::PipelineColorBlendStateCreateInfo::builder()
-        .attachments(std::slice::from_ref(&attachment));
+    // [dynamic_rendering]: blend state attachment count must be equal to color attachment count
+    let blend_state_attachments = (0..desc.color_attachment_count)
+        .map(|_| {
+            let mut attachment = vk::PipelineColorBlendAttachmentState::builder()
+                .blend_enable(desc.blend_enabled)
+                .color_write_mask(vk::ColorComponentFlags::RGBA)
+                .build();
+            if desc.blend_enabled {
+                // NOTE: currently the only use case if pre-multiplied alpha (UI)
+                attachment.src_color_blend_factor = vk::BlendFactor::ONE;
+                attachment.dst_color_blend_factor = vk::BlendFactor::ONE_MINUS_SRC_ALPHA;
+                attachment.color_blend_op = vk::BlendOp::ADD;
+                attachment.src_alpha_blend_factor = vk::BlendFactor::ONE;
+                attachment.dst_alpha_blend_factor = vk::BlendFactor::ONE_MINUS_SRC_ALPHA;
+                attachment.alpha_blend_op = vk::BlendOp::ADD;
+            }
+            attachment
+        })
+        .collect::<Vec<_>>();
+    let color_blend =
+        vk::PipelineColorBlendStateCreateInfo::builder().attachments(&blend_state_attachments);
     let dynamic_states = [
         vk::DynamicState::VIEWPORT,
         vk::DynamicState::SCISSOR,

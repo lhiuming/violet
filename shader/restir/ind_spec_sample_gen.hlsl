@@ -9,8 +9,8 @@
 #include "raytrace.inc.hlsl"
 #include "reservoir.hlsl"
 
+GBUFFER_TEXTURE_TYPE gbuffer_color;
 Texture2D<float> gbuffer_depth;
-Texture2D<uint4> gbuffer_color;
 
 // New sample propertie textures
 //RWTexture2D<float3> rw_origin_pos_texture;
@@ -44,7 +44,7 @@ void main()
         return;
     }
 
-    GBuffer gbuffer = decode_gbuffer(gbuffer_color[dispatch_id.xy]);
+    GBuffer gbuffer = load_gbuffer(gbuffer_color, dispatch_id.xy);
 
     // world position reconstruction from depth buffer
     float depth_error = 1.f / 16777216.f; // 24 bit unorm depth

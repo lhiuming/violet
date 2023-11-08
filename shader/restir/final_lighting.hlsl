@@ -4,7 +4,7 @@
 
 #define SPECULAR_SUPRESSION 1
 
-Texture2D<uint4> gbuffer_color;
+GBUFFER_TEXTURE_TYPE gbuffer_color;
 Texture2D<float> shadow_mask_buffer;
 Texture2D<float3> indirect_diffuse_texture;
 Texture2D<float3> indirect_specular_texture;
@@ -12,8 +12,7 @@ RWTexture2D<float3> rw_color_buffer;
 
 [numthreads(8, 4, 1)]
 void main(uint2 dispatch_id : SV_DispatchThreadID) {
-    uint4 gbuffer_enc = gbuffer_color[dispatch_id];
-    GBuffer gbuffer = decode_gbuffer(gbuffer_enc);
+    GBuffer gbuffer = load_gbuffer(gbuffer_color, dispatch_id);
 
     if (has_no_geometry(gbuffer))
     {
@@ -21,8 +20,7 @@ void main(uint2 dispatch_id : SV_DispatchThreadID) {
         return;
     }
 
-    uint2 buffer_size;
-    gbuffer_color.GetDimensions(buffer_size.x, buffer_size.y);
+    uint2 buffer_size = get_gbuffer_dimension_2d(gbuffer_color);
 
     // Direct lighting
     float direct_atten = shadow_mask_buffer[dispatch_id];

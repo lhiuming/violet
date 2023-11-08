@@ -31,6 +31,10 @@ impl<T> RGHandle<T> {
             _phantom: PhantomData::default(),
         }
     }
+
+    fn null() -> Self {
+        Self::new(usize::MAX)
+    }
 }
 
 impl<T> Clone for RGHandle<T> {
@@ -92,29 +96,64 @@ pub enum ColorLoadOp {
 
 #[derive(Clone, Copy)]
 pub struct ColorTarget {
-    pub view: RGHandle<TextureView>,
+    pub tex: RGHandle<Texture>,
+    pub layer: u32,
     pub load_op: ColorLoadOp,
+}
+
+impl Default for ColorTarget {
+    fn default() -> Self {
+        Self {
+            tex: RGHandle::new(usize::MAX),
+            layer: 0,
+            load_op: ColorLoadOp::DontCare,
+        }
+    }
+}
+
+struct InternalColorTarget {
+    view: RGHandle<TextureView>,
+    load_op: ColorLoadOp,
 }
 
 #[derive(Clone, Copy)]
 pub enum DepthLoadOp {
     Load,
     Clear(vk::ClearDepthStencilValue),
+    DontCare,
 }
 
 #[derive(Clone, Copy)]
 pub struct DepthStencilTarget {
-    pub view: RGHandle<TextureView>,
+    pub tex: RGHandle<Texture>,
+    pub aspect: vk::ImageAspectFlags,
     pub load_op: DepthLoadOp,
     pub store_op: vk::AttachmentStoreOp,
+}
+
+impl Default for DepthStencilTarget {
+    fn default() -> Self {
+        Self {
+            tex: RGHandle::null(),
+            aspect: vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
+            load_op: DepthLoadOp::DontCare,
+            store_op: vk::AttachmentStoreOp::DONT_CARE,
+        }
+    }
+}
+
+struct InternalDepthStencilTarget {
+    view: RGHandle<TextureView>,
+    load_op: DepthLoadOp,
+    store_op: vk::AttachmentStoreOp,
 }
 
 struct GraphicsPassData {
     vertex_shader: Option<ShaderDefinition>,
     pixel_shader: Option<ShaderDefinition>,
     desc: GraphicsDesc,
-    color_targets: Vec<ColorTarget>,
-    depth_stencil: Option<DepthStencilTarget>,
+    color_targets: Vec<InternalColorTarget>,
+    depth_stencil: Option<InternalDepthStencilTarget>,
 }
 
 struct ComputePassData {
@@ -436,27 +475,63 @@ impl<'a, 'render> GraphicsPassBuilder<'a, 'render> {
 
     pub fn color_targets(&mut self, rts: &[ColorTarget]) -> &mut Self {
         assert!(rts.len() < u8::MAX as usize);
+        assert!(rts.len() <= self.gfx().desc.color_attachments.len());
+
         self.gfx().desc.color_attachment_count = rts.len() as u8;
-        for i in 0..rts.len() {
-            // TODO get rid of 'view' indirection?
-            let format = self
-                .render_graph
-                .get_texture_desc_from_view(rts[i].view)
-                .format;
-            self.gfx().desc.color_attachments[i] = format;
-        }
 
         self.gfx().color_targets.clear();
-        self.gfx().color_targets.extend_from_slice(rts);
+
+        for i in 0..rts.len() {
+            let format = self.render_graph.get_texture_desc(rts[i].tex).format;
+            self.gfx().desc.color_attachments[i] = format;
+
+            let view = self.render_graph.create_texture_view(
+                rts[i].tex,
+                Some(TextureViewDesc {
+                    view_type: vk::ImageViewType::TYPE_2D,
+                    format,
+                    aspect: vk::ImageAspectFlags::COLOR,
+                    base_mip_level: 0,
+                    level_count: 1,
+                    base_array_layer: rts[i].layer,
+                    layer_count: 1,
+                    ..Default::default()
+                }),
+            );
+
+            self.gfx().color_targets.push(InternalColorTarget {
+                view: view,
+                load_op: rts[i].load_op,
+            })
+        }
+
         self
     }
 
     pub fn depth_stencil(&mut self, ds: DepthStencilTarget) -> &mut Self {
-        // TODO get rid of 'view' indirection?
-        let foramt = self.render_graph.get_texture_desc_from_view(ds.view).format;
-        self.gfx().desc.depth_attachment.replace(foramt);
-        self.gfx().desc.stencil_attachment.replace(foramt);
-        self.gfx().depth_stencil = Some(ds);
+        let format = self.render_graph.get_texture_desc(ds.tex).format;
+
+        // TODO maybe only one is needed? (sometimes)
+        self.gfx().desc.depth_attachment = Some(format);
+        self.gfx().desc.stencil_attachment = Some(format);
+
+        let view = self.rg().create_texture_view(
+            ds.tex,
+            Some(TextureViewDesc {
+                view_type: vk::ImageViewType::TYPE_2D,
+                format,
+                aspect: ds.aspect,
+                base_mip_level: 0,
+                level_count: 1,
+                base_array_layer: 0,
+                layer_count: 1,
+            }),
+        );
+        self.gfx().depth_stencil = Some(InternalDepthStencilTarget {
+            view,
+            load_op: ds.load_op,
+            store_op: ds.store_op,
+        });
         self
     }
 
@@ -1441,8 +1516,8 @@ impl RenderGraphBuilder<'_> {
         let size = if gfx.color_targets.len() > 0 {
             self.get_texture_desc_from_view(gfx.color_targets[0].view)
                 .size_2d()
-        } else if let Some(handle) = gfx.depth_stencil {
-            self.get_texture_desc_from_view(handle.view).size_2d()
+        } else if let Some(ds) = &gfx.depth_stencil {
+            self.get_texture_desc_from_view(ds.view).size_2d()
         } else {
             panic!();
         };
@@ -1450,7 +1525,7 @@ impl RenderGraphBuilder<'_> {
         let color_attachments: Vec<_> = gfx
             .color_targets
             .iter()
-            .map(|&target| {
+            .map(|target| {
                 let image_view = self.get_texture_view(ctx, target.view).image_view;
 
                 let mut builder = vk::RenderingAttachmentInfo::builder()
@@ -1470,12 +1545,13 @@ impl RenderGraphBuilder<'_> {
             })
             .collect();
 
-        let depth_attachment = gfx.depth_stencil.map(|target| {
+        let depth_attachment = gfx.depth_stencil.as_ref().map(|target| {
             let image_view = self.get_texture_view(ctx, target.view).image_view;
 
             let mut builder = vk::RenderingAttachmentInfoKHR::builder()
                 .image_view(image_view)
-                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL);
+                .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                .store_op(target.store_op);
 
             builder = match target.load_op {
                 DepthLoadOp::Load => builder.load_op(vk::AttachmentLoadOp::LOAD),
@@ -1484,6 +1560,7 @@ impl RenderGraphBuilder<'_> {
                     .clear_value(vk::ClearValue {
                         depth_stencil: clear_value,
                     }),
+                DepthLoadOp::DontCare => builder.load_op(vk::AttachmentLoadOp::DONT_CARE),
             };
 
             builder.build()
@@ -1498,6 +1575,7 @@ impl RenderGraphBuilder<'_> {
             .view_mask(0)
             .color_attachments(&color_attachments);
         if depth_attachment.is_some() {
+            // TODO maybe set also/only stencil_attachment in some case?
             rendering_info = rendering_info.depth_attachment(depth_attachment.as_ref().unwrap());
         };
 
@@ -1677,9 +1755,9 @@ impl RenderGraphBuilder<'_> {
                             ));
                         }
                     }
-                    if let Some(rt) = gfx.depth_stencil {
-                        let rt_view = self.get_texture_view(ctx, rt.view);
-                        if (rt_view.texture.image == image) && (rt_view.desc.aspect == aspect) {
+                    if let Some(ds) = &gfx.depth_stencil {
+                        let view = self.get_texture_view(ctx, ds.view);
+                        if (view.texture.image == image) && (view.desc.aspect == aspect) {
                             // TODO RenderPass Load ops?
                             let mut access = vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE;
                             // TODO READ only with depth/stencil test is enabled
@@ -1787,7 +1865,7 @@ impl RenderGraphBuilder<'_> {
                 );
             }
 
-            if let Some(ds) = gfx.depth_stencil {
+            if let Some(ds) = &gfx.depth_stencil {
                 // TODO check depth test enabled
                 let dst_access_mask = vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_READ
                     | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE;

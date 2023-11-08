@@ -19,10 +19,10 @@
     #undef IND_SPEC_PROPER_RESAMPLING_MIS_WEIGHT
 #endif
 
+GBUFFER_TEXTURE_TYPE prev_gbuffer_color;
 Texture2D<float> prev_gbuffer_depth;
-Texture2D<uint4> prev_gbuffer_color;
+GBUFFER_TEXTURE_TYPE gbuffer_color;
 Texture2D<float> gbuffer_depth;
-Texture2D<uint4> gbuffer_color;
 // Previous frame's reservoir
 Texture2D<uint2> prev_reservoir_texture;
 Texture2D<float4> prev_hit_pos_texture;
@@ -216,7 +216,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         #endif
 
         #if IND_SPEC_PROPER_RESAMPLING_MIS_WEIGHT
-        prev_gbuffer = decode_gbuffer(prev_gbuffer_color[prev_pos]);
+        prev_gbuffer = load_gbuffer(prev_gbuffer_color, prev_pos);
         #endif
 
         // Bound the temporal information to avoid stale sample
@@ -247,7 +247,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     float3 new_sample_hit_pos = rw_hit_pos_texture[dispatch_id].xyz;
     float3 new_sample_hit_radiance = rw_hit_radiance_texture[dispatch_id];
 
-    GBuffer gbuffer = decode_gbuffer(gbuffer_color[dispatch_id]);
+    GBuffer gbuffer = load_gbuffer(gbuffer_color, dispatch_id);
 
     // Sampling parameters for current sample on current pixel (brdf)
     Sampling curr_sampling = calc_things(view_params().view_pos, position_ws, gbuffer.normal, gbuffer.perceptual_roughness, get_specular_f0(gbuffer.color, gbuffer.metallic), new_sample_hit_pos);

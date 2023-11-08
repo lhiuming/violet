@@ -576,7 +576,6 @@ impl ImGUIPass {
             let pos_to_screen_uv = imgui.pixels_per_point * texel_size;
             let index_buffer_handle = index_buffer.handle;
             let rg_vertex_buffer = rg.register_buffer(vertex_buffer);
-            let target_view = rg.create_texture_view(target, None);
             let load_op = match clear {
                 Some(color) => ColorLoadOp::Clear(color),
                 None => ColorLoadOp::Load,
@@ -587,8 +586,9 @@ impl ImGUIPass {
                 .pixel_shader_with_ep("imgui_vsps.hlsl", "ps_main")
                 .set_layout_override(IMGUI_DESCRIPTOR_SET_INDEX, self.descriptor_set_layout)
                 .color_targets(&[ColorTarget {
-                    view: target_view,
+                    tex: target,
                     load_op,
+                    ..Default::default()
                 }])
                 .blend_enabled(true)
                 .buffer("vertex_buffer", rg_vertex_buffer)

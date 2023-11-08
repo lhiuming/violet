@@ -5,16 +5,64 @@ pub struct TextureUsage {
 }
 
 impl TextureUsage {
+    pub fn new() -> TextureUsage {
+        TextureUsage {
+            vk: vk::ImageUsageFlags::empty(),
+        }
+    }
+
+    // VK stuff
+
     pub fn from_vk(flags: vk::ImageUsageFlags) -> TextureUsage {
         TextureUsage { vk: flags }
     }
 
-    pub fn compute() -> TextureUsage {
-        Self::from_vk(vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED)
-    }
-
     pub fn to_vk(self) -> vk::ImageUsageFlags {
         self.vk
+    }
+
+    // Adding flags
+
+    #[inline]
+    pub fn transfer_src(mut self) -> Self {
+        self.vk |= vk::ImageUsageFlags::TRANSFER_SRC;
+        self
+    }
+
+    #[inline]
+    pub fn transfer_dst(mut self) -> Self {
+        self.vk |= vk::ImageUsageFlags::TRANSFER_DST;
+        self
+    }
+
+    #[inline]
+    pub fn sampled(mut self) -> Self {
+        self.vk |= vk::ImageUsageFlags::SAMPLED;
+        self
+    }
+
+    #[inline]
+    pub fn storage(mut self) -> Self {
+        self.vk |= vk::ImageUsageFlags::STORAGE;
+        self
+    }
+
+    #[inline]
+    pub fn color(mut self) -> Self {
+        self.vk |= vk::ImageUsageFlags::COLOR_ATTACHMENT;
+        self
+    }
+
+    #[inline]
+    pub fn depth_stencil(mut self) -> Self {
+        self.vk |= vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT;
+        self
+    }
+}
+
+impl Into<vk::ImageUsageFlags> for TextureUsage {
+    fn into(self) -> vk::ImageUsageFlags {
+        self.to_vk()
     }
 }
 
@@ -166,6 +214,7 @@ pub fn format_has_depth_stencil(format: vk::Format) -> bool {
 }
 
 impl TextureViewDesc {
+    // TODO delete this
     pub fn auto(texture_desc: &TextureDesc) -> TextureViewDesc {
         let view_type = if texture_desc.layer_count > 1 {
             vk::ImageViewType::TYPE_2D_ARRAY
@@ -357,10 +406,10 @@ impl super::RenderDevice {
             .format(desc.format)
             .subresource_range(vk::ImageSubresourceRange {
                 aspect_mask: desc.aspect,
-                base_mip_level: 0,
-                level_count: 1,
-                base_array_layer: 0,
-                layer_count: texture.desc.layer_count,
+                base_mip_level: desc.base_mip_level,
+                level_count: desc.level_count,
+                base_array_layer: desc.base_array_layer,
+                layer_count: desc.layer_count,
             });
         let image_view = unsafe { self.device.create_image_view(&create_info, None) }.ok()?;
 

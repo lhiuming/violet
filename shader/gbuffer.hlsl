@@ -1,6 +1,43 @@
 #pragma once
 #include "enc.inc.hlsl"
 
+#define GBUFFER_TEXTURE_TYPE Texture2DArray<uint>
+
+uint2 get_gbuffer_dimension_2d(GBUFFER_TEXTURE_TYPE gbuffers)
+{
+    uint2 size;
+    uint depth;
+    uint levels;
+    gbuffers.GetDimensions(0, size.x, size.y, depth, levels);
+    return size;
+}
+
+struct GBufferNormal
+{
+    float3 normal;
+
+    uint encode() {
+        float2 normal_enc = normal_encode_oct(normal);
+        uint2 normal_unorm= uint2(normal_enc * 65535.0f);
+        uint enc = normal_unorm.x | normal_unorm.y << 16;
+        return enc;
+    }
+
+    static GBufferNormal decode(uint enc)
+    {
+        uint2 normal_unorm = uint2(enc & 0xFFFF, (enc >> 16) & 0xFFFF);
+        float2 normal_enc = normal_unorm / 65535.0f;
+        GBufferNormal gbuffer;
+        gbuffer.normal = normal_decode_oct(normal_enc);
+        return gbuffer;
+    }
+
+    static GBufferNormal load(GBUFFER_TEXTURE_TYPE gbuffers, uint2 coord)
+    {
+        return decode(gbuffers[uint3(coord, 1)]);
+    }
+};
+
 struct GBuffer
 {
     float3 color;
@@ -9,7 +46,6 @@ struct GBuffer
     float3 normal;
     uint shading_path;
 };
-
 
 uint4 encode_gbuffer(GBuffer gbuffer) {
     uint4 enc;
@@ -57,6 +93,18 @@ GBuffer decode_gbuffer(uint4 enc) {
 
     return gbuffer;
 }
+
+GBuffer load_gbuffer(GBUFFER_TEXTURE_TYPE gbuffers, uint2 coord)
+{
+    uint4 enc = uint4(
+        gbuffers[uint3(coord, 0)],
+        gbuffers[uint3(coord, 1)],
+        gbuffers[uint3(coord, 2)],
+        gbuffers[uint3(coord, 3)]
+    );
+    return decode_gbuffer(enc);
+}
+
 
 // Material interpretation
 

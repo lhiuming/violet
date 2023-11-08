@@ -54,7 +54,10 @@ void ps_main(
 	float3 bitangent : TEXCOORD4,
 	bool if_front_face : SV_IsFrontFace,
 	// Output
-	out uint4 output : SV_Target0)
+	out uint output0 : SV_Target0,
+	out uint output1 : SV_Target1,
+	out uint output2 : SV_Target2,
+	out uint output3 : SV_Target3)
 {
 	MaterialParams mat = material_params[pc.material_index];
 
@@ -74,7 +77,11 @@ void ps_main(
     gbuffer.perceptual_roughness = metal_rough.g;
     gbuffer.normal = normal_ws;
     gbuffer.shading_path = 1;
-    output = encode_gbuffer(gbuffer);
+	uint4 o4 = encode_gbuffer(gbuffer);
+	output0 = o4.x;
+	output1 = o4.y;
+	output2 = o4.z;
+	output3 = o4.w;
 } 
 
 

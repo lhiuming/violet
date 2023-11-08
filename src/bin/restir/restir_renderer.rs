@@ -6,7 +6,6 @@ use violet::{
     imgui::Ui,
     render_device::{
         texture::TextureUsage, Buffer, BufferDesc, RenderDevice, Texture, TextureDesc,
-        TextureViewDesc,
     },
     render_graph::*,
     render_loop::{
@@ -371,8 +370,8 @@ impl RestirRenderer {
                     prev_indirect_diffuse_texture,
                 )
                 .texture("prev_depth_texture", prev_depth)
-                .texture_view("gbuffer_depth", gbuffer.depth.1)
-                .texture_view("gbuffer_color", gbuffer.color.1)
+                .texture("gbuffer_depth", gbuffer.depth)
+                .texture("gbuffer_color", gbuffer.color)
                 .buffer("rw_new_sample_buffer", indirect_diffuse_new_sample_buffer)
                 .buffer("hash_grid_storage_buffer", hg_cache.storage)
                 .rw_buffer("rw_hash_grid_query_buffer", hg_cache.query)
@@ -425,7 +424,7 @@ impl RestirRenderer {
         rg.new_compute("RayTraced AO Gen.")
             .compute_shader("restir/raytraced_ao_gen.hlsl")
             .buffer("new_sample_buffer", indirect_diffuse_new_sample_buffer)
-            .texture_view("depth_buffer", gbuffer.depth.1)
+            .texture("depth_buffer", gbuffer.depth)
             .texture("prev_ao_texture", prev_ao_texture)
             .rw_texture("rw_ao_texture", curr_ao_texture)
             .push_constant::<u32>(&indirect_diffuse_has_new_sample)
@@ -447,7 +446,7 @@ impl RestirRenderer {
         // Pass: AO Spatial Filtering
         rg.new_compute("RayTraced AO Filter")
             .compute_shader("restir/raytraced_ao_filter.hlsl")
-            .texture_view("depth_buffer", gbuffer.depth.1)
+            .texture("depth_buffer", gbuffer.depth)
             .texture("ao_texture", curr_ao_texture)
             .rw_texture("rw_filtered_ao_texture", filtered_ao_texture)
             .group_count(
@@ -463,7 +462,7 @@ impl RestirRenderer {
         rg.new_compute("Ind. Diff. Temporal Resample")
             .compute_shader("restir/ind_diff_temporal_resample.hlsl")
             .texture("prev_gbuffer_depth", prev_depth)
-            .texture_view("gbuffer_depth", gbuffer.depth.1)
+            .texture("gbuffer_depth", gbuffer.depth)
             .buffer("new_sample_buffer", indirect_diffuse_new_sample_buffer)
             .buffer("prev_reservoir_buffer", prev_diffuse_reservoir_buffer)
             .buffer(
@@ -490,8 +489,8 @@ impl RestirRenderer {
 
             rg.new_compute("Ind. Diff. Spatial Resample")
                 .compute_shader("restir/ind_diff_spatial_resample.hlsl")
-                .texture_view("gbuffer_depth", gbuffer.depth.1)
-                .texture_view("gbuffer_color", gbuffer.color.1)
+                .texture("gbuffer_depth", gbuffer.depth)
+                .texture("gbuffer_color", gbuffer.color)
                 .texture("ao_texture", filtered_ao_texture)
                 .buffer(
                     "temporal_reservoir_buffer",
@@ -520,7 +519,7 @@ impl RestirRenderer {
 
             rg.new_compute("Ind. Diff. Temporal Filter")
                 .compute_shader("restir/ind_diff_temporal_filter.hlsl")
-                .texture("depth_buffer", gbuffer.depth.0)
+                .texture("depth_buffer", gbuffer.depth)
                 .texture("history_texture", prev_indirect_diffuse_texture)
                 .texture("source_texture", indirect_diffuse)
                 .rw_texture("rw_filtered_texture", filtered_indirect_diffuse)
@@ -563,8 +562,8 @@ impl RestirRenderer {
                     prev_indirect_diffuse_texture,
                 )
                 .texture("prev_depth_texture", prev_depth)
-                .texture("gbuffer_depth", gbuffer.depth.0)
-                .texture("gbuffer_color", gbuffer.color.0)
+                .texture("gbuffer_depth", gbuffer.depth)
+                .texture("gbuffer_color", gbuffer.color)
                 //.rw_texture("rw_origin_pos_texture", ind_spec_origin_pos)
                 .rw_texture("rw_hit_pos_texture", ind_spec_hit_pos)
                 .rw_texture("rw_hit_normal_texture", ind_spec_hit_normal)
@@ -624,7 +623,7 @@ impl RestirRenderer {
         let has_prev_gbuffer_color = self.prev_gbuffer_color.is_some();
         let prev_gbuffer_color = match self.prev_gbuffer_color.take() {
             Some(tex) => rg.convert_to_transient(tex),
-            None => rg.register_texture(default_res.dummy_uint_texture),
+            None => rg.register_texture(default_res.dummy_uint_texture_array),
         };
 
         // Pass: Indirect Specular Temporal Resampling
@@ -636,8 +635,8 @@ impl RestirRenderer {
                 .compute_shader("restir/ind_spec_temporal_resample.hlsl")
                 .texture("prev_gbuffer_depth", prev_depth)
                 .texture("prev_gbuffer_color", prev_gbuffer_color)
-                .texture("gbuffer_depth", gbuffer.depth.0)
-                .texture("gbuffer_color", gbuffer.color.0)
+                .texture("gbuffer_depth", gbuffer.depth)
+                .texture("gbuffer_color", gbuffer.color)
                 .texture("prev_reservoir_texture", prev_ind_spec_reservoir)
                 .texture("prev_hit_pos_texture", prev_ind_spec_hit_pos)
                 .texture("prev_hit_radiance_texture", prev_ind_spec_hit_radiance)
@@ -656,8 +655,8 @@ impl RestirRenderer {
         // Pass: Indirect Specular Spatial Resampling
         rg.new_compute("Ind. Spec. Spaital Resample")
             .compute_shader("restir/ind_spec_spatial_resample.hlsl")
-            .texture("gbuffer_depth", gbuffer.depth.0)
-            .texture("gbuffer_color", gbuffer.color.0)
+            .texture("gbuffer_depth", gbuffer.depth)
+            .texture("gbuffer_color", gbuffer.color)
             .texture("reservoir_texture", ind_spec_temporal_reservoir)
             .texture("hit_pos_texture", ind_spec_hit_pos)
             .texture("hit_radiance_texture", ind_spec_hit_radiance)
@@ -677,7 +676,7 @@ impl RestirRenderer {
 
             rg.new_compute("Ind. Spec. Temporal Filter")
                 .compute_shader("restir/ind_spec_temporal_filter.hlsl")
-                .texture("depth_buffer", gbuffer.depth.0)
+                .texture("depth_buffer", gbuffer.depth)
                 .texture("history_texture", prev_ind_spec)
                 .texture("source_texture", indirect_specular)
                 .rw_texture("rw_filtered_texture", filtered_indirect_specular)
@@ -698,7 +697,7 @@ impl RestirRenderer {
                 lighting: rg.convert_to_temporal(filtered_indirect_specular),
             });
         self.prev_gbuffer_color
-            .replace(rg.convert_to_temporal(gbuffer.color.0));
+            .replace(rg.convert_to_temporal(gbuffer.color));
 
         // Pass: Raytraced Shadow
         let raytraced_shadow_mask = {
@@ -715,7 +714,7 @@ impl RestirRenderer {
                 .raygen_shader("raytraced_shadow.hlsl")
                 .miss_shader("raytrace/shadow.rmiss.hlsl")
                 .accel_struct("scene_tlas", scene_tlas)
-                .texture_view("gbuffer_depth", gbuffer.depth.1)
+                .texture("gbuffer_depth", gbuffer.depth)
                 .rw_texture_view("rw_shadow", raytraced_shadow_mask.1)
                 .dimension(main_size.x, main_size.y, 1);
         }
@@ -729,35 +728,25 @@ impl RestirRenderer {
                     | vk::ImageUsageFlags::STORAGE // compute lighting
                     | vk::ImageUsageFlags::SAMPLED, // taa
             );
-            let texture = rg.create_texutre(desc);
-            let view = rg.create_texture_view(texture, None);
-            (texture, view)
+            rg.create_texutre(desc)
         };
 
         // Pass: Draw sky
         {
-            let stencil = rg.create_texture_view(
-                gbuffer.depth.0,
-                Some(TextureViewDesc {
-                    view_type: vk::ImageViewType::TYPE_2D,
-                    format: vk::Format::D24_UNORM_S8_UINT,
-                    aspect: vk::ImageAspectFlags::STENCIL,
-                    ..Default::default()
-                }),
-            );
-
             rg.new_graphics("Sky")
                 .vertex_shader_with_ep("sky_vsps.hlsl", "vs_main")
                 .pixel_shader_with_ep("sky_vsps.hlsl", "ps_main")
                 .texture_view("skycube", skycube)
                 .color_targets(&[ColorTarget {
-                    view: scene_color.1,
-                    load_op: ColorLoadOp::DontCare,
+                    tex: scene_color,
+                    ..Default::default()
                 }])
                 .depth_stencil(DepthStencilTarget {
-                    view: stencil,
+                    tex: gbuffer.depth,
+                    aspect: vk::ImageAspectFlags::STENCIL,
                     load_op: DepthLoadOp::Load,
-                    store_op: vk::AttachmentStoreOp::NONE,
+                    store_op: vk::AttachmentStoreOp::NONE, // keep but dont write deep
+                    ..Default::default()
                 })
                 .render(move |cb, pipeline| {
                     // Set up raster states
@@ -781,11 +770,11 @@ impl RestirRenderer {
         {
             rg.new_compute("Combined Lighting")
                 .compute_shader("restir/final_lighting.hlsl")
-                .texture_view("gbuffer_color", gbuffer.color.1)
+                .texture("gbuffer_color", gbuffer.color)
                 .texture_view("shadow_mask_buffer", raytraced_shadow_mask.1)
                 .texture("indirect_diffuse_texture", filtered_indirect_diffuse)
                 .texture("indirect_specular_texture", filtered_indirect_specular)
-                .rw_texture_view("rw_color_buffer", scene_color.1)
+                .rw_texture("rw_color_buffer", scene_color)
                 .group_count(
                     div_round_up(main_size.x, 8),
                     div_round_up(main_size.y, 4),
@@ -810,17 +799,15 @@ impl RestirRenderer {
                     vk::ImageUsageFlags::STORAGE // compute TAA
                     | vk::ImageUsageFlags::SAMPLED, // history and post
                 );
-                let texture = rg.create_texutre(desc);
-                let view = rg.create_texture_view(texture, None);
-                (texture, view)
+                rg.create_texutre(desc)
             };
 
             rg.new_compute("Temporal AA")
                 .compute_shader("temporal_aa.hlsl")
-                .texture_view("gbuffer_depth", gbuffer.depth.1)
-                .texture_view("source_texture", scene_color.1)
+                .texture("gbuffer_depth", gbuffer.depth)
+                .texture("source_texture", scene_color)
                 .texture("history_texture", prev_color)
-                .rw_texture_view("rw_target", post_taa_color.1)
+                .rw_texture("rw_target", post_taa_color)
                 .push_constant(&has_prev_color)
                 .group_count(
                     div_round_up(main_size.x, 8),
@@ -840,11 +827,11 @@ impl RestirRenderer {
                 main_size.x,
                 main_size.y,
                 vk::Format::B10G11R11_UFLOAT_PACK32,
-                TextureUsage::compute().to_vk(),
+                TextureUsage::new().storage().sampled().into(),
             ));
             rg.new_compute("Hash Grid Vis")
                 .compute_shader("restir/hash_grid_visualize.hlsl")
-                .texture("gbuffer_depth", gbuffer.depth.0)
+                .texture("gbuffer_depth", gbuffer.depth)
                 .buffer("hash_grid_storage_buffer", hg_cache.storage)
                 .rw_texture("rw_color", tex)
                 .push_constant(&show_color_code)
@@ -870,7 +857,7 @@ impl RestirRenderer {
             rg.new_compute("Debug View")
                 .compute_shader("restir/debug_view.hlsl")
                 .texture("color_texture", color_texture)
-                .rw_texture("rw_output_texture", post_taa_color.0)
+                .rw_texture("rw_output_texture", post_taa_color)
                 .group_count(
                     div_round_up(main_size.x, 8),
                     div_round_up(main_size.y, 4),
@@ -890,11 +877,11 @@ impl RestirRenderer {
         // Cache scene buffer for next frame (TAA, temporal restir, etc.)
         self.taa
             .prev_color
-            .replace(rg.convert_to_temporal(post_taa_color.0));
+            .replace(rg.convert_to_temporal(post_taa_color));
         self.taa
             .prev_depth
-            .replace(rg.convert_to_temporal(gbuffer.depth.0));
+            .replace(rg.convert_to_temporal(gbuffer.depth));
 
-        post_taa_color.0
+        post_taa_color
     }
 }

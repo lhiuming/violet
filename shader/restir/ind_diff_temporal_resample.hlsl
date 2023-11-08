@@ -12,7 +12,6 @@
 
 Texture2D<float> prev_gbuffer_depth;
 Texture2D<float> gbuffer_depth;
-//Texture2D<uint4> gbuffer_color;
 StructuredBuffer<RestirSample> new_sample_buffer;
 StructuredBuffer<Reservoir> prev_reservoir_buffer;
 RWStructuredBuffer<Reservoir> rw_temporal_reservoir_buffer;

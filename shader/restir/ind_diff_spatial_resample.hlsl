@@ -5,7 +5,7 @@
 #include "../util.hlsl"
 #include "reservoir.hlsl"
 
-#define MAX_ITERATION 8
+#define MAX_ITERATION 9
 #define INIT_RADIUS_FACTOR 0.05
 #define MIN_RADIUS 1.5
 
@@ -25,8 +25,8 @@
 // Use plane distance instead of depth in the geometrical test
 #define PLANE_DISTANCE_TEST 1
 
+GBUFFER_TEXTURE_TYPE gbuffer_color;
 Texture2D<float> gbuffer_depth;
-Texture2D<uint4> gbuffer_color;
 Texture2D<float> ao_texture;
 StructuredBuffer<Reservoir> temporal_reservoir_buffer;
 RWStructuredBuffer<Reservoir> rw_spatial_reservoir_buffer;
@@ -72,7 +72,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         cs_depth_to_position(dispatch_id, buffer_size, depth);
 
     // Normal (for similarity test and consine pdf)
-    GBuffer gbuffer = decode_gbuffer(gbuffer_color[dispatch_id.xy]);
+    GBufferNormal gbuffer = GBufferNormal::load(gbuffer_color, dispatch_id.xy);
     float ao = ao_texture[dispatch_id.xy];
 
     Reservoir reservoir;
@@ -129,7 +129,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         }
 #endif
 
-        GBuffer gbuffer_n = decode_gbuffer(gbuffer_color[pixcood_n]);
+        GBufferNormal gbuffer_n = GBufferNormal::load(gbuffer_color, pixcood_n);
         float depth_n = gbuffer_depth[pixcood_n];
 
 #if 0
