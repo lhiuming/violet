@@ -47,7 +47,7 @@ bool trace_shadow(float3 ray_origin, float3 ray_dir)
         0xff, // uint InstanceInclusionMask,
         0, // uint RayContributionToHitGroupIndex,
         0, // uint MultiplierForGeometryContributionToHitGroupIndex,
-        0, // uint MissShaderIndex,
+        1, // uint MissShaderIndex,
         ray, // RayDesc Ray,
         payload // inout payload_t Payload
     );
@@ -64,15 +64,13 @@ struct RadianceTraceResult {
 // The Trace function, used by sample generation pass and sample validation pass.
 RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_prev_frame) 
 {
-    GeometryRayPayload payload;
-    payload.missed = false;
-
     RayDesc ray;
     ray.Origin = ray_origin; // position_ws;
     ray.Direction = ray_dir; // sample_dir;
     ray.TMin = 0.0005f; // 0.5mm
     ray.TMax = 1000.0f;
 
+    GeometryRayPayload payload;
     TraceRay(scene_tlas,
             RAY_FLAG_FORCE_OPAQUE // skip anyhit
             ,
@@ -87,33 +85,44 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
     // Compute Radiance for the sample point
 
     float3 radiance = 0.0f;
-    if (payload.missed) {
+    float3 position_ws = 0.0f;
+    float3 normal_ws = 0.0f;
+    if (payload.get_missed()) {
         radiance = skycube.SampleLevel(sampler_linear_clamp, ray.Direction, 0.0f).rgb;
         // Construct a hit point at skybox if miss
-        payload.position_ws = ray.Origin + ray.Direction * ray.TMax;
-        payload.normal_ws = -ray.Direction;
+        position_ws = ray.Origin + ray.Direction * ray.TMax;
+        normal_ws = -ray.Direction;
     }
     else 
     {
+        #if SHRINK_PAYLOAD
+        position_ws = ray.Direction * payload.hit_t + ray.Origin;
+        #else
+        position_ws = payload.position_ws;
+        #endif
+        normal_ws = payload.get_normal_ws();
+
         // Shade the hit point //
-        float3 diffuse_rho = get_diffuse_rho(payload.base_color, payload.metallic);
+        float3 base_color = payload.get_base_color();
+        float metallic = payload.get_metallic();
+        float3 diffuse_rho = get_diffuse_rho(base_color, metallic);
 
         // Directl lighting (diffuse only)
         float3 sun_dir = frame_params.sun_dir.xyz;
         float3 sun_inten = frame_params.sun_inten.rgb;
-        bool missed = trace_shadow(payload.position_ws, sun_dir);
+        bool missed = trace_shadow(position_ws, sun_dir);
         if (missed) 
         {
             // SPECULAR_SUPRESSION
-            float perceptual_roughness = max(payload.perceptual_roughness, 0.045f);
+            float perceptual_roughness = max(payload.get_perceptual_roughness(), 0.045f);
 
             #if RAYTRACE_INC_FIREFLY_SUPPRESS
             perceptual_roughness = max(perceptual_roughness, 0.5f);
             #endif
 
-            float NoL = saturate(dot(payload.normal_ws, sun_dir));
-            float3 specular_f0 = get_specular_f0(payload.base_color, payload.metallic);
-            float3 direct_lighting = eval_GGX_Lambertian(-ray_dir, sun_dir, payload.normal_ws, perceptual_roughness, diffuse_rho, specular_f0) * NoL * sun_inten;
+            float NoL = saturate(dot(normal_ws, sun_dir));
+            float3 specular_f0 = get_specular_f0(base_color, metallic);
+            float3 direct_lighting = eval_GGX_Lambertian(-ray_dir, sun_dir, normal_ws, perceptual_roughness, diffuse_rho, specular_f0) * NoL * sun_inten;
             float3 direct_diffuse = diffuse_rho * (Fd_Lambert() * NoL) * sun_inten;
             if (0) {
                 radiance = direct_diffuse;
@@ -133,7 +142,7 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
 
         // Indirect lighting from screen (diffuse only)
         if (bool(has_prev_frame)) { 
-            float4 prev_hpos = mul(frame_params.prev_view_proj, float4(payload.position_ws, 1.0f));
+            float4 prev_hpos = mul(frame_params.prev_view_proj, float4(position_ws, 1.0f));
             float2 ndc = prev_hpos.xy / prev_hpos.w - frame_params.jitter.zw;
             float reproj_depth = prev_hpos.z / prev_hpos.w;
 
@@ -165,7 +174,7 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
         if (sample_world_radiance_cache)
         {
             // TODO jittering 
-            VertexDescriptor vert = VertexDescriptor::create(payload.position_ws, ray.Direction);
+            VertexDescriptor vert = VertexDescriptor::create(position_ws, ray.Direction);
 
             // try to fetch radiacne 
             HashGridCell cell;
@@ -182,7 +191,7 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
             // Record the query vertex (to be used in a cache update pass)
             if (query_index < HASH_GRID_MAX_NUM_QUERIES)
             {
-                rw_hash_grid_query_buffer[query_index] = HashGridQuery::create(vert.hash(), vert.checksum(), payload.position_ws, payload.normal_geo_ws); 
+                rw_hash_grid_query_buffer[query_index] = HashGridQuery::create(vert.hash(), vert.checksum(), position_ws, payload.get_normal_geo_ws());
             }
         }
 
@@ -191,8 +200,8 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
 
     RadianceTraceResult ret;
     ret.radiance = radiance;
-    ret.position_ws = payload.position_ws;
-    ret.normal_ws = payload.normal_ws;
+    ret.position_ws = position_ws;
+    ret.normal_ws = normal_ws;
     return ret;
 }
 

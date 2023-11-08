@@ -71,15 +71,22 @@ void main(inout GeometryRayPayload payload, in Attribute attr) {
 	float3 normal_ts = normal_map.xyz * 2.0f - 1.0f;
 	float3 normal_ws = normalize( normal_ts.x * tangent.xyz + normal_ts.y * bitangent + normal_ts.z * normal );
 
+    #define CHANGE 0
+
     // World position
     float3 position_ws = mul(WorldToObject3x4(), float4(pos, 1.0f));
-    //position_ws = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+    #if CHANGE
+    position_ws = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
+    #endif
 
     // Geometry normal
     float3 pos0 = load_float3(mesh.positions_offset, indicies.x);
     float3 pos1 = load_float3(mesh.positions_offset, indicies.y);
     float3 pos2 = load_float3(mesh.positions_offset, indicies.z);
     float3 normal_geo = normalize(cross(pos1 - pos0, pos2 - pos0));
+    #if CHANGE
+    normal_geo = normal_ws;
+    #endif
 
     // Two-side geometry: flip the geometry attribute if ray hit from back face
     if (dot(normal_geo, WorldRayDirection()) > 0.0f)
@@ -87,6 +94,15 @@ void main(inout GeometryRayPayload payload, in Attribute attr) {
         normal_geo = -normal_geo;
         normal_ws = -normal_ws;
     }
+
+    #if SHRINK_PAYLOAD
+
+    payload.hit_t = RayTCurrent();
+    payload.base_color_enc = GeometryRayPayload::enc_color_rough_metal(base_color.rgb, metal_rough.g, metal_rough.b);
+    payload.normal_ws_enc = normal_encode_oct_u32(normal_ws);
+    payload.normal_geo_ws_enc = normal_encode_oct_u32(normal_geo);
+
+    #else
 
     payload.missed = false;
     payload.hit_t = RayTCurrent();
@@ -98,4 +114,6 @@ void main(inout GeometryRayPayload payload, in Attribute attr) {
     payload.perceptual_roughness = metal_rough.g;
     payload.mesh_index = mesh_index;
     payload.triangle_index = triangle_index;
+
+    #endif
 }

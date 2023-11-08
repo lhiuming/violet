@@ -1,4 +1,5 @@
-#pragma once
+#ifndef VIOLET_ENC_INC_INCLUDED
+#define VIOLET_ENC_INC_INCLUDED
 
 /*
  * Common data encoding/packing and decoding/unpacking. 
@@ -44,3 +45,5 @@ float3 normal_decode_oct_u32(uint enc)
     float2 normal_enc = normal_unorm / 65535.0f;
     return normal_decode_oct(normal_enc);
 }
+
+#endif

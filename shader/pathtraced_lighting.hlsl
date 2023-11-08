@@ -80,7 +80,6 @@ void main() {
     {
         // Trace
         GeometryRayPayload hit = (GeometryRayPayload)0;
-        hit.missed = false;
         TraceRay(scene_tlas,
                 RAY_FLAG_FORCE_OPAQUE, // skip anyhit
                 0xff, // uint InstanceInclusionMask,
@@ -92,7 +91,7 @@ void main() {
             );
 
         // Sky light
-        if (hit.missed)
+        if (hit.get_missed())
         {
             float3 skycolor = skycube.SampleLevel(sampler_linear_clamp, ray.Direction, 0).rgb;
             #if WHITE_FURNACE
@@ -107,31 +106,42 @@ void main() {
             break;
         }
 
+        float3 hit_base_color = hit.get_base_color();
         #if WHITE_FURNACE
-        hit.base_color = 1.0f;
+        hit_base_color = 1.0f;
         #endif
 
+        #if SHRINK_PAYLOAD
+        float3 hit_position_ws = ray.Direction * hit.hit_t + ray.Origin;
+        #else
+        float3 hit_position_ws = hit.position_ws;
+        #endif
+        float3 hit_normal_ws = hit.get_normal_ws();
+        float3 hit_normal_geo_ws = hit.get_normal_geo_ws();
+
         // Material attribute decode
-	    const float3 specular_color = get_specular_f0(hit.base_color, hit.metallic);
-	    const float3 diffuse_color = get_diffuse_rho(hit.base_color, hit.metallic);
+	    const float hit_metallic = hit.get_metallic();
+	    const float3 specular_color = get_specular_f0(hit_base_color, hit_metallic);
+	    const float3 diffuse_color = get_diffuse_rho(hit_base_color, hit_metallic);
         #if SPECULAR_SUPRESSION
         // always keep the sharp reflection at first bounce
-        float perceptual_roughness = select(bounce > 0, max(hit.perceptual_roughness, 0.045f), hit.perceptual_roughness);
+        float hit_percept_roughness = hit.get_perceptual_roughness();
+        float perceptual_roughness = select(bounce > 0, max(hit_percept_roughness, 0.045f), hit_percept_roughness);
         const float roughness = perceptual_roughness * perceptual_roughness;
         #else
-        const float roughness = hit.perceptual_roughness * hit.perceptual_roughness;
+        const float roughness = hit_percept_roughness * hit_percept_roughness;
         #endif
 
         // Add Direct Lighting
         #if !WHITE_FURNACE && DIRECTI_LIGHTING
-        float nol_sun = dot(hit.normal_ws, frame_params.sun_dir.xyz);
+        float nol_sun = dot(hit_normal_ws, frame_params.sun_dir.xyz);
         if ((nol_sun > 0.0f) && (bounce < MAX_BOUNCE_WITH_LIGHTING))
         {
             //float leviation = 1.f/32.f;
             float leviation = 0.0f;
 
             RayDesc shadow_ray;
-            shadow_ray.Origin = hit.position_ws + hit.normal_geo_ws * leviation;
+            shadow_ray.Origin = hit_position_ws + hit_normal_geo_ws * leviation;
             shadow_ray.Direction = frame_params.sun_dir.xyz;
             shadow_ray.TMin = 0.0005f; // 0.5mm
             shadow_ray.TMax = 1000.0f;
@@ -157,7 +167,7 @@ void main() {
 
                 float3 v = -ray.Direction;
                 float3 l = frame_params.sun_dir.xyz;
-                float3 n = hit.normal_ws;
+                float3 n = hit_normal_ws;
                 float3 h = normalize(v + l);
                 float NoL = saturate(nol_sun);
                 float NoV = saturate(dot(n, v));
@@ -200,7 +210,7 @@ void main() {
         // ref: RTGII, ch14
         float prop_specular;
         {
-            float NoV = saturate(dot(hit.normal_ws, V));
+            float NoV = saturate(dot(hit_normal_ws, V));
             float f90_luminance = luminance(specular_color);
             float e_spec = F_Schlick_single(NoV, f90_luminance);
             float e_diff = luminance(diffuse_color);
@@ -227,7 +237,7 @@ void main() {
         float3 brdf_NoL_over_pdf; // := BRDF() * NoL / pdf, also call `sample weight`
         float3 L_local; // bounced direction for next ray, in local space
         float2 u = float2(lcg_rand(rng_state), lcg_rand(rng_state));
-        float4 rot_to_local = get_rotation_to_z_from(hit.normal_ws);
+        float4 rot_to_local = get_rotation_to_z_from(hit_normal_ws);
         if (brdf_is_specular) 
         {
             float3 V_local = rotate_point(rot_to_local, V);
@@ -314,7 +324,7 @@ void main() {
         }
 
         // Terminate invalid path (tracing down-ward due to normal mapping)
-        if (dot(ray.Direction, hit.normal_geo_ws) <= 0.0f)
+        if (dot(ray.Direction, hit_normal_geo_ws) <= 0.0f)
         {
             break;
         }
@@ -323,7 +333,7 @@ void main() {
 
         // Update ray origin for next bounce
         //ray.Origin += ray.Direction * hit.hit_t;
-        ray.Origin = hit.position_ws;
+        ray.Origin = hit_position_ws;
     }
 
     // Update accumulation buffer
