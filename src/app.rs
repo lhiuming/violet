@@ -67,6 +67,14 @@ struct Args {
     #[arg(long)]
     profiler: bool,
 
+    /// Force re-import assets, even if cache is available
+    #[arg(long)]
+    reimport_assets: bool,
+
+    /// Force to disable texture compression
+    #[arg(long)]
+    disable_tex_compress: bool,
+
     /// Camera parameter presets (position Vec3 and angle Vec2)
     #[arg(long, num_args = 0..=45, value_delimiter = ',')]
     camera_preset: Vec<f32>,
@@ -155,7 +163,11 @@ where
 
     if let Some(path) = &args.path {
         println!("Loading model: {}", path);
-        let model = model::load(Path::new(&path));
+        let config = model::LoadConfig {
+            force_reimport: args.reimport_assets,
+            tex_compression: !args.disable_tex_compress,
+        };
+        let model = model::load(Path::new(&path), config);
         if let Ok(model) = model {
             println!("Uploading to GPU ...");
             render_scene.add(&rd, &model);

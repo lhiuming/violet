@@ -16,6 +16,7 @@ spirq = "0.6.4"
 # Mesh/Texture assets
 gltf = "1.0"
 mikktspace = "0.3.0"
+intel_tex_2 = "0.2.2"
 rkyv = "0.7"
 # Linear Algebra
 glam = "0.24"
@@ -28,6 +29,8 @@ clap = { version = "4.4.7", features = ["derive"] }
 # Simple In-Game CPU profiling
 puffin = "0.17"
 puffin_egui = "0.23"
+# utilities
+bitflags = "2.4.1"
 
 [dependencies.windows-sys]
 version = "0.28.0"

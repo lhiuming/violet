@@ -98,7 +98,7 @@ void main(inout GeometryRayPayload payload, in Attribute attr) {
     #if SHRINK_PAYLOAD
 
     payload.hit_t = RayTCurrent();
-    payload.base_color_enc = GeometryRayPayload::enc_color_rough_metal(base_color.rgb, metal_rough.g, metal_rough.b);
+    payload.base_color_enc = GeometryRayPayload::enc_color_rough_metal(base_color.rgb, metal_rough.g, metal_rough.r);
     payload.normal_ws_enc = normal_encode_oct_u32(normal_ws);
     payload.normal_geo_ws_enc = normal_encode_oct_u32(normal_geo);
 
@@ -110,7 +110,7 @@ void main(inout GeometryRayPayload payload, in Attribute attr) {
     payload.normal_geo_ws = normal_geo;
     payload.position_ws = position_ws;
     payload.base_color = base_color.xyz;
-    payload.metallic = metal_rough.b;
+    payload.metallic = metal_rough.r;
     payload.perceptual_roughness = metal_rough.g;
     payload.mesh_index = mesh_index;
     payload.triangle_index = triangle_index;

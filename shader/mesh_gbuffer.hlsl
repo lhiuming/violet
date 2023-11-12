@@ -73,7 +73,7 @@ void ps_main(
 
     GBuffer gbuffer;
     gbuffer.color = base_color.rgb;
-    gbuffer.metallic = metal_rough.b;
+    gbuffer.metallic = metal_rough.r;
     gbuffer.perceptual_roughness = metal_rough.g;
     gbuffer.normal = normal_ws;
     gbuffer.shading_path = 1;

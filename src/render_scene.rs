@@ -5,7 +5,7 @@ use ash::vk;
 use glam::Vec3;
 
 use crate::{
-    model::Model,
+    model::{ImageFormat, Model},
     render_device::{
         AccelerationStructure, Buffer, BufferDesc, RenderDevice, Texture, TextureDesc, TextureView,
         TextureViewDesc,
@@ -527,7 +527,13 @@ impl RenderScene {
 
         let texture_index_offset = self.material_textures.len() as u32;
         for image in &model.images {
-            let texel_count = image.width * image.height;
+            let format = match image.format {
+                ImageFormat::R8G8B8A8Unorm => vk::Format::R8G8B8A8_UNORM,
+                ImageFormat::R8G8B8A8Srgb => vk::Format::R8G8B8A8_SRGB,
+                ImageFormat::BC5Unorm => vk::Format::BC5_UNORM_BLOCK,
+                ImageFormat::BC7Unorm => vk::Format::BC7_UNORM_BLOCK,
+                ImageFormat::BC7Srgb => vk::Format::BC7_SRGB_BLOCK,
+            };
 
             // Create texture object
             let texture = rd
@@ -535,20 +541,21 @@ impl RenderScene {
                     TextureDesc::new_2d(
                         image.width,
                         image.height,
-                        vk::Format::R8G8B8A8_UINT,
+                        format,
                         vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
                     )
                     .with_flags(vk::ImageCreateFlags::MUTABLE_FORMAT), // performance cost?
                 )
                 .unwrap();
 
+            let buffer_size = image.data.len();
+
             // Create staging buffer
-            let staging_buffer = upload_context.borrow_staging_buffer(rd, texel_count as u64 * 4);
+            let staging_buffer = upload_context.borrow_staging_buffer(rd, buffer_size as u64);
 
             // Read to staging buffer
-            let staging_slice = unsafe {
-                std::slice::from_raw_parts_mut(staging_buffer.0.data, texel_count as usize * 4)
-            };
+            let staging_slice =
+                unsafe { std::slice::from_raw_parts_mut(staging_buffer.0.data, buffer_size) };
             staging_slice.copy_from_slice(&image.data);
 
             // Transfer to texture
@@ -654,23 +661,19 @@ impl RenderScene {
             // Create texture view for each material and add to scene
             // TODO collect and reduce duplicate in view?
             // TODO default textures
-            let mut resolve = |map: &Option<crate::model::MaterialMap>, is_srgb: bool| match map {
+            let mut resolve = |map: &Option<crate::model::MaterialMap>| match map {
                 Some(map) => {
                     let texture = {
                         let texture_index = texture_index_offset + map.image_index;
                         self.material_textures[texture_index as usize]
                     };
-                    let format = if is_srgb {
-                        vk::Format::R8G8B8A8_SRGB
-                    } else {
-                        vk::Format::R8G8B8A8_UNORM
+                    let view_desc = TextureViewDesc {
+                        view_type: vk::ImageViewType::TYPE_2D,
+                        format: texture.desc.format,
+                        aspect: vk::ImageAspectFlags::COLOR,
+                        ..Default::default()
                     };
-                    let texture_view = rd
-                        .create_texture_view(
-                            texture,
-                            TextureViewDesc::with_format(&texture.desc, format),
-                        )
-                        .unwrap();
+                    let texture_view = rd.create_texture_view(texture, view_desc).unwrap();
                     let texture_view_index = self.material_texture_views.len() as u32;
                     self.material_texture_views.push(texture_view);
                     texture_view_index
@@ -679,9 +682,9 @@ impl RenderScene {
             };
 
             self.material_parmas.push(MaterialParams {
-                base_color_index: resolve(&material.base_color_map, true),
-                metallic_roughness_index: resolve(&material.metallic_roughness_map, false),
-                normal_index: resolve(&material.normal_map, false),
+                base_color_index: resolve(&material.base_color_map),
+                metallic_roughness_index: resolve(&material.metallic_roughness_map),
+                normal_index: resolve(&material.normal_map),
                 pad: 0,
             });
         }

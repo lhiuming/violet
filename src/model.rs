@@ -1,10 +1,27 @@
 use glam::{Mat4, Vec3, Vec4};
+use intel_tex_2::{bc5, bc7};
 use rkyv::{ser::Serializer, Archive, Deserialize, Serialize};
 use std::{
+    collections::{hash_map, HashMap},
     fs::{File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
 };
+
+#[derive(Debug, Clone, Copy)]
+pub struct LoadConfig {
+    pub force_reimport: bool,
+    pub tex_compression: bool,
+}
+
+impl Default for LoadConfig {
+    fn default() -> Self {
+        LoadConfig {
+            force_reimport: false,
+            tex_compression: true,
+        }
+    }
+}
 
 #[derive(Archive, Deserialize, Serialize)]
 pub struct Model {
@@ -49,12 +66,32 @@ pub struct MaterialMap {
     pub image_index: u32,
 }
 
-// TODO image compression
+#[derive(Archive, Deserialize, Serialize)]
+pub enum ImageFormat {
+    R8G8B8A8Unorm,
+    R8G8B8A8Srgb,
+    BC5Unorm,
+    BC7Unorm,
+    BC7Srgb,
+}
+
 #[derive(Archive, Deserialize, Serialize)]
 pub struct Image {
     pub width: u32,
     pub height: u32,
+    pub format: ImageFormat,
     pub data: Vec<u8>, // RGBA
+}
+
+impl Image {
+    pub fn empty() -> Self {
+        Image {
+            width: 0,
+            height: 0,
+            format: ImageFormat::R8G8B8A8Unorm,
+            data: Default::default(),
+        }
+    }
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
@@ -127,13 +164,11 @@ impl mikktspace::Geometry for MikktspaceGeometry<'_> {
     }
 }
 
-const DEV_ALWAYS_IMPORT: bool = false;
-
 // Load a model from cache, or
 // if model is not in cache, load the original gltf file and store it in cache.
-pub fn load(path: &Path) -> Result<Model> {
-    if DEV_ALWAYS_IMPORT {
-        return import_gltf(path);
+pub fn load(path: &Path, config: LoadConfig) -> Result<Model> {
+    if config.force_reimport {
+        return import_gltf(path, config);
     }
 
     // Try to load from caceh
@@ -147,7 +182,7 @@ pub fn load(path: &Path) -> Result<Model> {
                         "Model cache ({}) not exist ... import the gltf.",
                         cache_path
                     );
-                    import_gltf(path)
+                    import_gltf(path, config)
                 }
                 _ => Err(err),
             }
@@ -229,8 +264,8 @@ impl Model {
     }
 }
 
-pub fn import_gltf(path: &Path) -> Result<Model> {
-    let model = import_gltf_uncached(path);
+pub fn import_gltf(path: &Path, config: LoadConfig) -> Result<Model> {
+    let model = import_gltf_uncached(path, config);
     if let Ok(model) = &model {
         let cache_path = to_cache_path(path).expect(&format!(
             "Failed to get cached path for: {}",
@@ -241,7 +276,16 @@ pub fn import_gltf(path: &Path) -> Result<Model> {
     model
 }
 
-pub fn import_gltf_uncached(path: &Path) -> Result<Model> {
+bitflags::bitflags! {
+#[derive(Debug, PartialEq, Eq, Copy, Clone)]
+struct ImportedImageUsage: u8 {
+    const BaseColor  = 0b00000001;
+    const Normal     = 0b00000010;
+    const MetalRough = 0b00000100;
+}
+}
+
+pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
     // Read the document (structure) and blob data (buffers, imanges)
     let (document, buffers, images) = match gltf::import(path) {
         Ok(ret) => ret,
@@ -468,45 +512,6 @@ pub fn import_gltf_uncached(path: &Path) -> Result<Model> {
         }
     }
 
-    // Load images
-    let mut model_images = Vec::<Image>::new();
-    for image in images {
-        // Log
-        println!(
-            "Loading Image {} {}, {:?}: {:?}",
-            image.width,
-            image.height,
-            image.format,
-            image.pixels.split_at(8).0
-        );
-
-        // Load
-        let texel_count = image.width * image.height;
-        let mut data;
-        match image.format {
-            gltf::image::Format::R8G8B8 => {
-                data = Vec::with_capacity(texel_count as usize * 4);
-                for pixel in image.pixels.chunks(3) {
-                    data.push(pixel[0]);
-                    data.push(pixel[1]);
-                    data.push(pixel[2]);
-                    data.push(255);
-                }
-            }
-            gltf::image::Format::R8G8B8A8 => {
-                data = image.pixels.to_vec();
-            }
-            _ => todo!(),
-        }
-        assert_eq!(data.len(), texel_count as usize * 4);
-
-        model_images.push(Image {
-            width: image.width,
-            height: image.height,
-            data,
-        });
-    }
-
     let fmt_sampler = |sampler: &gltf::texture::Sampler<'_>| {
         format!(
             "index:{:?}-{:?}, <min:{:?}, max:{:?}, wrap_s:{:?}, wrap_t:{:?}>",
@@ -517,6 +522,17 @@ pub fn import_gltf_uncached(path: &Path) -> Result<Model> {
             sampler.wrap_s(),
             sampler.wrap_t(),
         )
+    };
+
+    type ImageIndex = u32;
+    let mut image_usages = HashMap::<ImageIndex, ImportedImageUsage>::new();
+    let mut mark_image_usage = |index, usage| match image_usages.entry(index) {
+        hash_map::Entry::Occupied(entry) => {
+            entry.into_mut().extend(usage);
+        }
+        hash_map::Entry::Vacant(entry) => {
+            entry.insert(usage);
+        }
     };
 
     // Looa materials
@@ -541,15 +557,17 @@ pub fn import_gltf_uncached(path: &Path) -> Result<Model> {
             if base_color.tex_coord() != 0 {
                 println!("Warning: GLTF Loader: Only texture coordinate 0 is supported");
             }
+
+            let image_index = base_color.texture().source().index() as ImageIndex;
             println!(
                 "Material base color texture: {}, sampler {}",
-                base_color.texture().source().index(),
+                image_index,
                 fmt_sampler(&base_color.texture().sampler())
             );
 
-            Some(MaterialMap {
-                image_index: base_color.texture().source().index() as u32,
-            })
+            mark_image_usage(image_index, ImportedImageUsage::BaseColor);
+
+            Some(MaterialMap { image_index })
         } else {
             None
         };
@@ -559,11 +577,15 @@ pub fn import_gltf_uncached(path: &Path) -> Result<Model> {
                 if metal_rough.tex_coord() != 0 {
                     println!("Warning: GLTF Loader: Only texture coordinate 0 is supported");
                 }
+
+                let image_index = metal_rough.texture().index() as ImageIndex;
                 println!(
                     "Material metal rough texture: {}, sampler {:?}",
-                    metal_rough.texture().index(),
+                    image_index,
                     fmt_sampler(&metal_rough.texture().sampler()),
                 );
+
+                mark_image_usage(image_index, ImportedImageUsage::MetalRough);
 
                 Some(MaterialMap {
                     image_index: metal_rough.texture().source().index() as u32,
@@ -576,17 +598,22 @@ pub fn import_gltf_uncached(path: &Path) -> Result<Model> {
             if normal.tex_coord() != 0 {
                 println!("Warning: GLTF Loader: Only texture coordinate 0 is supported");
             }
+
+            let image_index = normal.texture().source().index() as ImageIndex;
             println!(
                 "Material normal texture: {}, sampler {:?}",
-                normal.texture().index(),
+                image_index,
                 fmt_sampler(&normal.texture().sampler()),
             );
+
             if normal.scale() != 1.0f32 {
                 println!(
                     "\t normal texture required scale {}, is ignored.",
                     normal.scale()
                 );
             }
+
+            mark_image_usage(image_index, ImportedImageUsage::Normal);
 
             Some(MaterialMap {
                 image_index: normal.texture().index() as u32,
@@ -609,6 +636,138 @@ pub fn import_gltf_uncached(path: &Path) -> Result<Model> {
             normal_map,
             metaliic_factor: pbr_texs.metallic_factor(),
             roughness_factor: pbr_texs.roughness_factor(),
+        });
+    }
+
+    // Load and Compress images
+    let mut model_images = Vec::<Image>::new();
+    for (image_index, image) in images.iter().enumerate() {
+        let image_index = image_index as ImageIndex;
+        let imported_usage = image_usages.get(&image_index);
+
+        // Log
+        println!(
+            "Loading Image {} {}, {:?}, usage {:?}: {:?}",
+            image.width,
+            image.height,
+            image.format,
+            imported_usage,
+            image.pixels.split_at(8).0
+        );
+
+        // Insert a placeholder for not used image slot (too keep the `model_images` array fully packed)
+        if imported_usage.is_none() {
+            model_images.push(Image::empty());
+            continue;
+        }
+        let imported_usage = *imported_usage.unwrap();
+
+        if imported_usage.bits().count_ones() > 1 {
+            println!(
+                "Warning: Image {} is used for multiple purposes ({:?}) !!!",
+                image_index, imported_usage
+            );
+        }
+
+        // For metalllic_roughness, we swizzle the image to reduce channels (for compression)
+        // Original: G: roughness, B: metallic
+        // After: R: metallic, G: roughness, BA: dont care
+        let swizzle_bgxx = imported_usage == ImportedImageUsage::MetalRough;
+
+        // Load
+        let texel_count = image.width * image.height;
+        let mut raw_data;
+        match image.format {
+            gltf::image::Format::R8G8B8 => {
+                raw_data = Vec::with_capacity(texel_count as usize * 4);
+                for pixel in image.pixels.chunks(3) {
+                    if swizzle_bgxx {
+                        raw_data.push(pixel[2]); // b
+                        raw_data.push(pixel[1]); // g
+                        raw_data.push(pixel[0]); // r
+                        raw_data.push(255); // one
+                    } else {
+                        raw_data.push(pixel[0]);
+                        raw_data.push(pixel[1]);
+                        raw_data.push(pixel[2]);
+                        raw_data.push(255);
+                    }
+                }
+            }
+            gltf::image::Format::R8G8B8A8 => {
+                if swizzle_bgxx {
+                    raw_data = Vec::with_capacity(texel_count as usize * 4);
+                    for pixel in image.pixels.chunks(3) {
+                        raw_data.push(pixel[2]); // b
+                        raw_data.push(pixel[1]); // g
+                        raw_data.push(pixel[0]); // r
+                        raw_data.push(pixel[3]); // a
+                    }
+                } else {
+                    raw_data = image.pixels.to_vec();
+                }
+            }
+            _ => todo!(),
+        }
+        assert_eq!(raw_data.len(), texel_count as usize * 4);
+
+        // Compress
+        let (data, format) = if config.tex_compression {
+            match imported_usage {
+                ImportedImageUsage::BaseColor => {
+                    // NOTE: we dont support alpha for now, so we just drop the alpha channel
+                    // NOTE: base color is implicitly sRGB (enforced by glTF spec)
+                    let settings = bc7::opaque_basic_settings();
+                    let surface = intel_tex_2::RgbaSurface {
+                        data: &raw_data,
+                        width: image.width,
+                        height: image.height,
+                        stride: image.width * 4,
+                    };
+                    (
+                        bc7::compress_blocks(&settings, &surface),
+                        ImageFormat::BC7Srgb,
+                    )
+                }
+                ImportedImageUsage::Normal => {
+                    // NOTE: normal only in xyz, linear (unorm)
+                    let settings = bc7::opaque_basic_settings();
+                    let surface = intel_tex_2::RgbaSurface {
+                        data: &raw_data,
+                        width: image.width,
+                        height: image.height,
+                        stride: image.width * 4,
+                    };
+                    (
+                        bc7::compress_blocks(&settings, &surface),
+                        ImageFormat::BC7Unorm,
+                    )
+                }
+                ImportedImageUsage::MetalRough => {
+                    // NOTE: metalic roughness texture only in xy, linear (unorm)
+                    let surface = intel_tex_2::RgbaSurface {
+                        data: &raw_data,
+                        width: image.width,
+                        height: image.height,
+                        stride: image.width * 4,
+                    };
+                    (bc5::compress_blocks(&surface), ImageFormat::BC5Unorm)
+                }
+                _ => (raw_data, ImageFormat::R8G8B8A8Unorm),
+            }
+        } else {
+            // Only base color and emmisive is (and must be) sRGB (by glTF spec)
+            match imported_usage {
+                ImportedImageUsage::BaseColor => (raw_data, ImageFormat::R8G8B8A8Srgb),
+                _ => (raw_data, ImageFormat::R8G8B8A8Unorm),
+            }
+        };
+
+        model_images.push(Image {
+            width: image.width,
+            height: image.height,
+            format,
+            data,
         });
     }
 
