@@ -63,6 +63,26 @@ impl super::RenderDevice {
 
         // Create instance
         let instance = {
+            // Log version
+            match entry
+                .try_enumerate_instance_version()
+                .expect("Vulkan: failed to enumerate instance version")
+            {
+                Some(version) => {
+                    let major = vk::api_version_major(version);
+                    let minor = vk::api_version_minor(version);
+                    let patch = vk::api_version_patch(version);
+                    let variant = vk::api_version_variant(version);
+                    println!(
+                        "Vulkan API Version: {}.{} (patch {}, variant {})",
+                        major, minor, patch, variant
+                    );
+                }
+                None => {
+                    println!("Vulkan API Version: 1.0");
+                }
+            }
+
             let app_info = vk::ApplicationInfo::builder().api_version(vk::API_VERSION_1_3);
 
             let enable_validation_layer = match std::env::var_os("VIOLET_VALIDATION_LAYER") {
