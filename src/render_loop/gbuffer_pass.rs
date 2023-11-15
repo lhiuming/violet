@@ -88,7 +88,7 @@ pub fn add_gbuffer_pass<'a, 'render>(
             });
             cb.set_depth_test_enable(true);
             cb.set_depth_write_enable(true);
-            cb.set_stencil_test_enable(true);
+            cb.set_stencil_test_enable(false); // TODO move back to render pass desc
             let face_mask = vk::StencilFaceFlags::FRONT_AND_BACK;
             let stencil_ops = StencilOps::write_on_pass(vk::CompareOp::ALWAYS);
             cb.set_stencil_op(face_mask, stencil_ops);
