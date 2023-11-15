@@ -859,7 +859,7 @@ pub fn create_compute_pipeline(
 
     // Create pipeline object
     let pipeline = {
-        let entry_point_c = CString::new(shader_def.entry_point.clone())
+        let entry_point_c = CString::new(shader_def.entry_point)
             .expect(&format!("Bad entry point name: {}", shader_def.entry_point));
         let stage_info = vk::PipelineShaderStageCreateInfo::builder()
             .stage(vk::ShaderStageFlags::COMPUTE)
