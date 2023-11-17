@@ -996,80 +996,119 @@ impl RenderScene {
             return;
         }
 
-        // Build BLAS for all added meshes
+        // Build BLASes for all added meshes (One Mesh per BLAS)
         if let Some(khr_accel_struct) = rd.khr_accel_struct.as_ref() {
-            // Get build size
-            // NOTE: actual buffer addresses in blas_geometrys are ignored
-            let build_size_info = unsafe {
-                assert_eq!(blas_geometries.len(), max_primitive_counts.len());
-                let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
-                    .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
-                    .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
-                    .geometries(&blas_geometries)
-                    .build();
-                khr_accel_struct.get_acceleration_structure_build_sizes(
-                    vk::AccelerationStructureBuildTypeKHR::DEVICE,
-                    &build_info,
-                    &max_primitive_counts,
-                )
-            };
+            // Gather all build info
+            let mut scratch_offset_curr = 0;
+            let mut scratch_offsets = Vec::<u64>::new();
+            let mut blas_sizes = Vec::<u64>::new();
+            assert_eq!(blas_geometries.len(), max_primitive_counts.len());
+            for i in 0..blas_geometries.len() {
+                // Get build size
+                // NOTE: actual buffer addresses in blas_geometrys are ignored
+                let single_geometry = &blas_geometries[i..i + 1];
+                let single_max_primitive_count = &max_primitive_counts[i..i + 1];
+                let build_size_info = unsafe {
+                    let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
+                        .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+                        .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
+                        .geometries(single_geometry)
+                        .build();
+                    khr_accel_struct.get_acceleration_structure_build_sizes(
+                        vk::AccelerationStructureBuildTypeKHR::DEVICE,
+                        &build_info,
+                        single_max_primitive_count,
+                    )
+                };
 
-            // Create buffer
-            let buffer = rd
-                .create_buffer(BufferDesc {
-                    size: build_size_info.acceleration_structure_size,
-                    usage: vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
-                        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-                    memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                })
-                .unwrap();
+                let scratch_offset = {
+                    let alignment = rd
+                        .physical
+                        .accel_struct_properties
+                        .min_acceleration_structure_scratch_offset_alignment;
+                    let mask = (alignment - 1) as u64;
+                    (scratch_offset_curr + mask) & !mask
+                };
+                scratch_offsets.push(scratch_offset);
+                scratch_offset_curr = scratch_offset + build_size_info.build_scratch_size;
 
-            // Create AS
-            let accel_struct = rd
-                .create_accel_struct(
-                    buffer,
-                    0,
-                    build_size_info.acceleration_structure_size,
-                    vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL,
-                )
-                .unwrap();
+                blas_sizes.push(build_size_info.acceleration_structure_size);
+            }
+            let total_scratch_size = scratch_offset_curr;
 
-            // Create Scratch buffer
+            // Create scratch buffer (batching all BLAS builds)
             let scratch_buffer = rd
                 .create_buffer(BufferDesc {
-                    size: build_size_info.build_scratch_size,
+                    size: total_scratch_size,
                     usage: vk::BufferUsageFlags::STORAGE_BUFFER
                         | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
                     memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
                 })
                 .unwrap();
+            let scratch_device_address = scratch_buffer.device_address.unwrap();
 
-            upload_context.immediate_submit(rd, move |cb| {
-                let scratch_data = vk::DeviceOrHostAddressKHR {
-                    device_address: scratch_buffer.device_address.unwrap(),
-                };
-                assert_eq!(blas_geometries.len(), blas_range_infos.len());
+            // Collect all BLAS builds
+            let mut blas_infos = Vec::<vk::AccelerationStructureBuildGeometryInfoKHR>::new();
+            let mut build_range_infos = Vec::<&[vk::AccelerationStructureBuildRangeInfoKHR]>::new();
+            for i in 0..blas_geometries.len() {
+                let blas_size = blas_sizes[i];
+
+                // Create buffer
+                let buffer = rd
+                    .create_buffer(BufferDesc {
+                        size: blas_size,
+                        usage: vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
+                            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                        memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                    })
+                    .unwrap();
+
+                // Create AS
+                let accel_struct = rd
+                    .create_accel_struct(
+                        buffer,
+                        0,
+                        blas_size,
+                        vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL,
+                    )
+                    .unwrap();
+
+                // Record it
+                self.mesh_bottom_level_accel_structs.push(accel_struct);
+
+                // NOTE: one geometry, one blas
+                let single_geometry = &blas_geometries[i..i + 1];
+                let single_range = &blas_range_infos[i..i + 1];
+
+                // Setup build info
+                let scrath_offset = scratch_offsets[i];
                 let geo_info = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
                     .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
                     .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
                     .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
                     .dst_acceleration_structure(accel_struct.handle)
-                    .geometries(&blas_geometries)
-                    .scratch_data(scratch_data)
+                    .geometries(single_geometry)
+                    .scratch_data(vk::DeviceOrHostAddressKHR {
+                        device_address: scratch_device_address + scrath_offset,
+                    })
                     .build();
-                let blas_range_infos = blas_range_infos.as_slice();
+                blas_infos.push(geo_info);
+
+                // trivia transformation
+                build_range_infos.push(single_range);
+            }
+
+            upload_context.immediate_submit(rd, move |cb| {
                 unsafe {
                     khr_accel_struct.cmd_build_acceleration_structures(
                         cb,
-                        slice::from_ref(&geo_info),
-                        slice::from_ref(&blas_range_infos),
+                        &blas_infos,
+                        &build_range_infos,
                     )
                 };
             });
 
             rd.destroy_buffer(scratch_buffer);
-
-            self.mesh_bottom_level_accel_structs.push(accel_struct);
         }
     }
 
@@ -1085,8 +1124,7 @@ impl RenderScene {
         let instance_buffer = rd
             .create_buffer(BufferDesc {
                 size: (size_of::<vk::AccelerationStructureInstanceKHR>() * num_blas) as u64,
-                usage: vk::BufferUsageFlags::TRANSFER_DST
-                    | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+                usage: vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
                     | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
                 memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
                     | vk::MemoryPropertyFlags::HOST_COHERENT,
@@ -1094,6 +1132,7 @@ impl RenderScene {
             .unwrap();
 
         // Traverse all BLAS to fill the instance buffer
+        // NOTE: no instancing applied currently
         for (index, blas) in self.mesh_bottom_level_accel_structs.iter().enumerate() {
             // Fill instance buffer (3x4 row-major affine transform)
             let xform = vk::TransformMatrixKHR {
@@ -1145,7 +1184,7 @@ impl RenderScene {
         // Calculate build size
         // NOTE: actual buffer addresses in geometrys are ignored
         let build_size_info = unsafe {
-            let max_primitive_count = 1;
+            let max_primitive_count = num_blas as u32;
             let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
                 .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
                 .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
@@ -1202,7 +1241,7 @@ impl RenderScene {
                 })
                 .build();
             let range_info = vk::AccelerationStructureBuildRangeInfoKHR::builder()
-                .primitive_count(1)
+                .primitive_count(num_blas as u32)
                 .primitive_offset(0)
                 .first_vertex(0)
                 .transform_offset(0)

@@ -93,13 +93,13 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
         position_ws = ray.Origin + ray.Direction * ray.TMax;
         normal_ws = -ray.Direction;
     }
-    else 
+    else
     {
-        #if SHRINK_PAYLOAD
+#if GEOMETRY_RAY_PAYLOAD_NO_POSITION
         position_ws = ray.Direction * payload.hit_t + ray.Origin;
-        #else
+#else
         position_ws = payload.position_ws;
-        #endif
+#endif
         normal_ws = payload.get_normal_ws();
 
         // Shade the hit point //

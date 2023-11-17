@@ -3,6 +3,9 @@
 
 #include "geometry_ray.inc.hlsl"
 
+#define SKIP_POSITION_LOAD 0
+#define EMULATE_TEX_LOD 0
+
 // ----------------
 // Geometry loading
 
@@ -46,7 +49,7 @@ struct Attribute
 
 [shader("closesthit")]
 void main(inout GeometryRayPayload payload, in Attribute attr) {
-    uint mesh_index = GeometryIndex(); // index of geometry in BLAS; we are using only one blas for all loaded mesh
+    uint mesh_index = InstanceIndex(); // Instance index in TLAS; we are using one instance per blas per mesh
     uint triangle_index = PrimitiveIndex();
 
     MeshParams mesh = mesh_params[mesh_index];
@@ -62,6 +65,10 @@ void main(inout GeometryRayPayload payload, in Attribute attr) {
     // TODO calculate before interpolation?
 	float3 bitangent = normalize(tangent.w * cross(normal, tangent.xyz));
 
+#if EMULATE_TEX_LOD
+    uv = uv * rcp(float(1 << EMULATE_TEX_LOD));
+#endif
+
     MaterialParams mat = material_params[mesh.material_index];
 	float4 base_color = bindless_textures[mat.base_color_index].SampleLevel(sampler_linear_wrap, uv, 0);
 	float4 metal_rough = bindless_textures[mat.metallic_roughness_index].SampleLevel(sampler_linear_wrap, uv, 0);
@@ -75,7 +82,7 @@ void main(inout GeometryRayPayload payload, in Attribute attr) {
 
     // World position
     float3 position_ws = mul(WorldToObject3x4(), float4(pos, 1.0f));
-    #if CHANGE
+#if SKIP_POSITION_LOAD
     position_ws = WorldRayOrigin() + WorldRayDirection() * RayTCurrent();
     #endif
 
@@ -84,7 +91,7 @@ void main(inout GeometryRayPayload payload, in Attribute attr) {
     float3 pos1 = load_float3(mesh.positions_offset, indicies.y);
     float3 pos2 = load_float3(mesh.positions_offset, indicies.z);
     float3 normal_geo = normalize(cross(pos1 - pos0, pos2 - pos0));
-    #if CHANGE
+#if SKIP_POSITION_LOAD
     normal_geo = normal_ws;
     #endif
 
@@ -108,7 +115,9 @@ void main(inout GeometryRayPayload payload, in Attribute attr) {
     payload.hit_t = RayTCurrent();
     payload.normal_ws = normal_ws;
     payload.normal_geo_ws = normal_geo;
+#if !GEOMETRY_RAY_PAYLOAD_NO_POSITION
     payload.position_ws = position_ws;
+#endif
     payload.base_color = base_color.xyz;
     payload.metallic = metal_rough.r;
     payload.perceptual_roughness = metal_rough.g;

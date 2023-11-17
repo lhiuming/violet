@@ -8,6 +8,7 @@ pub struct PhysicalDevice {
     pub handle: vk::PhysicalDevice,
     pub properties: vk::PhysicalDeviceProperties,
     pub ray_tracing_pipeline_properties: vk::PhysicalDeviceRayTracingPipelinePropertiesKHR,
+    pub accel_struct_properties: vk::PhysicalDeviceAccelerationStructurePropertiesKHR,
     pub memory_properties: vk::PhysicalDeviceMemoryProperties,
 }
 
@@ -39,10 +40,19 @@ impl PhysicalDevice {
         // Get PhysicalDevice extended properties
         let mut ray_tracing_pipeline_properties =
             vk::PhysicalDeviceRayTracingPipelinePropertiesKHR::default();
+        let mut accel_struct_properties =
+            vk::PhysicalDeviceAccelerationStructurePropertiesKHR::default();
         let mut properties2 = vk::PhysicalDeviceProperties2::builder()
-            .push_next(&mut ray_tracing_pipeline_properties);
+            .push_next(&mut ray_tracing_pipeline_properties)
+            .push_next(&mut accel_struct_properties)
+            .build();
         unsafe {
-            instance.get_physical_device_properties2(physical_device_handle, &mut properties2)
+            instance.get_physical_device_properties2(physical_device_handle, &mut properties2);
+
+            // clean up for safety
+            properties2.p_next = std::ptr::null_mut();
+            ray_tracing_pipeline_properties.p_next = std::ptr::null_mut();
+            accel_struct_properties.p_next = std::ptr::null_mut();
         }
 
         // Get PhysicalDevice memory properties
@@ -54,6 +64,7 @@ impl PhysicalDevice {
             handle: physical_device_handle,
             properties: properties2.properties,
             ray_tracing_pipeline_properties,
+            accel_struct_properties,
             memory_properties,
         }
     }

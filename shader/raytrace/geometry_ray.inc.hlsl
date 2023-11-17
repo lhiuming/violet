@@ -7,8 +7,12 @@
 #include "../enc.inc.hlsl"
 
 #define SHRINK_PAYLOAD 0
+#define GEOMETRY_RAY_PAYLOAD_NO_POSITION 0
 
 #if SHRINK_PAYLOAD
+
+#undef GEOMETRY_RAY_PAYLOAD_NO_POSITION
+#define GEOMETRY_RAY_PAYLOAD_NO_POSITION 1
 
 struct GeometryRayPayload {
     float hit_t;
@@ -65,7 +69,9 @@ struct GeometryRayPayload {
     float hit_t;
     float3 normal_ws;
     float3 normal_geo_ws;
+#if !GEOMETRY_RAY_PAYLOAD_NO_POSITION
     float3 position_ws;
+#endif
     float3 base_color;
     float metallic;
     float perceptual_roughness;

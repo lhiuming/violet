@@ -111,11 +111,11 @@ void main() {
         hit_base_color = 1.0f;
         #endif
 
-        #if SHRINK_PAYLOAD
+#if GEOMETRY_RAY_PAYLOAD_NO_POSITION
         float3 hit_position_ws = ray.Direction * hit.hit_t + ray.Origin;
-        #else
+#else
         float3 hit_position_ws = hit.position_ws;
-        #endif
+#endif
         float3 hit_normal_ws = hit.get_normal_ws();
         float3 hit_normal_geo_ws = hit.get_normal_geo_ws();
 
