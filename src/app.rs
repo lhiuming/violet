@@ -193,6 +193,7 @@ where
     let mut imgui = imgui::ImGUI::new();
     let mut show_gui = true;
     let mut full_stat = false;
+    let mut stat_filter_ms = 0.05;
 
     // Init Camera
     static CAMERA_INIT_POS: Vec3 = Vec3::new(0.0, -4.0, 2.0);
@@ -379,6 +380,7 @@ where
                 // Internal GPU Profiler
                 imgui::Window::new("GPU")
                     .default_open(false)
+                    .vscroll(true)
                     .show(ctx, |ui| {
                         // shader debug
                         let mut shader_debug = shaders.shader_debug();
@@ -398,7 +400,14 @@ where
 
                         // stat
                         if let Some(stat) = render_loop.gpu_stat() {
-                            ui.toggle_value(&mut full_stat, "full_stat");
+                            ui.horizontal(|ui| {
+                                ui.toggle_value(&mut full_stat, "full_stat");
+                                ui.set_enabled(!full_stat);
+                                ui.add(
+                                    egui::Slider::new(&mut stat_filter_ms, 0.05..=0.5)
+                                        .text("threshold"),
+                                )
+                            });
 
                             let hline_stroke =
                                 egui::Stroke::new(1.0, egui::Color32::from_rgb(160, 64, 224));
@@ -414,7 +423,7 @@ where
                                 let avg_time_ms = avg_time_ns / 1_000_000.0;
                                 // skip
                                 if !full_stat {
-                                    if (avg_time_ms < 0.005) || (avg_freq <= 0.0) {
+                                    if (avg_time_ms < stat_filter_ms) || (avg_freq <= 0.0) {
                                         continue;
                                     }
                                 }
