@@ -1356,7 +1356,7 @@ impl PushConstantsBuilder {
 
     pub fn push_inplace<T>(&mut self, value: &T)
     where
-        T: Copy + Sized,
+        T: Copy,
     {
         // Push constant size must be a multiple of 4; we assume each push is a complete field.
         assert!(size_of::<T>() % 4 == 0);
@@ -1374,6 +1374,23 @@ impl PushConstantsBuilder {
         T: Copy,
     {
         self.push_inplace(value);
+        self
+    }
+
+    pub fn push_slice<T>(mut self, values: &[T]) -> Self
+    where
+        T: Copy,
+    {
+        // Push constant size must be a multiple of 4; we assume each push is a complete field.
+        assert!(size_of::<T>() % 4 == 0);
+
+        let size = std::mem::size_of::<T>() * values.len();
+        let offset = self.data.len();
+        self.data.resize(offset + size, 0);
+        self.data[offset..offset + size].copy_from_slice(unsafe {
+            std::slice::from_raw_parts(values.as_ptr() as *const u8, size)
+        });
+
         self
     }
 

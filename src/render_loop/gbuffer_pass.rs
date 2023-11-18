@@ -98,22 +98,33 @@ pub fn add_gbuffer_pass<'a, 'render>(
             // Draw meshs
             cb.bind_index_buffer(scene.index_buffer.buffer.handle, 0, vk::IndexType::UINT16);
             cb.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, pipeline.handle);
-            for (mesh_index, mesh_params) in scene.mesh_params.iter().enumerate() {
-                // PushConstant for everything per-draw
-                let model_xform = glam::Mat4::IDENTITY; // Not used for now
-                let mesh_index = mesh_index as u32;
-                let constants = PushConstantsBuilder::new()
-                    .push(&model_xform.to_cols_array())
-                    .push(&mesh_index)
-                    .push(&mesh_params.material_index);
-                cb.push_constants(
-                    pipeline.layout,
-                    pipeline.push_constant_ranges[0].stage_flags, // TODO
-                    0,
-                    &constants.build(),
-                );
-
-                cb.draw_indexed(mesh_params.index_count, 1, mesh_params.index_offset, 0, 0);
+            for instance in &scene.instances {
+                // Fetch geometry group instance
+                let model_xform_rows = instance.transform.transpose().to_cols_array();
+                let normal_xform_rows = instance.normal_transform.transpose().to_cols_array();
+                let geometry_group =
+                    &scene.geometry_group_params[instance.geometry_group_index as usize];
+                // Draw the meshes in the group, with instanced transform
+                let beg = geometry_group.geometry_index_offset as usize;
+                let end = beg + geometry_group.geometry_count as usize;
+                for mesh_index in beg..end {
+                    let mesh = &scene.mesh_params[mesh_index];
+                    // PushConstant for everything per-draw
+                    let mesh_index = mesh_index as u32;
+                    let constants = PushConstantsBuilder::new()
+                        .push_slice(&model_xform_rows[0..12])
+                        .push_slice(&normal_xform_rows[0..12])
+                        .push(&mesh_index)
+                        .push(&mesh.material_index);
+                    cb.push_constants(
+                        pipeline.layout,
+                        pipeline.push_constant_ranges[0].stage_flags, // TODO
+                        0,
+                        &constants.build(),
+                    );
+                    // Dispatch
+                    cb.draw_indexed(mesh.index_count, 1, mesh.index_offset, 0, 0);
+                }
             }
         });
 }

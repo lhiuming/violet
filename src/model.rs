@@ -1,6 +1,10 @@
-use glam::{Mat4, Vec3, Vec4};
+use glam::{Mat4, Vec4};
 use intel_tex_2::{bc5, bc7};
-use rkyv::{ser::Serializer, Archive, Deserialize, Serialize};
+use rkyv::{
+    ser::Serializer,
+    with::{ArchiveWith, DeserializeWith, SerializeWith},
+    Archive, Archived, Deserialize, Fallible, Resolver, Serialize,
+};
 use std::{
     collections::{hash_map, HashMap},
     fs::{File, OpenOptions},
@@ -25,9 +29,61 @@ impl Default for LoadConfig {
 
 #[derive(Archive, Deserialize, Serialize)]
 pub struct Model {
-    pub meshes: Vec<TriangleMesh>, // aggregated by material index
+    pub instances: Vec<GeometryGroupInstance>,
+    pub geometry_groups: Vec<Vec<(u32, TriangleMesh)>>, // mesh_group made of meshes (called "primitive" in glTF), each mesh is linked with a material
     pub materials: Vec<Material>,
     pub images: Vec<Image>,
+}
+
+// rkyv support for Mat4
+struct ArchiveMat4;
+
+impl ArchiveWith<Mat4> for ArchiveMat4 {
+    type Archived = Archived<[f32; 16]>;
+    type Resolver = Resolver<[f32; 16]>;
+
+    unsafe fn resolve_with(
+        field: &Mat4,
+        pos: usize,
+        _: Resolver<[(); 16]>,
+        out: *mut Self::Archived,
+    ) {
+        let array = field.to_cols_array();
+        array.resolve(pos, [(); 16], out);
+    }
+}
+
+impl<S: Fallible + ?Sized> SerializeWith<Mat4, S> for ArchiveMat4
+where
+    [f32; 16]: Serialize<S>,
+{
+    fn serialize_with(
+        field: &Mat4,
+        serializer: &mut S,
+    ) -> std::result::Result<Self::Resolver, S::Error> {
+        let array = field.to_cols_array();
+        array.serialize(serializer)
+    }
+}
+
+impl<D: Fallible + ?Sized> DeserializeWith<Archived<[f32; 16]>, Mat4, D> for ArchiveMat4
+where
+    Archived<i32>: Deserialize<i32, D>,
+{
+    fn deserialize_with(
+        field: &Archived<[f32; 16]>,
+        deserializer: &mut D,
+    ) -> std::result::Result<Mat4, D::Error> {
+        let array = field.deserialize(deserializer)?;
+        Ok(Mat4::from_cols_array(&array))
+    }
+}
+
+#[derive(Archive, Deserialize, Serialize, Debug)]
+pub struct GeometryGroupInstance {
+    pub geometry_group_index: u32,
+    #[with(ArchiveMat4)]
+    pub transform: Mat4,
 }
 
 // TODO geometry compression/32bit-packing
@@ -38,18 +94,6 @@ pub struct TriangleMesh {
     pub normals: Option<Vec<[f32; 3]>>,
     pub texcoords: Option<Vec<[f32; 2]>>,
     pub tangents: Option<Vec<[f32; 4]>>,
-}
-
-impl TriangleMesh {
-    fn empty() -> TriangleMesh {
-        TriangleMesh {
-            positions: Vec::new(),
-            indicies: Vec::new(),
-            normals: Some(Vec::new()),
-            texcoords: Some(Vec::new()),
-            tangents: Some(Vec::new()),
-        }
-    }
 }
 
 #[derive(Archive, Deserialize, Serialize)]
@@ -93,8 +137,6 @@ impl Image {
         }
     }
 }
-
-pub type Result<T> = std::result::Result<T, Error>;
 
 #[derive(Debug)]
 pub enum Error {
@@ -163,6 +205,8 @@ impl mikktspace::Geometry for MikktspaceGeometry<'_> {
         self.out_tangents[index] = tangent;
     }
 }
+
+pub type Result<T> = std::result::Result<T, Error>;
 
 // Load a model from cache, or
 // if model is not in cache, load the original gltf file and store it in cache.
@@ -310,30 +354,18 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
         );
     }
 
-    // Load (and flatten) meshes
-    let mut model_meshes = document
-        .materials()
-        .map(|_| TriangleMesh::empty())
-        .collect::<Vec<_>>();
-    let mut mesh_instance_count = vec![0u32; document.meshes().count()];
-    if let Some(scene) = document.default_scene() {
-        let mut process_node = |node: &gltf::Node, xform: Mat4| -> Mat4 {
-            // Get flatten transform
-            let local_xform = Mat4::from_cols_array_2d(&node.transform().matrix());
-            let xform = xform * local_xform;
-            //let xform_normal = Mat4::from_quat(xform.to_scale_rotation_translation().1);
-            let xform_normal = xform.inverse().transpose();
+    // Log
+    println!("Meshes: {}", document.meshes().len());
+    println!("Images: {}", document.images().len());
 
-            if node.mesh().is_none() {
-                return xform;
-            }
-            let mesh = node.mesh().unwrap();
-
-            // count instance (for stat)
-            mesh_instance_count[mesh.index()] += 1;
-
+    // Load geometries (witn material index) in the file
+    // Each glTF mesh is a "geometry group" (or just "mesh group"?) here, wich consists of multiple glTF primitives
+    let geometry_groups = document
+        .meshes()
+        .map(|geometry_group| {
+            let mut materialed_geometries = Vec::<(u32, TriangleMesh)>::new();
             // Load each primitive
-            for primitive in mesh.primitives() {
+            for primitive in geometry_group.primitives() {
                 // Check
                 if primitive.mode() != gltf::mesh::Mode::Triangles {
                     println!("Warning: Mesh primitive is not triangulated. Ignored.");
@@ -354,7 +386,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
                         gltf::mesh::util::ReadIndices::U16(iter) => {
                             model_indicies.append(&mut iter.collect());
                         }
-                        gltf::mesh::util::ReadIndices::U32(_) => todo!(),
+                        gltf::mesh::util::ReadIndices::U32(_) => todo!("Read u32 indices"),
                     }
                     assert!(model_indicies.len() % 3 == 0);
                 } else {
@@ -374,106 +406,96 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
                 let vertex_count = model_positions.len();
 
                 // Load texcoords
-                let mut model_texcoords = Vec::<[f32; 2]>::new();
-                if let Some(read_texcoords) = reader.read_tex_coords(0) {
-                    match read_texcoords {
-                        gltf::mesh::util::ReadTexCoords::U8(_) => todo!(),
-                        gltf::mesh::util::ReadTexCoords::U16(_) => todo!(),
-                        gltf::mesh::util::ReadTexCoords::F32(data) => {
-                            model_texcoords.append(&mut data.collect());
-                        }
-                    }
-                    assert_eq!(model_texcoords.len(), vertex_count);
-                }
+                let model_texcoords = reader.read_tex_coords(0).map(|texcoords| match texcoords {
+                    gltf::mesh::util::ReadTexCoords::U8(_) => todo!(),
+                    gltf::mesh::util::ReadTexCoords::U16(_) => todo!(),
+                    gltf::mesh::util::ReadTexCoords::F32(data) => data.collect(),
+                });
 
                 // Load normals
-                let mut model_normals = Vec::<[f32; 3]>::new();
-                if let Some(normals) = reader.read_normals() {
-                    model_normals.append(&mut normals.collect());
-                    assert_eq!(model_normals.len(), vertex_count);
-                }
+                let model_normals = reader
+                    .read_normals()
+                    .map(|normals| normals.collect::<Vec<[f32; 3]>>());
 
                 // Load tangent
-                let mut model_tangent = Vec::<[f32; 4]>::new();
-                if let Some(tangents) = reader.read_tangents() {
-                    model_tangent.append(&mut tangents.collect());
-                    assert_eq!(model_tangent.len(), vertex_count);
-                }
-
-                // Generated tangents if proper
-                if model_tangent.len() == 0 {
-                    if model_texcoords.len() > 0 && model_normals.len() > 0 {
-                        model_tangent.resize(vertex_count, [0.0; 4]);
-                        let mut geometry = MikktspaceGeometry {
-                            num_triangle: model_indicies.len() / 3,
-                            indices: &model_indicies,
-                            positions: &model_positions,
-                            normals: &model_normals,
-                            texcoords: &model_texcoords,
-                            debug_tangent_counts: vec![0u32; model_positions.len()],
-                            out_tangents: &mut model_tangent,
-                        };
-                        let ret = mikktspace::generate_tangents(&mut geometry);
-                        if !ret {
-                            println!("Warning: Failed to generate tangents.");
-                            model_tangent.clear();
+                let model_tangents = reader
+                    .read_tangents()
+                    .map(|tangents| tangents.collect::<Vec<[f32; 4]>>())
+                    .or_else(|| {
+                        // Generated tangents if suitable (need texcoords and normals)
+                        if let Some((texcoords, normals)) =
+                            model_texcoords.as_ref().zip(model_normals.as_ref())
+                        {
+                            let mut tangents = vec![[0.0; 4]; vertex_count];
+                            let mut geometry = MikktspaceGeometry {
+                                num_triangle: model_indicies.len() / 3,
+                                indices: &model_indicies,
+                                positions: &model_positions,
+                                normals: normals,
+                                texcoords: texcoords,
+                                debug_tangent_counts: vec![0u32; vertex_count],
+                                out_tangents: &mut tangents,
+                            };
+                            if mikktspace::generate_tangents(&mut geometry) {
+                                return Some(tangents);
+                            } else {
+                                println!("Warning: mikktspace Failed to generate tangents.");
+                            }
                         }
-                    }
-                }
+                        None
+                    });
 
-                // Log
+                // Log unsupported
                 if reader.read_colors(0).is_some() {
                     println!("Warning: Mesh primitive has vertex colors. Ignored.")
                 }
 
-                // Merge the mesh primitive to model mesh
-                let model_mesh = &mut model_meshes[primitive.material().index().unwrap()];
-                let indice_offset = model_mesh.positions.len() as u16;
-                model_mesh.positions.append(
-                    &mut model_positions
-                        .into_iter()
-                        .map(|x| xform.transform_point3(Vec3::from(x)).to_array())
-                        .collect(),
-                );
-                model_mesh.indicies.append(
-                    &mut model_indicies
-                        .into_iter()
-                        .map(|x| x + indice_offset)
-                        .collect(),
-                );
-                model_mesh
-                    .texcoords
-                    .as_mut()
-                    .unwrap()
-                    .append(&mut model_texcoords);
-                model_mesh.normals.as_mut().unwrap().append(
-                    &mut model_normals
-                        .into_iter()
-                        .map(|v| {
-                            xform_normal
-                                .transform_vector3(Vec3::from(v))
-                                .normalize()
-                                .to_array()
-                        })
-                        .collect(),
-                );
-                model_mesh.tangents.as_mut().unwrap().append(
-                    &mut model_tangent
-                        .into_iter()
-                        .map(|v| {
-                            xform
-                                .transform_vector3(Vec4::from(v).truncate())
-                                .extend(v[3])
-                                .to_array()
-                        })
-                        .collect(),
-                );
+                let material_index = primitive.material().index().unwrap() as u32;
+                materialed_geometries.push((
+                    material_index,
+                    TriangleMesh {
+                        positions: model_positions,
+                        indicies: model_indicies,
+                        texcoords: model_texcoords,
+                        normals: model_normals,
+                        tangents: model_tangents,
+                    },
+                ));
             }
+
+            materialed_geometries
+        })
+        .collect::<Vec<_>>();
+
+    // Load instances (nodes); also flatten the hierarchy
+    let mut instance_count_per_group = vec![0u32; document.meshes().count()];
+    let mut instances = Vec::<GeometryGroupInstance>::new();
+    if let Some(scene) = document.default_scene() {
+        // iterative function along the node hierarchy
+        let mut process_node = |node: &gltf::Node, xform: Mat4| -> Mat4 {
+            // Get flatten transform
+            let local_xform = Mat4::from_cols_array_2d(&node.transform().matrix());
+            let xform = xform * local_xform;
+            let _xform_normal = xform.inverse().transpose();
+
+            if node.mesh().is_none() {
+                return xform;
+            }
+            let mesh = node.mesh().unwrap();
+            let group_index = mesh.index();
+
+            // count instance (for stat)
+            instance_count_per_group[group_index] += 1;
+
+            instances.push(GeometryGroupInstance {
+                geometry_group_index: mesh.index() as u32,
+                transform: xform,
+            });
 
             return xform;
         };
 
-        // Rotate the model to match the coordinate system
+        // Rotate the model to match the coordinate system unsed in violet
         // glTF: Y up, right-handed
         // Here: Z up, right-handed
         // So we gonna rotate the model by 90 degrees around X axis
@@ -486,29 +508,13 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
         return Err(Error::General("No default scene found.".to_string()));
     }
 
-    // Clean up meshes
-    for (index, model_mesh) in model_meshes.iter_mut().enumerate() {
-        let vertex_count = model_mesh.positions.len();
-        if model_mesh.texcoords.as_mut().unwrap().len() != vertex_count {
-            model_mesh.texcoords = None;
-            model_mesh.tangents = None;
-            println!("Warning: Mesh {} has incomplete texcoords.", index);
-        }
-        if model_mesh.normals.as_mut().unwrap().len() != vertex_count {
-            model_mesh.normals = None;
-            model_mesh.tangents = None;
-            println!("Warning: Mesh {} has incomplete normals.", index);
-        }
-        if model_mesh.tangents.as_mut().unwrap().len() != vertex_count {
-            model_mesh.tangents = None;
-            println!("Warning: Mesh {} has incomplete tangents.", index);
-        }
-    }
-
     // Log instance count
-    for (index, count) in mesh_instance_count.iter().enumerate() {
+    for (index, count) in instance_count_per_group.iter().enumerate() {
         if *count > 1 {
-            println!("Mesh {} has {} instances.", index, count);
+            println!("glTF Mesh {} has {} instances.", index, count);
+        }
+        if *count == 0 {
+            println!("glTF Mesh {} has no instances.", index);
         }
     }
 
@@ -772,7 +778,8 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
     }
 
     return Ok(Model {
-        meshes: model_meshes,
+        instances,
+        geometry_groups,
         images: model_images,
         materials: model_materials,
     });

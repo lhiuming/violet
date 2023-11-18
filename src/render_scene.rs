@@ -2,7 +2,7 @@ use std::mem::size_of;
 use std::slice;
 
 use ash::vk;
-use glam::Vec3;
+use glam::{Mat4, Vec3};
 
 use crate::{
     model::{ImageFormat, Model},
@@ -237,6 +237,7 @@ impl UploadContext {
     }
 }
 
+// TODO inlining in MeshParams?
 #[repr(C)]
 pub struct MaterialParams {
     pub base_color_index: u32,
@@ -245,6 +246,8 @@ pub struct MaterialParams {
     pub pad: u32,
 }
 
+// Representing a triangle mesh with a materal.
+#[repr(C)]
 pub struct MeshParams {
     pub index_offset: u32,
     pub index_count: u32,
@@ -259,14 +262,31 @@ pub struct MeshParams {
     pub pad: u32,
 }
 
+// A group of geomtry/mesh that is clustered together.
+// Think about "an object".
+// This is the (default?) unit to build a BLAS.
+#[repr(C)]
+pub struct GeometryGroupParams {
+    pub geometry_index_offset: u32, // first (global) geomtry index in the group
+    pub geometry_count: u32,        // number of geomtries in the group
+    pub _pad0: u32,
+    pub _pad1: u32,
+}
+
+pub struct Instance {
+    pub geometry_group_index: u32, // This is also the BLAS index
+    pub transform: Mat4,
+    pub normal_transform: Mat4,
+}
+
 // Matching constants in `shader/scene_bindings.hlsl`
 pub const SCENE_DESCRIPTOR_SET_INDEX: u32 = 1;
-pub const VERTEX_BUFFER_BINDING_INDEX: u32 = 0;
-pub const MATERIAL_PARAMS_BINDING_INDEX: u32 = 1;
-pub const BINDLESS_TEXTURE_BINDING_INDEX: u32 = 2;
-//pub const VIEWPARAMS_BINDING_INDEX: u32 = 3;
+pub const INDEX_BUFFER_BINDING_INDEX: u32 = 0;
+pub const VERTEX_BUFFER_BINDING_INDEX: u32 = 1;
+pub const MATERIAL_PARAMS_BINDING_INDEX: u32 = 2;
+pub const BINDLESS_TEXTURE_BINDING_INDEX: u32 = 3;
 pub const MESH_PARAMS_BINDING_INDEX: u32 = 4;
-pub const INDEX_BUFFER_BINDING_INDEX: u32 = 5;
+pub const GEOMETRY_GROUP_PARAMS_BINDING_INDEX: u32 = 5;
 
 // Contain everything to be rendered
 pub struct RenderScene {
@@ -288,12 +308,17 @@ pub struct RenderScene {
     // Stuff to be rendered
     pub material_parmas: Vec<MaterialParams>,
     pub mesh_params: Vec<MeshParams>,
+    pub geometry_group_params: Vec<GeometryGroupParams>,
+    pub instances: Vec<Instance>,
 
     // Global material parameter buffer for all loaded mesh; map to `material_params`
     pub material_param_buffer: Buffer,
 
     // Global mesh paramter buffer for all loaded mesh; map to `mesh_params`
     pub mesh_param_buffer: Buffer,
+
+    // Global geomtry group paramter buffer for all loaded mesh; map to `geometry_group_params`
+    pub geometry_group_param_buffer: Buffer,
 
     // Ray Tracing Acceleration structures for whole scene
     pub mesh_bottom_level_accel_structs: Vec<AccelerationStructure>,
@@ -362,6 +387,17 @@ impl RenderScene {
             })
             .unwrap();
 
+        // GeometryGroup Paramters buffer
+        let geometry_group_param_size =
+            std::mem::size_of::<GeometryGroupParams>() as vk::DeviceSize;
+        let geometry_group_param_buffer = rd
+            .create_buffer(BufferDesc {
+                size: geometry_group_param_size * 1024,
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            })
+            .unwrap();
+
         // Descriptor pool for whole scene bindless texture
         // TODO specific size and stuff
         let descriptor_pool = rd.create_descriptor_pool(
@@ -404,18 +440,25 @@ impl RenderScene {
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::ALL);
+            let geometry_group_buffer = vk::DescriptorSetLayoutBinding::builder()
+                .binding(GEOMETRY_GROUP_PARAMS_BINDING_INDEX)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(1)
+                .stage_flags(vk::ShaderStageFlags::ALL);
             let bindings = [
                 *vbuffer,
                 *ibuffer,
                 *mat_buffer,
                 *bindless_textures,
                 *mesh_buffer,
+                *geometry_group_buffer,
             ];
             let binding_flags = [
                 vk::DescriptorBindingFlags::default(),
                 vk::DescriptorBindingFlags::default(),
                 vk::DescriptorBindingFlags::default(),
                 bindless_textures_flags,
+                vk::DescriptorBindingFlags::default(),
                 vk::DescriptorBindingFlags::default(),
             ];
             assert_eq!(bindings.len(), binding_flags.len());
@@ -479,6 +522,17 @@ impl RenderScene {
                 .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
                 .buffer_info(slice::from_ref(&mesh_buffer_info))
                 .build();
+            let geometry_group_buffer_info = vk::DescriptorBufferInfo::builder()
+                .buffer(geometry_group_param_buffer.handle)
+                .offset(0)
+                .range(vk::WHOLE_SIZE)
+                .build();
+            let write_geometry_group_buffer = vk::WriteDescriptorSet::builder()
+                .dst_set(descriptor_set)
+                .dst_binding(GEOMETRY_GROUP_PARAMS_BINDING_INDEX)
+                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                .buffer_info(slice::from_ref(&geometry_group_buffer_info))
+                .build();
             unsafe {
                 rd.device.update_descriptor_sets(
                     &[
@@ -486,6 +540,7 @@ impl RenderScene {
                         write_ibuffer,
                         write_mat_buffer,
                         write_mesh_buffer,
+                        write_geometry_group_buffer,
                     ],
                     &[],
                 )
@@ -503,8 +558,11 @@ impl RenderScene {
             material_texture_views: Vec::new(),
             material_parmas: Vec::new(),
             mesh_params: Vec::new(),
+            geometry_group_params: Vec::new(),
+            instances: Vec::new(),
             material_param_buffer,
             mesh_param_buffer,
+            geometry_group_param_buffer,
             mesh_bottom_level_accel_structs: Vec::new(),
             scene_top_level_accel_struct: None,
             sun_dir: Vec3::new(0.0, 0.0, 1.0),
@@ -517,15 +575,26 @@ impl RenderScene {
         let index_buffer = &mut self.index_buffer;
         let vertex_buffer = &mut self.vertex_buffer;
 
+        let global_texture_index_offset = self.material_textures.len() as u32;
+        let global_texture_view_index_offset = self.material_texture_views.len() as u32;
+        let global_material_index_offset = self.material_parmas.len() as u32;
+        let global_mesh_index_offset = self.mesh_params.len();
+        let global_geometry_group_index_offset = self.geometry_group_params.len();
+
         // log
         let total_vert_count = model
-            .meshes
+            .geometry_groups
             .iter()
-            .map(|m| m.positions.len())
+            .map(|group| {
+                group
+                    .iter()
+                    .map(|mesh| mesh.1.positions.len())
+                    .sum::<usize>()
+            })
             .sum::<usize>();
         println!("Total Vertex: {}", total_vert_count);
 
-        let texture_index_offset = self.material_textures.len() as u32;
+        // Upload textures
         for image in &model.images {
             let format = match image.format {
                 ImageFormat::R8G8B8A8Unorm => vk::Format::R8G8B8A8_UNORM,
@@ -655,8 +724,7 @@ impl RenderScene {
             self.material_textures.push(texture);
         }
 
-        let texture_view_index_offset = self.material_texture_views.len() as u32;
-        let material_index_offset = self.material_parmas.len() as u32;
+        // Collect materials
         for material in &model.materials {
             // Create texture view for each material and add to scene
             // TODO collect and reduce duplicate in view?
@@ -664,7 +732,7 @@ impl RenderScene {
             let mut resolve = |map: &Option<crate::model::MaterialMap>| match map {
                 Some(map) => {
                     let texture = {
-                        let texture_index = texture_index_offset + map.image_index;
+                        let texture_index = global_texture_index_offset + map.image_index;
                         self.material_textures[texture_index as usize]
                     };
                     let view_desc = TextureViewDesc {
@@ -692,8 +760,8 @@ impl RenderScene {
         // Upload new material params
         {
             let param_size = std::mem::size_of::<MaterialParams>();
-            let param_count = self.material_parmas.len() - material_index_offset as usize;
-            let data_offset = material_index_offset as isize * param_size as isize;
+            let param_count = self.material_parmas.len() - global_material_index_offset as usize;
+            let data_offset = global_material_index_offset as isize * param_size as isize;
             let data_size = param_size * param_count;
 
             let staging_buffer = upload_context.borrow_staging_buffer(rd, data_size as u64);
@@ -742,7 +810,7 @@ impl RenderScene {
         // Add new texture view to bindless texture array
         {
             let image_infos: Vec<vk::DescriptorImageInfo> = self.material_texture_views
-                [texture_index_offset as usize..]
+                [global_texture_index_offset as usize..]
                 .iter()
                 .map(|view| {
                     vk::DescriptorImageInfo::builder()
@@ -755,7 +823,7 @@ impl RenderScene {
             let write = vk::WriteDescriptorSet::builder()
                 .dst_set(self.descriptor_set)
                 .dst_binding(BINDLESS_TEXTURE_BINDING_INDEX)
-                .dst_array_element(texture_view_index_offset)
+                .dst_array_element(global_texture_view_index_offset)
                 .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
                 .image_info(&image_infos);
             unsafe {
@@ -768,19 +836,21 @@ impl RenderScene {
         // Collect mesh data sizes
         let mut total_index_bytesize = 0usize;
         let mut total_vertex_bytesize = 0usize;
-        for mesh in &model.meshes {
-            let index_count = mesh.indicies.len();
-            total_index_bytesize += align_4(index_count * size_of::<u16>());
-            let vertex_count = mesh.positions.len();
-            let vertex_size = size_of::<[f32; 3]>() // position
+        for group in &model.geometry_groups {
+            for (_mat_index, mesh) in group {
+                let index_count = mesh.indicies.len();
+                total_index_bytesize += align_4(index_count * size_of::<u16>());
+                let vertex_count = mesh.positions.len();
+                let vertex_size = size_of::<[f32; 3]>() // position
                 + (mesh.normals.is_some() as usize) * size_of::<[f32; 3]>() // normal
                 + (mesh.texcoords.is_some() as usize) * size_of::<[f32; 2]>() // texcoords
                 + (mesh.tangents.is_some() as usize) * size_of::<[f32; 4]>() // tangent
                 ;
-            total_vertex_bytesize += vertex_count * vertex_size;
+                total_vertex_bytesize += vertex_count * vertex_size;
+            }
         }
 
-        // Get staging buffer for all meshes
+        // Get staging buffer for all trangle meshes
         let index_staging_buffer =
             upload_context.borrow_staging_buffer(rd, total_index_bytesize as u64);
         let vertex_staging_buffer =
@@ -788,130 +858,158 @@ impl RenderScene {
         let mut index_copy_buider = BufferCopiesBuilder::new(index_staging_buffer.0, 4);
         let mut vertex_copy_buider = BufferCopiesBuilder::new(vertex_staging_buffer.0, 4);
 
-        let mut blas_geometries = Vec::<vk::AccelerationStructureGeometryKHR>::new();
-        let mut blas_range_infos = Vec::<vk::AccelerationStructureBuildRangeInfoKHR>::new();
-        let mut max_primitive_counts = Vec::<u32>::new(); // or blas_primitive_counts, since the scratch buffer is allocated for this blas exclusively
-        let mesh_index_offset = self.mesh_params.len();
-        for (material_index, mesh) in model.meshes.iter().enumerate() {
-            // Upload indices
-            let index_count = mesh.indicies.len();
-            let index_offset_by_u16;
-            let index_offset_bytes;
-            {
-                // allocate
-                let (_, offset) = index_buffer.alloc::<u16>(index_count as u32);
-                index_offset_bytes = offset;
-                index_offset_by_u16 = offset / 2;
-                // copy
-                let dst = index_copy_buider.alloc::<u16>(index_count, offset as u64);
-                dst.copy_from_slice(&mesh.indicies);
-            }
-            // Upload position
-            let positions_offset_by_f32;
-            let positions_offset_bytes;
-            {
-                // alloc
-                let count = mesh.positions.len();
-                let (_, offset) = vertex_buffer.alloc::<[f32; 3]>(count as u32);
-                positions_offset_by_f32 = offset / 4;
-                positions_offset_bytes = offset;
-                // copy
-                let dst = vertex_copy_buider.alloc::<[f32; 3]>(count, offset as u64);
-                dst.copy_from_slice(&mesh.positions);
-            }
-            // Upload normal
-            let normals_offset_by_f32;
-            if let Some(normals) = &mesh.normals {
-                // alloc
-                let count = normals.len();
-                let (_, offset) = vertex_buffer.alloc::<[f32; 3]>(count as u32);
-                normals_offset_by_f32 = offset / 4;
-                // copy
-                let dst = vertex_copy_buider.alloc::<[f32; 3]>(count, offset as u64);
-                dst.copy_from_slice(&normals);
-            } else {
-                normals_offset_by_f32 = u32::MAX;
-            }
-            // Upload texcoords
-            let texcoords_offset_by_f32;
-            if let Some(texcoords) = &mesh.texcoords {
-                // alloc
-                let count = texcoords.len();
-                let (_, offset) = vertex_buffer.alloc::<[f32; 2]>(count as u32);
-                texcoords_offset_by_f32 = offset / 4;
-                // copy
-                let dst = vertex_copy_buider.alloc::<[f32; 2]>(count, offset as u64);
-                dst.copy_from_slice(&texcoords);
-            } else {
-                texcoords_offset_by_f32 = u32::MAX;
-            }
-            // Upload tangents
-            let tangents_offset_by_f32;
-            if let Some(tangents) = &mesh.tangents {
-                // alloc
-                let count = tangents.len();
-                let (_, offset) = vertex_buffer.alloc::<[f32; 4]>(count as u32);
-                tangents_offset_by_f32 = offset / 4;
-                // copy
-                let dst = vertex_copy_buider.alloc::<[f32; 4]>(count, offset as u64);
-                dst.copy_from_slice(&tangents);
-            } else {
-                tangents_offset_by_f32 = u32::MAX;
-            }
-
-            self.mesh_params.push(MeshParams {
-                index_offset: index_offset_by_u16,
-                index_count: index_count as u32,
-                positions_offset: positions_offset_by_f32,
-                normals_offset: normals_offset_by_f32,
-                texcoords_offset: texcoords_offset_by_f32,
-                tangents_offset: tangents_offset_by_f32,
-                material_index: material_index_offset + material_index as u32,
-                pad: 0,
+        // Upload mesh data, and prepare BLAS builds
+        // We orgnize such that:
+        //  - one GeometryGroup <-> one BLAS, and
+        //  - one TriangleMesh in a MeshGroup <-> one 'geometry' in the BLAS.
+        struct BlasParams {
+            beg: usize,
+            end: usize,
+        }
+        let mut all_blas_geometries = Vec::<vk::AccelerationStructureGeometryKHR>::new();
+        let mut all_blas_build_range_infos =
+            Vec::<vk::AccelerationStructureBuildRangeInfoKHR>::new();
+        let mut all_blas_geometry_primitive_counts = Vec::<u32>::new(); // sub set of `blas_build_ranges`
+        let mut blas_params = Vec::<BlasParams>::new();
+        for group in &model.geometry_groups {
+            // Add GeometryGroup
+            self.geometry_group_params.push(GeometryGroupParams {
+                geometry_index_offset: self.mesh_params.len() as u32,
+                geometry_count: group.len() as u32,
+                _pad0: 0,
+                _pad1: 0,
             });
 
-            if !rd.support_raytracing {
-                continue;
+            // Add each geometry (TriangleMesh)
+            let blas_geometry_offset = all_blas_geometries.len();
+            for (material_index, mesh) in group {
+                // Upload indices
+                let index_count = mesh.indicies.len();
+                let index_offset_by_u16;
+                let index_offset_bytes;
+                {
+                    // allocate
+                    let (_, offset) = index_buffer.alloc::<u16>(index_count as u32);
+                    index_offset_bytes = offset;
+                    index_offset_by_u16 = offset / 2;
+                    // copy
+                    let dst = index_copy_buider.alloc::<u16>(index_count, offset as u64);
+                    dst.copy_from_slice(&mesh.indicies);
+                }
+                // Upload position
+                let positions_offset_by_f32;
+                let positions_offset_bytes;
+                {
+                    // alloc
+                    let count = mesh.positions.len();
+                    let (_, offset) = vertex_buffer.alloc::<[f32; 3]>(count as u32);
+                    positions_offset_by_f32 = offset / 4;
+                    positions_offset_bytes = offset;
+                    // copy
+                    let dst = vertex_copy_buider.alloc::<[f32; 3]>(count, offset as u64);
+                    dst.copy_from_slice(&mesh.positions);
+                }
+                // Upload normal
+                let normals_offset_by_f32;
+                if let Some(normals) = &mesh.normals {
+                    // alloc
+                    let count = normals.len();
+                    let (_, offset) = vertex_buffer.alloc::<[f32; 3]>(count as u32);
+                    normals_offset_by_f32 = offset / 4;
+                    // copy
+                    let dst = vertex_copy_buider.alloc::<[f32; 3]>(count, offset as u64);
+                    dst.copy_from_slice(&normals);
+                } else {
+                    normals_offset_by_f32 = u32::MAX;
+                }
+                // Upload texcoords
+                let texcoords_offset_by_f32;
+                if let Some(texcoords) = &mesh.texcoords {
+                    // alloc
+                    let count = texcoords.len();
+                    let (_, offset) = vertex_buffer.alloc::<[f32; 2]>(count as u32);
+                    texcoords_offset_by_f32 = offset / 4;
+                    // copy
+                    let dst = vertex_copy_buider.alloc::<[f32; 2]>(count, offset as u64);
+                    dst.copy_from_slice(&texcoords);
+                } else {
+                    texcoords_offset_by_f32 = u32::MAX;
+                }
+                // Upload tangents
+                let tangents_offset_by_f32;
+                if let Some(tangents) = &mesh.tangents {
+                    // alloc
+                    let count = tangents.len();
+                    let (_, offset) = vertex_buffer.alloc::<[f32; 4]>(count as u32);
+                    tangents_offset_by_f32 = offset / 4;
+                    // copy
+                    let dst = vertex_copy_buider.alloc::<[f32; 4]>(count, offset as u64);
+                    dst.copy_from_slice(&tangents);
+                } else {
+                    tangents_offset_by_f32 = u32::MAX;
+                }
+
+                self.mesh_params.push(MeshParams {
+                    index_offset: index_offset_by_u16,
+                    index_count: index_count as u32,
+                    positions_offset: positions_offset_by_f32,
+                    normals_offset: normals_offset_by_f32,
+                    texcoords_offset: texcoords_offset_by_f32,
+                    tangents_offset: tangents_offset_by_f32,
+                    material_index: global_material_index_offset + *material_index as u32,
+                    pad: 0,
+                });
+
+                if !rd.support_raytracing {
+                    continue;
+                }
+
+                // Collect BLAS info //
+
+                let triangle_count = (index_count / 3) as u32;
+
+                // TODO assert index type
+                let vertex_data = vk::DeviceOrHostAddressConstKHR {
+                    device_address: vertex_buffer.buffer.device_address.unwrap()
+                        + positions_offset_bytes as u64,
+                };
+                let index_data = vk::DeviceOrHostAddressConstKHR {
+                    device_address: index_buffer.buffer.device_address.unwrap()
+                        + index_offset_bytes as u64,
+                };
+                let geo_data = vk::AccelerationStructureGeometryDataKHR {
+                    triangles: vk::AccelerationStructureGeometryTrianglesDataKHR::builder()
+                        .vertex_format(vk::Format::R32G32B32_SFLOAT)
+                        .vertex_data(vertex_data)
+                        .vertex_stride(4 * 3) // f32 * 3
+                        .max_vertex(mesh.positions.len() as u32)
+                        .index_type(vk::IndexType::UINT16)
+                        .index_data(index_data)
+                        // NOTE transform is per instance, not applied in the BLAS
+                        .transform_data(vk::DeviceOrHostAddressConstKHR::default()) // no xform
+                        .build(),
+                };
+                let blas_geo = vk::AccelerationStructureGeometryKHR::builder()
+                    .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
+                    .geometry(geo_data)
+                    .flags(vk::GeometryFlagsKHR::OPAQUE) // todo check material
+                    .build();
+                let build_range_info = vk::AccelerationStructureBuildRangeInfoKHR::builder()
+                    .primitive_count(triangle_count)
+                    .primitive_offset(0) // a.k.a index_offset_bytes for indexed triangle geomtry; not using because already offset via address in GeometryDataKHR.index_data
+                    .first_vertex(0) // a.k.a vertex_offset for indexed triangle geometry; not using because already offset via address in GeometryDataKHR.vertex_data
+                    .transform_offset(0) // no xform
+                    .build();
+                all_blas_geometries.push(blas_geo);
+                all_blas_build_range_infos.push(build_range_info);
+                all_blas_geometry_primitive_counts.push(triangle_count);
             }
+            assert!(all_blas_geometries.len() == all_blas_build_range_infos.len());
+            assert!(all_blas_geometries.len() == all_blas_geometry_primitive_counts.len());
 
-            // Collect BLAS info //
-
-            let triangle_count = (index_count / 3) as u32;
-
-            // TODO assert index type
-            let vertex_data = vk::DeviceOrHostAddressConstKHR {
-                device_address: vertex_buffer.buffer.device_address.unwrap()
-                    + positions_offset_bytes as u64,
-            };
-            let index_data = vk::DeviceOrHostAddressConstKHR {
-                device_address: index_buffer.buffer.device_address.unwrap()
-                    + index_offset_bytes as u64,
-            };
-            let geo_data = vk::AccelerationStructureGeometryDataKHR {
-                triangles: vk::AccelerationStructureGeometryTrianglesDataKHR::builder()
-                    .vertex_format(vk::Format::R32G32B32_SFLOAT)
-                    .vertex_data(vertex_data)
-                    .vertex_stride(4 * 3) // f32 * 3
-                    .max_vertex(mesh.positions.len() as u32)
-                    .index_type(vk::IndexType::UINT16)
-                    .index_data(index_data)
-                    .transform_data(vk::DeviceOrHostAddressConstKHR::default()) // no xform
-                    .build(),
-            };
-            let blas_geo = vk::AccelerationStructureGeometryKHR::builder()
-                .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
-                .geometry(geo_data)
-                .flags(vk::GeometryFlagsKHR::OPAQUE) // todo check material
-                .build();
-            let range_info = vk::AccelerationStructureBuildRangeInfoKHR::builder()
-                .primitive_count(triangle_count)
-                .primitive_offset(0) // a.k.a index_offset_bytes for indexed triangle geomtry; not using because already offset via address in GeometryDataKHR.index_data
-                .first_vertex(0) // a.k.a vertex_offset for indexed triangle geometry; not using because already offset via address in GeometryDataKHR.vertex_data
-                .transform_offset(0) // no xform
-                .build();
-            blas_geometries.push(blas_geo);
-            blas_range_infos.push(range_info);
-            max_primitive_counts.push(triangle_count);
+            let beg = blas_geometry_offset;
+            let end = all_blas_geometries.len();
+            blas_params.push(BlasParams { beg, end });
         }
 
         // Transfer mesh data to global buffer
@@ -952,8 +1050,8 @@ impl RenderScene {
         // Upload new mesh params
         {
             let param_size = std::mem::size_of::<MeshParams>();
-            let param_count = self.mesh_params.len() - mesh_index_offset;
-            let data_offset = mesh_index_offset as usize * param_size;
+            let param_count = self.mesh_params.len() - global_mesh_index_offset;
+            let data_offset = global_mesh_index_offset as usize * param_size;
             let data_size = param_size * param_count;
 
             let staging_buffer = upload_context.borrow_staging_buffer(rd, data_size as u64);
@@ -992,32 +1090,97 @@ impl RenderScene {
             })
         }
 
+        // Upload new GeometryGroup params
+        {
+            let param_size = std::mem::size_of::<GeometryGroupParams>();
+            let param_count = self.geometry_group_params.len() - global_geometry_group_index_offset;
+            let data_offset = global_geometry_group_index_offset as usize * param_size;
+            let data_size = param_size * param_count;
+
+            let staging_buffer = upload_context.borrow_staging_buffer(rd, data_size as u64);
+
+            unsafe {
+                let src = std::slice::from_raw_parts(
+                    (self.geometry_group_params.as_ptr() as *const u8).offset(data_offset as isize),
+                    data_size,
+                );
+                let dst = std::slice::from_raw_parts_mut(staging_buffer.0.data, data_size);
+                dst.copy_from_slice(src);
+            }
+
+            upload_context.immediate_submit(rd, |command_buffer| {
+                let buffer_copy = vk::BufferCopy {
+                    src_offset: 0,
+                    dst_offset: data_offset as u64,
+                    size: data_size as u64,
+                };
+                unsafe {
+                    rd.device.cmd_copy_buffer(
+                        command_buffer,
+                        staging_buffer.0.handle,
+                        self.geometry_group_param_buffer.handle,
+                        slice::from_ref(&buffer_copy),
+                    );
+                }
+
+                unsafe {
+                    rd.device.cmd_set_event(
+                        command_buffer,
+                        staging_buffer.1,
+                        vk::PipelineStageFlags::TRANSFER,
+                    );
+                }
+            })
+        }
+
+        // Collect instances
+        for instance in &model.instances {
+            let geometry_group_index =
+                instance.geometry_group_index + global_geometry_group_index_offset as u32;
+            self.instances.push(Instance {
+                geometry_group_index,
+                transform: instance.transform,
+                normal_transform: instance.transform.inverse().transpose(),
+            });
+        }
+
         if !rd.support_raytracing {
             return;
         }
 
-        // Build BLASes for all added meshes (One Mesh per BLAS)
+        // GeomtryGroup <-> BLAS
+        assert_eq!(
+            self.mesh_bottom_level_accel_structs.len(),
+            global_geometry_group_index_offset
+        );
+
+        // Build BLASes
         if let Some(khr_accel_struct) = rd.khr_accel_struct.as_ref() {
             // Gather all build info
             let mut scratch_offset_curr = 0;
             let mut scratch_offsets = Vec::<u64>::new();
             let mut blas_sizes = Vec::<u64>::new();
-            assert_eq!(blas_geometries.len(), max_primitive_counts.len());
-            for i in 0..blas_geometries.len() {
+            assert_eq!(
+                all_blas_geometries.len(),
+                all_blas_geometry_primitive_counts.len()
+            );
+            for params in &blas_params {
                 // Get build size
                 // NOTE: actual buffer addresses in blas_geometrys are ignored
-                let single_geometry = &blas_geometries[i..i + 1];
-                let single_max_primitive_count = &max_primitive_counts[i..i + 1];
+                let geometries = &all_blas_geometries[params.beg..params.end];
+                // NOTE: this is max, because we are not reusing the scratch buffer for other build
+                let max_primitive_counts =
+                    &all_blas_geometry_primitive_counts[params.beg..params.end];
                 let build_size_info = unsafe {
                     let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
                         .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
                         .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
-                        .geometries(single_geometry)
+                        .geometries(geometries)
                         .build();
                     khr_accel_struct.get_acceleration_structure_build_sizes(
                         vk::AccelerationStructureBuildTypeKHR::DEVICE,
                         &build_info,
-                        single_max_primitive_count,
+                        max_primitive_counts,
                     )
                 };
 
@@ -1048,9 +1211,11 @@ impl RenderScene {
             let scratch_device_address = scratch_buffer.device_address.unwrap();
 
             // Collect all BLAS builds
-            let mut blas_infos = Vec::<vk::AccelerationStructureBuildGeometryInfoKHR>::new();
-            let mut build_range_infos = Vec::<&[vk::AccelerationStructureBuildRangeInfoKHR]>::new();
-            for i in 0..blas_geometries.len() {
+            let mut blas_build_infos = Vec::<vk::AccelerationStructureBuildGeometryInfoKHR>::new();
+            let mut blas_build_range_info_slices =
+                Vec::<&[vk::AccelerationStructureBuildRangeInfoKHR]>::new();
+            for i in 0..blas_params.len() {
+                let params = &blas_params[i];
                 let blas_size = blas_sizes[i];
 
                 // Create buffer
@@ -1076,38 +1241,37 @@ impl RenderScene {
                 // Record it
                 self.mesh_bottom_level_accel_structs.push(accel_struct);
 
-                // NOTE: one geometry, one blas
-                let single_geometry = &blas_geometries[i..i + 1];
-                let single_range = &blas_range_infos[i..i + 1];
-
-                // Setup build info
+                // Setup BLAS build info
+                let geometries = &all_blas_geometries[params.beg..params.end];
                 let scrath_offset = scratch_offsets[i];
                 let geo_info = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
                     .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
                     .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
                     .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
                     .dst_acceleration_structure(accel_struct.handle)
-                    .geometries(single_geometry)
+                    .geometries(geometries)
                     .scratch_data(vk::DeviceOrHostAddressKHR {
                         device_address: scratch_device_address + scrath_offset,
                     })
                     .build();
-                blas_infos.push(geo_info);
+                blas_build_infos.push(geo_info);
 
-                // trivia transformation
-                build_range_infos.push(single_range);
+                let build_range_info_slice = &all_blas_build_range_infos[params.beg..params.end];
+                blas_build_range_info_slices.push(build_range_info_slice);
             }
 
+            // Build
             upload_context.immediate_submit(rd, move |cb| {
                 unsafe {
                     khr_accel_struct.cmd_build_acceleration_structures(
                         cb,
-                        &blas_infos,
-                        &build_range_infos,
+                        &blas_build_infos,
+                        &blas_build_range_info_slices,
                     )
                 };
             });
 
+            // Clean up
             rd.destroy_buffer(scratch_buffer);
         }
     }
@@ -1117,13 +1281,20 @@ impl RenderScene {
             return None;
         }
 
+        // GeometryGroup <-> BLAS
+        assert_eq!(
+            self.geometry_group_params.len(),
+            self.mesh_bottom_level_accel_structs.len()
+        );
+
         let khr_accel_struct = rd.khr_accel_struct.as_ref()?;
 
         // Create instance buffer
-        let num_blas = self.mesh_bottom_level_accel_structs.len();
+        let num_blas_instances = self.instances.len();
         let instance_buffer = rd
             .create_buffer(BufferDesc {
-                size: (size_of::<vk::AccelerationStructureInstanceKHR>() * num_blas) as u64,
+                size: (size_of::<vk::AccelerationStructureInstanceKHR>() * num_blas_instances)
+                    as u64,
                 usage: vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
                     | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR,
                 memory_property: vk::MemoryPropertyFlags::HOST_VISIBLE
@@ -1131,25 +1302,26 @@ impl RenderScene {
             })
             .unwrap();
 
-        // Traverse all BLAS to fill the instance buffer
-        // NOTE: no instancing applied currently
-        for (index, blas) in self.mesh_bottom_level_accel_structs.iter().enumerate() {
+        // Traverse all GeometryGroup instances to fill the instance buffer
+        for (index, instance) in self.instances.iter().enumerate() {
+            // BLAS <-> GeometryGroup
+            let blas_index = instance.geometry_group_index;
+            let blas = self.mesh_bottom_level_accel_structs[blas_index as usize];
+
             // Fill instance buffer (3x4 row-major affine transform)
-            let xform = vk::TransformMatrixKHR {
-                matrix: [
-                    1.0, 0.0, 0.0, 0.0, //
-                    0.0, 1.0, 0.0, 0.0, //
-                    0.0, 0.0, 1.0, 0.0, //
-                ],
-            };
+            let mut matrix = [0.0f32; 12];
+            {
+                let row_data = instance.transform.transpose().to_cols_array();
+                matrix[0..12].copy_from_slice(&row_data[0..12]);
+            }
             let instance = vk::AccelerationStructureInstanceKHR {
-                transform: xform,
+                transform: vk::TransformMatrixKHR { matrix },
                 instance_custom_index_and_mask: vk::Packed24_8::new(
-                    0, // custom index is not used
+                    blas_index, // used to access BLAS/GeomtryGroup data
                     0xFF,
                 ),
                 instance_shader_binding_table_record_offset_and_flags: vk::Packed24_8::new(
-                    0, // TODO not used hit shader
+                    0, // TODO not used in hit shader
                     vk::GeometryInstanceFlagsKHR::TRIANGLE_FRONT_COUNTERCLOCKWISE.as_raw() as u8, // Keep consistent with rasterization
                 ),
                 acceleration_structure_reference: vk::AccelerationStructureReferenceKHR {
@@ -1184,7 +1356,7 @@ impl RenderScene {
         // Calculate build size
         // NOTE: actual buffer addresses in geometrys are ignored
         let build_size_info = unsafe {
-            let max_primitive_count = num_blas as u32;
+            let max_primitive_count = num_blas_instances as u32;
             let build_info = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
                 .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
                 .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
@@ -1241,7 +1413,7 @@ impl RenderScene {
                 })
                 .build();
             let range_info = vk::AccelerationStructureBuildRangeInfoKHR::builder()
-                .primitive_count(num_blas as u32)
+                .primitive_count(num_blas_instances as u32)
                 .primitive_offset(0)
                 .first_vertex(0)
                 .transform_offset(0)
