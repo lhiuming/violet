@@ -5,11 +5,11 @@
 	"version": "0.2.0",
 	"configurations": [
 		{
-			"name": "debug-restir",
+			"name": "release-restir",
 			"type": "cppvsdbg",
 			"request": "launch",
-			"preLaunchTask": "rust: cargo build nightly",
-			"program": "${workspaceFolder}/target/debug/restir.exe",
+			"preLaunchTask": "rust: cargo build release nightly",
+			"program": "${workspaceFolder}/target/release/restir.exe",
 			"args": [
 				"./assets/Sponza/Sponza.gltf",
 				"--profiler",
@@ -31,28 +31,16 @@
 			"console": "integratedTerminal"
 		},
 		{
-			"name": "debug-senga",
+			"name": "debug-restir",
 			"type": "cppvsdbg",
 			"request": "launch",
 			"preLaunchTask": "rust: cargo build nightly",
-			"program": "${workspaceFolder}/target/debug/senga.exe",
+			"program": "${workspaceFolder}/target/debug/restir.exe",
 			"args": [
-				"./assets/DamagedHelmet/DamagedHelmet.gltf",
-				"--renderdoc"
-			],
-			"stopAtEntry": false,
-			"cwd": "${workspaceFolder}",
-			"environment": [],
-			"console": "integratedTerminal"
-		},
-		{
-			"name": "debug-imgui",
-			"type": "cppvsdbg",
-			"request": "launch",
-			"preLaunchTask": "rust: cargo build nightly",
-			"program": "${workspaceFolder}/target/debug/imgui_demo.exe",
-			"args": [
+				"./assets/Sponza/Sponza.gltf",
 				"--profiler",
+				"--camera-preset",
+				"1.8,3.5,2.0,-75.0,0.0,6.0,-0.35,5.0,-80.0,-16.0,8.5,0.5,0.15,-80.0,30.0",
 			],
 			"stopAtEntry": false,
 			"cwd": "${workspaceFolder}",
