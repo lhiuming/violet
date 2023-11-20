@@ -4,7 +4,7 @@
 #include "geometry_ray.inc.hlsl"
 
 #define SKIP_POSITION_LOAD 0
-#define EMULATE_TEX_LOD 0
+#define TEX_LOD_BIAS 2
 
 // ----------------
 // Geometry loading
@@ -76,21 +76,15 @@ void main(inout GeometryRayPayload payload, in Attribute attr)
     // TODO calculate before interpolation?
     float3 bitangent = normalize(tangent_ls.w * cross(normal, tangent.xyz));
 
-#if EMULATE_TEX_LOD
-    uv = uv * rcp(float(1 << EMULATE_TEX_LOD));
-#endif
-
     // TODO inlining the material parameters?
     MaterialParams mat = material_params[mesh.material_index];
-    float4 base_color = bindless_textures[mat.base_color_index].SampleLevel(sampler_linear_wrap, uv, 0);
-    float4 metal_rough = bindless_textures[mat.metallic_roughness_index].SampleLevel(sampler_linear_wrap, uv, 0);
-    float4 normal_map = bindless_textures[mat.normal_index].SampleLevel(sampler_linear_wrap, uv, 0);
+    float4 base_color = bindless_textures[mat.base_color_index].SampleLevel(sampler_linear_wrap, uv, TEX_LOD_BIAS);
+    float4 metal_rough = bindless_textures[mat.metallic_roughness_index].SampleLevel(sampler_linear_wrap, uv, TEX_LOD_BIAS);
+    float4 normal_map = bindless_textures[mat.normal_index].SampleLevel(sampler_linear_wrap, uv, TEX_LOD_BIAS);
 
     // normal mapping
     float3 normal_ts = normal_map.xyz * 2.0f - 1.0f;
     float3 normal_ws = normalize(normal_ts.x * tangent.xyz + normal_ts.y * bitangent + normal_ts.z * normal);
-
-#define CHANGE 0
 
     // World position
     float3 position_ws = mul(ObjectToWorld3x4(), float4(pos_ls, 1.0f));
