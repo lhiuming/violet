@@ -141,6 +141,7 @@ impl super::RenderDevice {
 
         // Eanble required features
         let mut features = PhysicalDeviceFeatures::default();
+        features.core_mut().sampler_anisotropy = vk::TRUE;
         // dynamic rendering
         features.vulkan13.dynamic_rendering = vk::TRUE;
         // bindless

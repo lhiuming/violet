@@ -206,6 +206,9 @@ impl RenderLoopDesciptorSets {
                 .address_mode_v(vk::SamplerAddressMode::REPEAT)
                 .address_mode_w(vk::SamplerAddressMode::REPEAT)
                 .max_lod(vk::LOD_CLAMP_NONE)
+                // NOTE[hack]: this is the sampler used by gbuffer pass
+                .anisotropy_enable(true)
+                .max_anisotropy(rd.physical.properties.limits.max_sampler_anisotropy)
                 .build();
             rd.device.create_sampler(&create_info, None).unwrap()
         };

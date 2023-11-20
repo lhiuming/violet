@@ -154,7 +154,7 @@ pub struct PhysicalDeviceFeatures {
     // root
     features2: vk::PhysicalDeviceFeatures2,
 
-    // extensions
+    // components
     pub vulkan12: vk::PhysicalDeviceVulkan12Features,
     pub vulkan13: vk::PhysicalDeviceVulkan13Features,
     pub ray_tracing_pipeline: vk::PhysicalDeviceRayTracingPipelineFeaturesKHR,
@@ -176,9 +176,21 @@ impl Default for PhysicalDeviceFeatures {
 }
 
 impl PhysicalDeviceFeatures {
+    pub fn core(&self) -> &vk::PhysicalDeviceFeatures {
+        &self.features2.features
+    }
+
+    pub fn core_mut(&mut self) -> &mut vk::PhysicalDeviceFeatures {
+        &mut self.features2.features
+    }
+
     pub fn chain(&mut self) -> &mut vk::PhysicalDeviceFeatures2 {
+        // For safety
+        self.unchain();
         // Chain the structs
+        let features = self.features2.features;
         self.features2 = vk::PhysicalDeviceFeatures2::builder()
+            .features(features)
             .push_next(&mut self.vulkan12)
             .push_next(&mut self.vulkan13)
             .push_next(&mut self.ray_tracing_pipeline)
@@ -190,14 +202,13 @@ impl PhysicalDeviceFeatures {
     }
 
     // Do this before move
-    pub fn unchain(mut self) -> Self {
+    pub fn unchain(&mut self) {
         self.features2.p_next = std::ptr::null_mut();
         self.vulkan12.p_next = std::ptr::null_mut();
         self.vulkan13.p_next = std::ptr::null_mut();
         self.ray_tracing_pipeline.p_next = std::ptr::null_mut();
         self.acceleration_structure.p_next = std::ptr::null_mut();
         self.ray_query.p_next = std::ptr::null_mut();
-        self
     }
 }
 
@@ -210,6 +221,7 @@ impl PhysicalDevice {
                 .get_physical_device_features2(self.handle, features.chain());
         };
 
-        features.unchain()
+        features.unchain();
+        features
     }
 }
