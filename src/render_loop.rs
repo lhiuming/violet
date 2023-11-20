@@ -189,27 +189,36 @@ impl RenderLoopDesciptorSets {
             let create_info = vk::SamplerCreateInfo::builder()
                 .min_filter(vk::Filter::LINEAR)
                 .mag_filter(vk::Filter::LINEAR)
+                .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
                 .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
                 .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
+                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .max_lod(vk::LOD_CLAMP_NONE)
+                .build();
             rd.device.create_sampler(&create_info, None).unwrap()
         };
         let sampler_linear_wrap = unsafe {
             let create_info = vk::SamplerCreateInfo::builder()
                 .min_filter(vk::Filter::LINEAR)
                 .mag_filter(vk::Filter::LINEAR)
+                .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
                 .address_mode_u(vk::SamplerAddressMode::REPEAT)
                 .address_mode_v(vk::SamplerAddressMode::REPEAT)
-                .address_mode_w(vk::SamplerAddressMode::REPEAT);
+                .address_mode_w(vk::SamplerAddressMode::REPEAT)
+                .max_lod(vk::LOD_CLAMP_NONE)
+                .build();
             rd.device.create_sampler(&create_info, None).unwrap()
         };
         let sampler_nearest_clamp = unsafe {
             let create_info = vk::SamplerCreateInfo::builder()
                 .min_filter(vk::Filter::NEAREST)
                 .mag_filter(vk::Filter::NEAREST)
+                .mipmap_mode(vk::SamplerMipmapMode::NEAREST)
                 .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
                 .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE);
+                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+                .max_lod(vk::LOD_CLAMP_NONE)
+                .build();
             rd.device.create_sampler(&create_info, None).unwrap()
         };
 

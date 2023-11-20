@@ -15,6 +15,7 @@ rspirv-reflect = "0.6.0"
 spirq = "0.6.4"
 # Mesh/Texture assets
 gltf = "1.0"
+image = { version = "0.24", default-features = false, features = ["jpeg", "png"] } # sync with the deps in gltf crate
 mikktspace = "0.3.0"
 intel_tex_2 = "0.2.2"
 rkyv = "0.7"

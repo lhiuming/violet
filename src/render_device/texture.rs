@@ -367,7 +367,7 @@ impl super::RenderDevice {
                 depth: 1,
             })
             .array_layers(desc.layer_count)
-            .mip_levels(1)
+            .mip_levels(desc.mip_level_count)
             .samples(vk::SampleCountFlags::TYPE_1)
             .initial_layout(initial_layout)
             .usage(desc.usage)

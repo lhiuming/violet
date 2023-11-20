@@ -7,8 +7,8 @@ use glam::{Mat4, Vec3};
 use crate::{
     model::{ImageFormat, Model},
     render_device::{
-        AccelerationStructure, Buffer, BufferDesc, RenderDevice, Texture, TextureDesc, TextureView,
-        TextureViewDesc,
+        texture::TextureUsage, AccelerationStructure, Buffer, BufferDesc, RenderDevice, Texture,
+        TextureDesc, TextureView, TextureViewDesc,
     },
 };
 
@@ -603,29 +603,38 @@ impl RenderScene {
                 ImageFormat::BC7Unorm => vk::Format::BC7_UNORM_BLOCK,
                 ImageFormat::BC7Srgb => vk::Format::BC7_SRGB_BLOCK,
             };
+            let mip_level_count = image.mips_data.len() as u32;
 
             // Create texture object
             let texture = rd
-                .create_texture(
-                    TextureDesc::new_2d(
-                        image.width,
-                        image.height,
-                        format,
-                        vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
-                    )
-                    .with_flags(vk::ImageCreateFlags::MUTABLE_FORMAT), // performance cost?
-                )
+                .create_texture(TextureDesc {
+                    width: image.width,
+                    height: image.height,
+                    mip_level_count,
+                    format,
+                    usage: TextureUsage::new().sampled().transfer_dst().into(),
+                    ..Default::default()
+                })
                 .unwrap();
 
-            let buffer_size = image.data.len();
+            let buffer_size = image.mips_data.iter().map(Vec::len).sum();
 
             // Create staging buffer
             let staging_buffer = upload_context.borrow_staging_buffer(rd, buffer_size as u64);
 
-            // Read to staging buffer
-            let staging_slice =
-                unsafe { std::slice::from_raw_parts_mut(staging_buffer.0.data, buffer_size) };
-            staging_slice.copy_from_slice(&image.data);
+            // Write to staging buffer
+            let mut buffer_offsets = Vec::with_capacity(image.mips_data.len());
+            {
+                let staging_slice =
+                    unsafe { std::slice::from_raw_parts_mut(staging_buffer.0.data, buffer_size) };
+                let mut dst = 0;
+                for mip in image.mips_data.iter() {
+                    let dst_end = dst + mip.len();
+                    staging_slice[dst..dst_end].copy_from_slice(mip);
+                    buffer_offsets.push(dst);
+                    dst = dst_end;
+                }
+            }
 
             // Transfer to texture
             upload_context.immediate_submit(rd, |command_buffer| {
@@ -640,7 +649,7 @@ impl RenderScene {
                         .subresource_range(vk::ImageSubresourceRange {
                             aspect_mask: vk::ImageAspectFlags::COLOR,
                             base_mip_level: 0,
-                            level_count: 1,
+                            level_count: mip_level_count,
                             base_array_layer: 0,
                             layer_count: 1,
                         });
@@ -656,23 +665,33 @@ impl RenderScene {
                 }
 
                 // Copy
+                let mut width = image.width;
+                let mut height = image.height;
+                let mut regions = Vec::with_capacity(mip_level_count as usize);
+                for mip_level in 0..mip_level_count {
+                    let region = vk::BufferImageCopy::builder()
+                        .buffer_offset(buffer_offsets[mip_level as usize] as vk::DeviceSize)
+                        .buffer_row_length(0) // zero means tightly packed
+                        .buffer_image_height(0) // zero means tightly packed
+                        .image_subresource(vk::ImageSubresourceLayers {
+                            aspect_mask: vk::ImageAspectFlags::COLOR,
+                            mip_level,
+                            base_array_layer: 0,
+                            layer_count: 1,
+                        })
+                        .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                        .image_extent(vk::Extent3D {
+                            width,
+                            height,
+                            depth: 1,
+                        });
+                    regions.push(region.build());
+
+                    // TODO query API ?
+                    width = (width + 1) / 2;
+                    height = (height + 1) / 2;
+                }
                 let dst_image_layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
-                let region = vk::BufferImageCopy::builder()
-                    .buffer_row_length(0) // zero means tightly packed
-                    .buffer_image_height(0) // zero means tightly packed
-                    .image_subresource(vk::ImageSubresourceLayers {
-                        aspect_mask: vk::ImageAspectFlags::COLOR,
-                        mip_level: 0,
-                        base_array_layer: 0,
-                        layer_count: 1,
-                    })
-                    .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-                    .image_extent(vk::Extent3D {
-                        width: image.width,
-                        height: image.height,
-                        depth: 1,
-                    });
-                let regions = [*region];
                 unsafe {
                     rd.device.cmd_copy_buffer_to_image(
                         command_buffer,
@@ -694,7 +713,7 @@ impl RenderScene {
                         .subresource_range(vk::ImageSubresourceRange {
                             aspect_mask: vk::ImageAspectFlags::COLOR,
                             base_mip_level: 0,
-                            level_count: 1,
+                            level_count: mip_level_count,
                             base_array_layer: 0,
                             layer_count: 1,
                         });

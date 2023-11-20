@@ -124,7 +124,7 @@ pub struct Image {
     pub width: u32,
     pub height: u32,
     pub format: ImageFormat,
-    pub data: Vec<u8>, // RGBA
+    pub mips_data: Vec<Vec<u8>>,
 }
 
 impl Image {
@@ -133,7 +133,7 @@ impl Image {
             width: 0,
             height: 0,
             format: ImageFormat::R8G8B8A8Unorm,
-            data: Default::default(),
+            mips_data: Default::default(),
         }
     }
 }
@@ -327,6 +327,15 @@ struct ImportedImageUsage: u8 {
     const Normal     = 0b00000010;
     const MetalRough = 0b00000100;
 }
+}
+
+fn as_surface<'a>(image: &'a image::RgbaImage) -> intel_tex_2::RgbaSurface<'a> {
+    intel_tex_2::RgbaSurface {
+        data: image.as_raw(),
+        width: image.width(),
+        height: image.height(),
+        stride: image.width() * 4,
+    }
 }
 
 pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
@@ -645,7 +654,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
         });
     }
 
-    // Load and Compress images
+    // Load, Create mipmap, and Compress images
     let mut model_images = Vec::<Image>::new();
     for (image_index, image) in images.iter().enumerate() {
         let image_index = image_index as ImageIndex;
@@ -717,51 +726,71 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
         }
         assert_eq!(raw_data.len(), texel_count as usize * 4);
 
+        // Cretae mipmaps
+        let last_mip_levels = image
+            .width
+            .max(image.height)
+            .next_power_of_two()
+            .trailing_zeros() as usize;
+        let mut raw_mips = Vec::<image::RgbaImage>::with_capacity(last_mip_levels + 1);
+        raw_mips.push(
+            image::RgbaImage::from_raw(image.width, image.height, raw_data)
+                .expect("Failed to create image"),
+        );
+        for mip_level in 1..=last_mip_levels {
+            let perv_mip = &raw_mips[mip_level - 1];
+            let down_sampled = image::imageops::resize(
+                perv_mip,
+                (perv_mip.width() + 1) / 2,
+                (perv_mip.height() + 1) / 2,
+                image::imageops::FilterType::Lanczos3,
+            );
+            raw_mips.push(down_sampled);
+        }
+
         // Compress
-        let (data, format) = if config.tex_compression {
+        let (mips_data, format) = if config.tex_compression {
             match imported_usage {
                 ImportedImageUsage::BaseColor => {
                     // NOTE: we dont support alpha for now, so we just drop the alpha channel
                     // NOTE: base color is implicitly sRGB (enforced by glTF spec)
                     let settings = bc7::opaque_basic_settings();
-                    let surface = intel_tex_2::RgbaSurface {
-                        data: &raw_data,
-                        width: image.width,
-                        height: image.height,
-                        stride: image.width * 4,
-                    };
-                    (
-                        bc7::compress_blocks(&settings, &surface),
-                        ImageFormat::BC7Srgb,
-                    )
+                    let mips_data = raw_mips
+                        .iter()
+                        .map(|mip| bc7::compress_blocks(&settings, &as_surface(mip)))
+                        .collect();
+                    (mips_data, ImageFormat::BC7Srgb)
                 }
                 ImportedImageUsage::Normal => {
                     // NOTE: normal only in xyz, linear (unorm)
                     let settings = bc7::opaque_basic_settings();
-                    let surface = intel_tex_2::RgbaSurface {
-                        data: &raw_data,
-                        width: image.width,
-                        height: image.height,
-                        stride: image.width * 4,
-                    };
-                    (
-                        bc7::compress_blocks(&settings, &surface),
-                        ImageFormat::BC7Unorm,
-                    )
+                    let mips_data = raw_mips
+                        .iter()
+                        .map(|mip| bc7::compress_blocks(&settings, &as_surface(mip)))
+                        .collect();
+                    (mips_data, ImageFormat::BC7Unorm)
                 }
                 ImportedImageUsage::MetalRough => {
                     // NOTE: metalic roughness texture only in xy, linear (unorm)
-                    let surface = intel_tex_2::RgbaSurface {
-                        data: &raw_data,
-                        width: image.width,
-                        height: image.height,
-                        stride: image.width * 4,
-                    };
-                    (bc5::compress_blocks(&surface), ImageFormat::BC5Unorm)
+                    let mips_data = raw_mips
+                        .iter()
+                        .map(|mip| bc5::compress_blocks(&as_surface(mip)))
+                        .collect();
+                    (mips_data, ImageFormat::BC5Unorm)
                 }
-                _ => (raw_data, ImageFormat::R8G8B8A8Unorm),
+                _ => (
+                    raw_mips
+                        .drain(0..=last_mip_levels)
+                        .map(image::ImageBuffer::into_raw)
+                        .collect(),
+                    ImageFormat::R8G8B8A8Unorm,
+                ),
             }
         } else {
+            let raw_data = raw_mips
+                .drain(0..=last_mip_levels)
+                .map(image::ImageBuffer::into_raw)
+                .collect::<Vec<_>>();
             // Only base color and emmisive is (and must be) sRGB (by glTF spec)
             match imported_usage {
                 ImportedImageUsage::BaseColor => (raw_data, ImageFormat::R8G8B8A8Srgb),
@@ -773,7 +802,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
             width: image.width,
             height: image.height,
             format,
-            data,
+            mips_data,
         });
     }
 
