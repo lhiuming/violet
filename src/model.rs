@@ -329,12 +329,61 @@ struct ImportedImageUsage: u8 {
 }
 }
 
-fn as_surface<'a>(image: &'a image::RgbaImage) -> intel_tex_2::RgbaSurface<'a> {
-    intel_tex_2::RgbaSurface {
-        data: image.as_raw(),
-        width: image.width(),
-        height: image.height(),
-        stride: image.width() * 4,
+// Align image to 4x4 texel blocks, ready for block compression
+struct BlockAlignedImage {
+    image: image::RgbaImage,
+}
+
+impl BlockAlignedImage {
+    pub fn from(image: image::RgbaImage) -> BlockAlignedImage {
+        assert!(image.width() > 0 && image.height() > 0);
+        if image.width() % 4 != 0 || image.height() % 4 != 0 {
+            // Create aligned image by Padding (repeating)
+            let dst_width = (image.width() + 3) & !3;
+            let dst_height = (image.height() + 3) & !3;
+            let mut dst = Vec::<u8>::with_capacity(dst_width as usize * dst_height as usize * 4);
+            for y in 0..image.height() {
+                let dst_offset = dst.len();
+                // copy a row
+                let src = image.as_raw();
+                let src_stride = image.width() as usize * 4;
+                let src_beg = src_stride * y as usize;
+                let src_end = src_beg + src_stride;
+                dst.extend_from_slice(&src[src_beg..src_end]);
+                // wrapping from left, to fill remaining pixels
+                let mut curr_width = image.width();
+                while curr_width < dst_width {
+                    let remaining_pixels = dst_width - curr_width;
+                    let pixels = remaining_pixels.min(curr_width); // can't copy more than what we have
+                    dst.extend_from_within(dst_offset..(dst_offset + pixels as usize * 4));
+                    curr_width += pixels;
+                }
+            }
+            // wrapping from top, to fill remaining rows
+            let mut curr_height = image.height();
+            while curr_height < dst_height {
+                let remaining_rows = dst_height - curr_height;
+                let rows = remaining_rows.min(curr_height); // can't copy more than what we have
+                dst.extend_from_within(..(rows * dst_width) as usize * 4);
+                curr_height += rows;
+            }
+            assert!(dst.len() == dst_width as usize * dst_height as usize * 4);
+            BlockAlignedImage {
+                image: image::RgbaImage::from_raw(dst_width, dst_height, dst).unwrap(),
+            }
+        } else {
+            // Use as-it-is
+            BlockAlignedImage { image }
+        }
+    }
+
+    pub fn as_surface<'a>(&'a self) -> intel_tex_2::RgbaSurface<'a> {
+        intel_tex_2::RgbaSurface {
+            data: &self.image.as_raw(),
+            width: self.image.width(),
+            height: self.image.height(),
+            stride: self.image.width() * 4,
+        }
     }
 }
 
@@ -741,8 +790,8 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
             let perv_mip = &raw_mips[mip_level - 1];
             let down_sampled = image::imageops::resize(
                 perv_mip,
-                (perv_mip.width() + 1) / 2,
-                (perv_mip.height() + 1) / 2,
+                (perv_mip.width() / 2).max(1),
+                (perv_mip.height() / 2).max(1),
                 image::imageops::FilterType::Lanczos3,
             );
             raw_mips.push(down_sampled);
@@ -756,8 +805,13 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
                     // NOTE: base color is implicitly sRGB (enforced by glTF spec)
                     let settings = bc7::opaque_basic_settings();
                     let mips_data = raw_mips
-                        .iter()
-                        .map(|mip| bc7::compress_blocks(&settings, &as_surface(mip)))
+                        .drain(..)
+                        .map(|mip| {
+                            bc7::compress_blocks(
+                                &settings,
+                                &BlockAlignedImage::from(mip).as_surface(),
+                            )
+                        })
                         .collect();
                     (mips_data, ImageFormat::BC7Srgb)
                 }
@@ -765,22 +819,27 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
                     // NOTE: normal only in xyz, linear (unorm)
                     let settings = bc7::opaque_basic_settings();
                     let mips_data = raw_mips
-                        .iter()
-                        .map(|mip| bc7::compress_blocks(&settings, &as_surface(mip)))
+                        .drain(..)
+                        .map(|mip| {
+                            bc7::compress_blocks(
+                                &settings,
+                                &BlockAlignedImage::from(mip).as_surface(),
+                            )
+                        })
                         .collect();
                     (mips_data, ImageFormat::BC7Unorm)
                 }
                 ImportedImageUsage::MetalRough => {
                     // NOTE: metalic roughness texture only in xy, linear (unorm)
                     let mips_data = raw_mips
-                        .iter()
-                        .map(|mip| bc5::compress_blocks(&as_surface(mip)))
+                        .drain(..)
+                        .map(|mip| bc5::compress_blocks(&BlockAlignedImage::from(mip).as_surface()))
                         .collect();
                     (mips_data, ImageFormat::BC5Unorm)
                 }
                 _ => (
                     raw_mips
-                        .drain(0..=last_mip_levels)
+                        .drain(..)
                         .map(image::ImageBuffer::into_raw)
                         .collect(),
                     ImageFormat::R8G8B8A8Unorm,
@@ -788,7 +847,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
             }
         } else {
             let raw_data = raw_mips
-                .drain(0..=last_mip_levels)
+                .drain(..)
                 .map(image::ImageBuffer::into_raw)
                 .collect::<Vec<_>>();
             // Only base color and emmisive is (and must be) sRGB (by glTF spec)

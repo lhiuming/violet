@@ -687,9 +687,9 @@ impl RenderScene {
                         });
                     regions.push(region.build());
 
-                    // TODO query API ?
-                    width = (width + 1) / 2;
-                    height = (height + 1) / 2;
+                    // ref: https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#resources-image-mip-level-sizing
+                    width = (width / 2).max(1);
+                    height = (height / 2).max(1);
                 }
                 let dst_image_layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
                 unsafe {
