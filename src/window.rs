@@ -250,7 +250,7 @@ unsafe extern "system" fn wnd_callback(
             });
         }
         WM_RBUTTONDOWN => {
-            ReleaseCapture();
+            SetCapture(hwnd);
             let (x, y) = decode_cursor_pos();
             handler.msg_stream.push(Message::MouseButton {
                 x,
