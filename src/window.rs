@@ -4,7 +4,7 @@ use std::{ffi, mem, ptr};
 use glam::UVec2;
 
 use windows_sys::Win32::{
-    Foundation::*, System::LibraryLoader::*, System::Memory::*, UI::HiDpi::*,
+    Foundation::*, System::LibraryLoader::*, System::Memory::*, UI::HiDpi::*, UI::Input::Ime,
     UI::Input::KeyboardAndMouse::*, UI::WindowsAndMessaging::*,
 };
 
@@ -368,6 +368,12 @@ impl Window {
 
         // Check if we have reigster window class (wnd_callback)
         ensure_register_window_class();
+
+        // Disable IME avoid key input troubles (not using text input anyway)
+        if unsafe { Ime::ImmDisableIME(0) == 0 } {
+            println!("Window: failed to disable IME.");
+            report_last_error();
+        }
 
         // NOTE: lifetime musu be longer than the CreateWindowExW call
         let mut cstr_class_name = to_cstr_wide(K_WINDOW_CLASS_NAME);

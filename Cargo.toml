@@ -45,5 +45,6 @@ features = [
 	"Win32_Graphics_Gdi",
 	"Win32_UI_WindowsAndMessaging",
 	"Win32_UI_Input_KeyboardAndMouse",
+	"Win32_UI_Input_Ime",
 	"Win32_UI_HiDpi",
 ]
