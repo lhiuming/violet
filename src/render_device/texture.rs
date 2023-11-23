@@ -11,6 +11,10 @@ impl TextureUsage {
         }
     }
 
+    pub fn for_compute() -> Self {
+        Self::new().sampled().storage()
+    }
+
     // VK stuff
 
     pub fn from_vk(flags: vk::ImageUsageFlags) -> TextureUsage {

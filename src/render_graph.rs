@@ -1359,6 +1359,28 @@ impl<'a> RenderGraphBuilder<'a> {
             return handle;
         }
 
+        // Check if temporal handle is valid, and panic ASAP
+        match T::get_enum() {
+            ResTypeEnum::Texture => {
+                if !self
+                    .cache
+                    .temporal_textures
+                    .contains_key(&temporal_handle.id)
+                {
+                    panic!("Error: temporal texture is invalid");
+                }
+            }
+            ResTypeEnum::Buffer => {
+                if !self
+                    .cache
+                    .temporal_buffers
+                    .contains_key(&temporal_handle.id)
+                {
+                    panic!("Error: temporal buffer is invalid");
+                }
+            }
+        }
+
         // Register the texture
         let id = match T::get_enum() {
             ResTypeEnum::Texture => {
@@ -2359,21 +2381,16 @@ impl RenderGraphBuilder<'_> {
         }
 
         // Process all textures converted to temporals
-        for (handle, temporal_handle) in &self.transient_to_temporal_textures {
+        for (handle, temporal_handle) in self.transient_to_temporal_textures.drain() {
             let tex = exec_context.textures[handle.id].take().unwrap();
             let conflict = self.cache.temporal_textures.insert(temporal_handle.id, tex);
             assert!(conflict.is_none());
         }
-        self.transient_to_temporal_textures.clear();
-        for (handle, temporal_handle) in &self.transient_to_temporal_buffers {
+        for (handle, temporal_handle) in self.transient_to_temporal_buffers.drain() {
             let buf = exec_context.buffers[handle.id].take().unwrap();
             let conflict = self.cache.temporal_buffers.insert(temporal_handle.id, buf);
             assert!(conflict.is_none());
         }
-
-        // puch back temporal id allocator
-        //assert!(cache.next_temporal_id.is_none());
-        //cache.next_temporal_id = Some(self.next_temporal_id);
 
         // Pool back all resource objects
         for view in exec_context

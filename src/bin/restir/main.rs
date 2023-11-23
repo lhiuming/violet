@@ -1,3 +1,4 @@
+mod denoising;
 mod reference_path_tracer;
 mod restir_render_loop;
 mod restir_renderer;

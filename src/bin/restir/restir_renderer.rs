@@ -9,12 +9,12 @@ use violet::{
     },
     render_graph::*,
     render_loop::{
-        div_round_up, div_round_up_uvec2, gbuffer_pass::*, jenkins_hash, util_passes::clear_buffer,
-        DivRoundUp,
+        div_round_up, gbuffer_pass::*, jenkins_hash, util_passes::clear_buffer, DivRoundUp,
     },
     render_scene::RenderScene,
 };
 
+use crate::denoising::{self, Denoiser};
 use crate::restir_render_loop::SceneRendererInput;
 
 // HASH_GRID_NUM_CELLS in shader
@@ -62,6 +62,7 @@ pub struct RestirConfig {
     ind_spec_validate: bool,
     ind_spec_taa: bool,
     hash_grid_cache_decay: bool,
+    new_denoiser: bool,
     debug_view: DebugView,
 }
 impl Default for RestirConfig {
@@ -74,6 +75,7 @@ impl Default for RestirConfig {
             ind_spec_validate: true,
             ind_spec_taa: true,
             hash_grid_cache_decay: true,
+            new_denoiser: true,
             debug_view: DebugView::None,
         }
     }
@@ -97,6 +99,7 @@ struct HashGridCacheResrouces<BufferHandle> {
 pub struct RestirRenderer {
     config: RestirConfig,
     taa: TAAPass,
+    denoiser: Denoiser,
 
     prev_diffuse_reservoir_buffer: Option<RGTemporal<Buffer>>,
     prev_indirect_diffuse_texture: Option<RGTemporal<Texture>>,
@@ -115,6 +118,7 @@ impl RestirRenderer {
         Self {
             config: Default::default(),
             taa: TAAPass::new(),
+            denoiser: Denoiser::new(),
 
             prev_diffuse_reservoir_buffer: None,
             prev_indirect_diffuse_texture: None,
@@ -136,10 +140,13 @@ impl RestirRenderer {
         let config = &mut self.config;
         ui.heading("RESTIR RENDERER");
         ui.checkbox(&mut config.taa, "taa");
+        ui.checkbox(&mut config.new_denoiser, "new_denoiser");
+        ui.add_enabled_ui(!config.new_denoiser, |ui| {
+            ui.checkbox(&mut config.ind_diff_taa, "ind.diff.taa");
+            ui.checkbox(&mut config.ind_spec_taa, "ind.spec.taa");
+        });
         ui.checkbox(&mut config.ind_diff_validate, "ind.diff.s.validate");
-        ui.checkbox(&mut config.ind_diff_taa, "ind.diff.taa");
         ui.checkbox(&mut config.ind_spec_validate, "ind.spec.s.validate");
-        ui.checkbox(&mut config.ind_spec_taa, "ind.spec.taa");
         ui.checkbox(&mut config.hash_grid_cache_decay, "hg.cache.decay");
         ui.add(egui::Slider::new(&mut config.ao_radius, 0.0..=5.0).text("ao radius"));
 
@@ -472,7 +479,7 @@ impl RestirRenderer {
             .push_constant(&input.frame_index)
             .push_constant(&(has_prev_diffuse_reservoir as u32))
             .push_constant(&indirect_diffuse_has_new_sample)
-            .group_count_uvec3(div_round_up_uvec2(main_size, UVec2::new(8, 4)).extend(1));
+            .group_count_uvec3(main_size.div_round_up(UVec2::new(8, 4)).extend(1));
 
         let indirect_diffuse = rg.create_texutre(TextureDesc::new_2d(
             main_size.x,
@@ -512,8 +519,8 @@ impl RestirRenderer {
         }
 
         // Pass: Indirect Diffuse Temporal Filtering
-        let filtered_indirect_diffuse;
-        if has_prev_indirect_diffuse && self.config.ind_diff_taa {
+        let mut filtered_indirect_diffuse;
+        if has_prev_indirect_diffuse && self.config.ind_diff_taa && !self.config.new_denoiser {
             let desc = rg.get_texture_desc(indirect_diffuse);
             filtered_indirect_diffuse = rg.create_texutre(*desc);
 
@@ -531,9 +538,6 @@ impl RestirRenderer {
         } else {
             filtered_indirect_diffuse = indirect_diffuse;
         }
-
-        self.prev_indirect_diffuse_texture
-            .replace(rg.convert_to_temporal(filtered_indirect_diffuse));
 
         let mut ind_spec_new_tex = |format: vk::Format| {
             let usage = vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED;
@@ -669,8 +673,8 @@ impl RestirRenderer {
             );
 
         // Pass: Indirect Specular Temporal Filtering
-        let filtered_indirect_specular;
-        if has_prev_ind_spec && self.config.ind_spec_taa {
+        let mut filtered_indirect_specular;
+        if has_prev_ind_spec && self.config.ind_spec_taa && !self.config.new_denoiser {
             let desc = rg.get_texture_desc(indirect_specular);
             filtered_indirect_specular = rg.create_texutre(*desc);
 
@@ -689,6 +693,26 @@ impl RestirRenderer {
             filtered_indirect_specular = indirect_specular;
         }
 
+        // Passes: ReLAX style denoiser
+        if self.config.new_denoiser && (has_prev_depth && has_prev_gbuffer_color) {
+            let input = denoising::Input {
+                depth: gbuffer.depth,
+                gbuffer: gbuffer.color,
+                prev_depth: prev_depth,
+                prev_gbuffer: prev_gbuffer_color,
+                diffuse: indirect_diffuse,
+                specular: indirect_specular,
+            };
+            let denoised = self.denoiser.add_passes(rg, input);
+
+            filtered_indirect_diffuse = denoised.diffuse;
+            filtered_indirect_specular = denoised.specular;
+        } else {
+            self.denoiser.reset();
+        }
+
+        self.prev_indirect_diffuse_texture
+            .replace(rg.convert_to_temporal(filtered_indirect_diffuse));
         self.prev_indirect_specular
             .replace(IndirectSpecularTextures {
                 reservoir: rg.convert_to_temporal(ind_spec_temporal_reservoir),
@@ -696,6 +720,7 @@ impl RestirRenderer {
                 hit_radiance: rg.convert_to_temporal(ind_spec_hit_radiance),
                 lighting: rg.convert_to_temporal(filtered_indirect_specular),
             });
+
         self.prev_gbuffer_color
             .replace(rg.convert_to_temporal(gbuffer.color));
 
