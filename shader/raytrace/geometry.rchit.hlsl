@@ -1,3 +1,4 @@
+#include "../config.inc.hlsl"
 #include "../frame_bindings.hlsl"
 #include "../scene_bindings.hlsl"
 
@@ -81,6 +82,10 @@ void main(inout GeometryRayPayload payload, in Attribute attr)
     float4 base_color = bindless_textures[mat.base_color_index].SampleLevel(sampler_linear_wrap, uv, TEX_LOD_BIAS);
     float4 metal_rough = bindless_textures[mat.metallic_roughness_index].SampleLevel(sampler_linear_wrap, uv, TEX_LOD_BIAS);
     float4 normal_map = bindless_textures[mat.normal_index].SampleLevel(sampler_linear_wrap, uv, TEX_LOD_BIAS);
+
+    #if HACK_MAKE_EVERYTHING_GLOSSY 
+    metal_rough.g *= HACK_ROUGHNESS_MULTIPLIER;
+    #endif
 
     // normal mapping
     float3 normal_ts = normal_map.xyz * 2.0f - 1.0f;

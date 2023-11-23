@@ -1,4 +1,4 @@
-// Scene Bindings (Set #1)
+#include "config.inc.hlsl"
 #include "frame_bindings.hlsl"
 #include "gbuffer.hlsl"
 #include "scene_bindings.hlsl"
@@ -81,6 +81,10 @@ void ps_main(
     float4 base_color = bindless_textures[mat.base_color_index].Sample(sampler_linear_wrap, uv);
     float4 normal_map = bindless_textures[mat.normal_index].Sample(sampler_linear_wrap, uv);
     float4 metal_rough = bindless_textures[mat.metallic_roughness_index].Sample(sampler_linear_wrap, uv);
+
+    #if HACK_MAKE_EVERYTHING_GLOSSY 
+    metal_rough.g *= HACK_ROUGHNESS_MULTIPLIER;
+    #endif
 
     // normal mapping
     float3 normal_ts = normal_map.xyz * 2.0f - 1.0f;

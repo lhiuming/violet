@@ -1,0 +1,8 @@
+#ifndef CONFIG_INCLUDED
+#define CONFIG_INCLUDED
+
+// HACK: make everything glossy 
+#define HACK_MAKE_EVERYTHING_GLOSSY 0
+#define HACK_ROUGHNESS_MULTIPLIER 0.125
+
+#endif // CONFIG_INCLUDED

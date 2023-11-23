@@ -6,6 +6,7 @@
 #include "reservoir.hlsl"
 
 #define MAX_ITERATION 9
+#define MIN_ITERATION min(3, MAX_ITERATION)
 #define INIT_RADIUS_FACTOR 0.05
 #define MIN_RADIUS 1.5
 
@@ -90,7 +91,9 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 #endif
     uint rng_state = lcg_init(dispatch_id, buffer_size, pc.frame_index);
     float rand_angle = lcg_rand(rng_state) * TWO_PI;
-    for (uint i = 0; i < MAX_ITERATION; i++)
+    //uint num_iteration = select(reservoir.M < 16, MAX_ITERATION, MIN_ITERATION);
+    uint num_iteration = MAX_ITERATION;
+    for (uint i = 0; i < num_iteration; i++)
     {
         float x, y;
 #if SEARCH_PATTERN_RANDOM
