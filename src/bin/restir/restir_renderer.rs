@@ -50,6 +50,8 @@ enum DebugView {
     IndDiffFiltered,
     IndSpec,
     IndSpecFiltered,
+    DenoiserHistLen,
+    DenoiserVariance,
     HashGridCell,
     HashGridRadiance,
 }
@@ -164,6 +166,8 @@ impl RestirRenderer {
                 item(DebugView::IndDiffFiltered);
                 item(DebugView::IndSpec);
                 item(DebugView::IndSpecFiltered);
+                item(DebugView::DenoiserHistLen);
+                item(DebugView::DenoiserVariance);
                 item(DebugView::HashGridCell);
                 item(DebugView::HashGridRadiance);
             });
@@ -479,7 +483,7 @@ impl RestirRenderer {
             .push_constant(&input.frame_index)
             .push_constant(&(has_prev_diffuse_reservoir as u32))
             .push_constant(&indirect_diffuse_has_new_sample)
-            .group_count_uvec3(main_size.div_round_up(UVec2::new(8, 4)).extend(1));
+            .group_count_uvec2(main_size.div_round_up(UVec2::new(8, 4)));
 
         let indirect_diffuse = rg.create_texutre(TextureDesc::new_2d(
             main_size.x,
@@ -694,6 +698,7 @@ impl RestirRenderer {
         }
 
         // Passes: ReLAX style denoiser
+        let denoiser_dbv;
         if self.config.new_denoiser && (has_prev_depth && has_prev_gbuffer_color) {
             let input = denoising::Input {
                 depth: gbuffer.depth,
@@ -703,12 +708,17 @@ impl RestirRenderer {
                 diffuse: indirect_diffuse,
                 specular: indirect_specular,
             };
-            let denoised = self.denoiser.add_passes(rg, input);
+            let denoised = self.denoiser.add_passes(rg, default_res, input);
 
             filtered_indirect_diffuse = denoised.diffuse;
             filtered_indirect_specular = denoised.specular;
+            denoiser_dbv = denoised.debug_views;
         } else {
             self.denoiser.reset();
+            denoiser_dbv = denoising::DebugViews {
+                history_len: rg.register_texture(default_res.dummy_uint_texture),
+                variance: rg.register_texture(default_res.dummy_texture),
+            };
         }
 
         self.prev_indirect_diffuse_texture
@@ -875,19 +885,26 @@ impl RestirRenderer {
                 DebugView::IndDiffFiltered => filtered_indirect_diffuse,
                 DebugView::IndSpec => indirect_specular,
                 DebugView::IndSpecFiltered => filtered_indirect_specular,
+                DebugView::DenoiserVariance => denoiser_dbv.variance,
                 DebugView::HashGridCell => hash_grid_vis,
                 DebugView::HashGridRadiance => hash_grid_vis,
-                DebugView::None => rg.register_texture(default_res.dummy_texture),
+                _ => rg.register_texture(default_res.dummy_texture),
             };
+            let uint_texture = match self.config.debug_view {
+                DebugView::DenoiserHistLen => denoiser_dbv.history_len,
+                _ => rg.register_texture(default_res.dummy_uint_texture),
+            };
+            let is_uint = match self.config.debug_view {
+                DebugView::DenoiserHistLen => true,
+                _ => false,
+            } as u32;
             rg.new_compute("Debug View")
                 .compute_shader("restir/debug_view.hlsl")
                 .texture("color_texture", color_texture)
+                .texture("uint_texture", uint_texture)
                 .rw_texture("rw_output_texture", post_taa_color)
-                .group_count(
-                    div_round_up(main_size.x, 8),
-                    div_round_up(main_size.y, 4),
-                    1,
-                );
+                .push_constant(&is_uint)
+                .group_count_uvec2(main_size.div_round_up(UVec2::new(8, 8)));
         }
 
         // Keep HashGridCache

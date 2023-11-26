@@ -96,6 +96,20 @@ impl Default for TextureDesc {
 }
 
 impl TextureDesc {
+    pub fn compute_default() -> Self {
+        Self {
+            width: 1,
+            height: 1,
+            layer_count: 1,
+            mip_level_count: 1,
+            format: vk::Format::UNDEFINED,
+            usage: TextureUsage::for_compute().into(),
+            flags: vk::ImageCreateFlags::default(),
+        }
+    }
+}
+
+impl TextureDesc {
     pub fn new_2d(
         width: u32,
         height: u32,
