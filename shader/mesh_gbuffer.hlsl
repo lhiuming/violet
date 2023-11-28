@@ -68,7 +68,7 @@ void ps_main(
     float4 tangent: TEXCOORD2,
     noperspective float2 screen_pos: TEXCOORD3,
     float3 bitangent: TEXCOORD4,
-    bool if_front_face: SV_IsFrontFace,
+    bool is_front_face: SV_IsFrontFace,
     // Output
     out uint output0: SV_Target0,
     out uint output1: SV_Target1,
@@ -88,14 +88,21 @@ void ps_main(
 
     // normal mapping
     float3 normal_ts = normal_map.xyz * 2.0f - 1.0f;
-    float3 normal_ws = normalize(normal_ts.x * tangent.xyz + normal_ts.y * bitangent + normal_ts.z * normal);
-    normal_ws *= if_front_face ? 1.0f : -1.0f;
+    float3 normal_ws = normal_ts.x * tangent.xyz + normal_ts.y * bitangent + normal_ts.z * normal;
+    normal_ws *= is_front_face ? 1.0f : -1.0f;
+    normal_ws = normalize(normal_ws);
+
+    // denoiser guide
+    float fwidth_z = fwidth(hpos.z);
+    float fwidth_n = length(fwidth(normal_ws));
 
     GBuffer gbuffer;
     gbuffer.color = base_color.rgb;
     gbuffer.metallic = metal_rough.r;
-    gbuffer.perceptual_roughness = metal_rough.g;
     gbuffer.normal = normal_ws;
+    gbuffer.perceptual_roughness = metal_rough.g;
+    gbuffer.fwidth_z = fwidth_z;
+    gbuffer.fwidth_n = fwidth_n;
     gbuffer.shading_path = 1;
     uint4 o4 = encode_gbuffer(gbuffer);
     output0 = o4.x;

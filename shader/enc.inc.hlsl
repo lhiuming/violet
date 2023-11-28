@@ -13,6 +13,8 @@ float2 oct_wrap( float2 v )
     return ( 1.0 - abs( v.yx ) ) * select ( v.xy >= 0.0, 1.0, -1.0 );
 }
  
+// INPUT: don't need to be normalized, but assumed to be non-zero
+// OUTPUT: xy in [0, 1]
 float2 normal_encode_oct( float3 n )
 {
     n /= ( abs( n.x ) + abs( n.y ) + abs( n.z ) );

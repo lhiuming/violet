@@ -1,10 +1,14 @@
 #include "../frame_bindings.hlsl"
+#include "../gbuffer.hlsl"
 #include "../util.hlsl"
 
 Texture2D<float> depth_buffer;
+GBUFFER_TEXTURE_TYPE gbuffer_texture;
 Texture2D<float3> diff_source_texture;
 Texture2D<float3> spec_source_texture;
 
+Texture2D<float> prev_depth_buffer;
+GBUFFER_TEXTURE_TYPE prev_gbuffer_texture;
 Texture2D<float3> diff_history_texture;
 Texture2D<float3> spec_history_texture;
 Texture2D<float4> moments_history_texture;
@@ -36,6 +40,32 @@ float2x2 bilinear_weights(float2 f)
         );
 }
 
+struct GeometryTest 
+{
+    float center_depth;
+    float3 center_normal_ws;
+    float depth_tol;
+    float normal_tol_sq;
+
+    static GeometryTest create(float depth, GBuffer gbuffer) {
+        float depth_tol = gbuffer.fwidth_z * 4.0;
+        float normal_tol = gbuffer.fwidth_n * 16.0;
+        GeometryTest ret = {
+            depth,
+            gbuffer.normal,
+            depth_tol,
+            normal_tol * normal_tol
+        };
+        return ret;
+    }
+
+    bool is_tap_valid(float depth, float3 normal_ws) {
+        float3 n_diff = normal_ws - center_normal_ws;
+        return ( abs(depth - center_depth) < depth_tol ) 
+            && ( dot(n_diff, n_diff) < normal_tol_sq );
+    }
+};
+
 [numthreads(8, 8, 1)]
 void main(uint2 dispatch_id: SV_DispatchThreadID) 
 {
@@ -51,6 +81,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 
     // Reproject
     float2 motion_vector;
+    float reproj_depth;
     {
         // TODO save motion vector in a buffer so that we can reuse thi calculation in different passes
 
@@ -65,14 +96,16 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         float4 hpos_reproj = mul(frame_params.prev_view_proj, float4(position, 1));
         float2 ndc_reproj = hpos_reproj.xy / hpos_reproj.w - frame_params.jitter.zw;
         motion_vector = (ndc - ndc_reproj) * 0.5;
+        reproj_depth = hpos_reproj.z / hpos_reproj.w;
     }
     float2 src_uv = (float2(dispatch_id) + 0.5f) / float2(buffer_size); 
     float2 history_uv = src_uv - motion_vector;
 
-    // Sample
+    // Sample prev-frame data
     float3 diff_history;
     float3 spec_history;
     float4 moments_history;
+    float history_len;
     bool valid = all(history_uv == saturate(history_uv)) && bool(pc.has_history);
     if (valid)
     {
@@ -80,10 +113,14 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         float2 pix_coord_frac = frac(pix_coord_center);
         int2 pix_coord_base = int2(pix_coord_center); // truncate ~= floor
 
+        // NOTE: SVGF code sample uses (linear) depth instead of reprojected (linaer) depth 
+        GeometryTest test = GeometryTest::create(reproj_depth, load_gbuffer(gbuffer_texture, dispatch_id));
+
         // 2x2 bilinear filter with geometry test
         float3 diff_sum = 0.0;
         float3 spec_sum = 0.0;
         float4 moments_sum = 0.0;
+        float history_len_sum = 0.0;
         float weight_sum = 0.0;
         float2x2 weights = bilinear_weights(pix_coord_frac);
         for (int x = 0; x < 2; ++x)
@@ -91,27 +128,31 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
             for (int y = 0; y < 2; ++y)
             {
                 int2 pix_coord = pix_coord_base + int2(x, y);
-                pix_coord = clamp(pix_coord, int2(0, 0), int2(buffer_size) - int2(1, 1));
-                float weight = weights[y][x]; // y row, x col
+                bool coord_valid = all(pix_coord == clamp(pix_coord, int2(0, 0), int2(buffer_size) - int2(1, 1)));
 
-                // TODO test
-                bool sample_valid = true;
+                // TODO pack depth and normal (low precision, e.g. 16 + 16, should be enough)
+                float3 normal = GBufferNormal::load(prev_gbuffer_texture, pix_coord).normal;
+                bool sample_valid = coord_valid && test.is_tap_valid(prev_depth_buffer[pix_coord], normal);
+
                 if (sample_valid)
                 {
+                    float weight = weights[y][x]; // y row, x col
                     weight_sum += weight;
                     diff_sum += weight * diff_history_texture[pix_coord];
                     spec_sum += weight * spec_history_texture[pix_coord];
                     moments_sum += weight * moments_history_texture[pix_coord];
+                    history_len_sum += weight * float(history_len_texture[pix_coord]);
                 }
             }
         }
 
-        valid = weight_sum > 0.0;
+        valid = weight_sum > 0.015625; // (1/8)^2
         if (valid)
         {
             diff_history = diff_sum / weight_sum;
             spec_history = spec_sum / weight_sum;
             moments_history = moments_sum / weight_sum;
+            history_len = history_len_sum / weight_sum;
         }
         else
         {
@@ -120,21 +161,15 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         }
     }
 
-    uint hisotry_len;
     if (!valid)
     {
         // disocclusion
         diff_history = float3(0.0, 0.0, 0.0);
         spec_history = float3(0.0, 0.0, 0.0);
         moments_history = float4(0.0, 0.0, 0.0, 0.0);
-        hisotry_len = 1;
+        history_len = 0.0f;
     }
-    else
-    {
-        uint4 gather4 = history_len_texture.Gather(sampler_linear_clamp, history_uv, 0);
-        hisotry_len = min(min(gather4.x, gather4.y), min(gather4.z, gather4.w));
-        hisotry_len += 1;
-    }
+    history_len += 1.0f;
 
     float3 diff_source = diff_source_texture[dispatch_id];
     float3 spec_source = spec_source_texture[dispatch_id];
@@ -145,7 +180,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     // Blend
     const float BLEND_FACTOR = 1.0 / 16.0f;
     // Linear blend before gathering a long history (1/BLEND_FACTOR)
-    float alpha = max(BLEND_FACTOR, 1.0 / float(hisotry_len));
+    float alpha = max(BLEND_FACTOR, 1.0 / float(history_len));
     float3 diff_filtered = lerp(diff_history, diff_source, alpha);
     float3 spec_filtered = lerp(spec_history, spec_source, alpha);
     float4 moments_filtered = lerp(moments_history, moments_source, alpha);
@@ -156,6 +191,6 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     rw_diff_texture[dispatch_id] = diff_filtered;
     rw_spec_texture[dispatch_id] = spec_filtered;
     rw_moments_texture[dispatch_id] = moments_filtered;
-    rw_history_len_texture[dispatch_id] = hisotry_len;
+    rw_history_len_texture[dispatch_id] = uint(history_len); // truncate
     rw_variance_texture[dispatch_id] = variance;
 }
