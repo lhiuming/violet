@@ -48,8 +48,8 @@ struct GeometryTest
     float normal_tol_sq;
 
     static GeometryTest create(float depth, GBuffer gbuffer) {
-        float depth_tol = gbuffer.fwidth_z * 4.0;
-        float normal_tol = gbuffer.fwidth_n * 16.0;
+        float depth_tol = gbuffer.fwidth_z * 4.0 + 1e-4;
+        float normal_tol = gbuffer.fwidth_n * 16.0 + 1e-2;
         GeometryTest ret = {
             depth,
             gbuffer.normal,
