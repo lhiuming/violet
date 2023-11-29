@@ -47,9 +47,7 @@ enum DebugView {
     AO,
     AOFiltered,
     IndDiff,
-    IndDiffFiltered,
     IndSpec,
-    IndSpecFiltered,
     DenoiserHistLen,
     DenoiserVariance,
     HashGridCell,
@@ -163,9 +161,7 @@ impl RestirRenderer {
                 item(DebugView::AO);
                 item(DebugView::AOFiltered);
                 item(DebugView::IndDiff);
-                item(DebugView::IndDiffFiltered);
                 item(DebugView::IndSpec);
-                item(DebugView::IndSpecFiltered);
                 item(DebugView::DenoiserHistLen);
                 item(DebugView::DenoiserVariance);
                 item(DebugView::HashGridCell);
@@ -881,10 +877,8 @@ impl RestirRenderer {
             let color_texture = match self.config.debug_view {
                 DebugView::AO => curr_ao_texture,
                 DebugView::AOFiltered => filtered_ao_texture,
-                DebugView::IndDiff => indirect_diffuse,
-                DebugView::IndDiffFiltered => filtered_indirect_diffuse,
-                DebugView::IndSpec => indirect_specular,
-                DebugView::IndSpecFiltered => filtered_indirect_specular,
+                DebugView::IndDiff => filtered_indirect_diffuse,
+                DebugView::IndSpec => filtered_indirect_specular,
                 DebugView::DenoiserVariance => denoiser_dbv.variance,
                 DebugView::HashGridCell => hash_grid_vis,
                 DebugView::HashGridRadiance => hash_grid_vis,

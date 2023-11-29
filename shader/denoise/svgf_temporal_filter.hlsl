@@ -2,12 +2,12 @@
 #include "../gbuffer.hlsl"
 #include "../util.hlsl"
 
-Texture2D<float> depth_buffer;
+Texture2D<float> depth_texture;
 GBUFFER_TEXTURE_TYPE gbuffer_texture;
 Texture2D<float3> diff_source_texture;
 Texture2D<float3> spec_source_texture;
 
-Texture2D<float> prev_depth_buffer;
+Texture2D<float> prev_depth_texture;
 GBUFFER_TEXTURE_TYPE prev_gbuffer_texture;
 Texture2D<float3> diff_history_texture;
 Texture2D<float3> spec_history_texture;
@@ -23,7 +23,8 @@ RWTexture2D<uint> rw_history_len_texture;
 RWTexture2D<float2> rw_variance_texture; // x: diffuse variance, y: specular variance
 
 [[vk::push_constant]]
-struct PC {
+struct PC 
+{
     float2 buffer_size;
     uint has_history;
 } pc;
@@ -47,7 +48,8 @@ struct GeometryTest
     float depth_tol;
     float normal_tol_sq;
 
-    static GeometryTest create(float depth, GBuffer gbuffer) {
+    static GeometryTest create(float depth, GBuffer gbuffer)
+    {
         float depth_tol = gbuffer.fwidth_z * 4.0 + 1e-4;
         float normal_tol = gbuffer.fwidth_n * 16.0 + 1e-2;
         GeometryTest ret = {
@@ -59,7 +61,8 @@ struct GeometryTest
         return ret;
     }
 
-    bool is_tap_valid(float depth, float3 normal_ws) {
+    bool is_tap_valid(float depth, float3 normal_ws)
+    {
         float3 n_diff = normal_ws - center_normal_ws;
         return ( abs(depth - center_depth) < depth_tol ) 
             && ( dot(n_diff, n_diff) < normal_tol_sq );
@@ -70,7 +73,7 @@ struct GeometryTest
 void main(uint2 dispatch_id: SV_DispatchThreadID) 
 {
     // early out
-    float depth = depth_buffer[dispatch_id];
+    float depth = depth_texture[dispatch_id];
     if (has_no_geometry_via_depth(depth))
     {
         // TODO fill zeros
@@ -132,7 +135,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 
                 // TODO pack depth and normal (low precision, e.g. 16 + 16, should be enough)
                 float3 normal = GBufferNormal::load(prev_gbuffer_texture, pix_coord).normal;
-                bool sample_valid = coord_valid && test.is_tap_valid(prev_depth_buffer[pix_coord], normal);
+                bool sample_valid = coord_valid && test.is_tap_valid(prev_depth_texture[pix_coord], normal);
 
                 if (sample_valid)
                 {
@@ -156,8 +159,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         }
         else
         {
-            // TOOD 3x3 filter
-
+            // TOOD fallback 3x3 filter?
         }
     }
 
@@ -177,15 +179,15 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     moments_source.xy = float2(luminance(diff_source), luminance(spec_source));
     moments_source.zw = moments_source.xy * moments_source.xy;
 
-    // Blend
+    // Blend ("Integrate")
     const float BLEND_FACTOR = 1.0 / 16.0f;
-    // Linear blend before gathering a long history (1/BLEND_FACTOR)
+    // linearly blend before gathering a long history (1/BLEND_FACTOR)
     float alpha = max(BLEND_FACTOR, 1.0 / float(history_len));
     float3 diff_filtered = lerp(diff_history, diff_source, alpha);
     float3 spec_filtered = lerp(spec_history, spec_source, alpha);
     float4 moments_filtered = lerp(moments_history, moments_source, alpha);
 
-    // Pre-compute variance (realy?)
+    // Pre-compute variance
     float2 variance = max(moments_filtered.zw - moments_filtered.xy * moments_filtered.xy, 0.0);
 
     rw_diff_texture[dispatch_id] = diff_filtered;
