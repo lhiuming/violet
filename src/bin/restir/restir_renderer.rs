@@ -56,26 +56,22 @@ enum DebugView {
 
 pub struct RestirConfig {
     taa: bool,
+    denoise: bool,
     ao_radius: f32,
     ind_diff_validate: bool,
-    ind_diff_taa: bool,
     ind_spec_validate: bool,
-    ind_spec_taa: bool,
     hash_grid_cache_decay: bool,
-    new_denoiser: bool,
     debug_view: DebugView,
 }
 impl Default for RestirConfig {
     fn default() -> Self {
         Self {
             taa: true,
+            denoise: true,
             ao_radius: 2.0,
             ind_diff_validate: true,
-            ind_diff_taa: true,
             ind_spec_validate: true,
-            ind_spec_taa: true,
             hash_grid_cache_decay: true,
-            new_denoiser: true,
             debug_view: DebugView::None,
         }
     }
@@ -85,7 +81,6 @@ struct IndirectSpecularTextures {
     reservoir: RGTemporal<Texture>,
     hit_pos: RGTemporal<Texture>,
     hit_radiance: RGTemporal<Texture>,
-    lighting: RGTemporal<Texture>,
 }
 
 struct HashGridCacheResrouces<BufferHandle> {
@@ -140,11 +135,7 @@ impl RestirRenderer {
         let config = &mut self.config;
         ui.heading("RESTIR RENDERER");
         ui.checkbox(&mut config.taa, "taa");
-        ui.checkbox(&mut config.new_denoiser, "new_denoiser");
-        ui.add_enabled_ui(!config.new_denoiser, |ui| {
-            ui.checkbox(&mut config.ind_diff_taa, "ind.diff.taa");
-            ui.checkbox(&mut config.ind_spec_taa, "ind.spec.taa");
-        });
+        ui.checkbox(&mut config.denoise, "denoise");
         ui.checkbox(&mut config.ind_diff_validate, "ind.diff.s.validate");
         ui.checkbox(&mut config.ind_spec_validate, "ind.spec.s.validate");
         ui.checkbox(&mut config.hash_grid_cache_decay, "hg.cache.decay");
@@ -518,27 +509,6 @@ impl RestirRenderer {
                 .replace(rg.convert_to_temporal(spatial_reservoir_buffer));
         }
 
-        // Pass: Indirect Diffuse Temporal Filtering
-        let mut filtered_indirect_diffuse;
-        if has_prev_indirect_diffuse && self.config.ind_diff_taa && !self.config.new_denoiser {
-            let desc = rg.get_texture_desc(indirect_diffuse);
-            filtered_indirect_diffuse = rg.create_texutre(*desc);
-
-            rg.new_compute("Ind. Diff. Temporal Filter")
-                .compute_shader("restir/ind_diff_temporal_filter.hlsl")
-                .texture("depth_buffer", gbuffer.depth)
-                .texture("history_texture", prev_indirect_diffuse_texture)
-                .texture("source_texture", indirect_diffuse)
-                .rw_texture("rw_filtered_texture", filtered_indirect_diffuse)
-                .group_count(
-                    div_round_up(main_size.x, 8),
-                    div_round_up(main_size.y, 4),
-                    1,
-                );
-        } else {
-            filtered_indirect_diffuse = indirect_diffuse;
-        }
-
         let mut ind_spec_new_tex = |format: vk::Format| {
             let usage = vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED;
             rg.create_texutre(TextureDesc::new_2d(main_size.x, main_size.y, format, usage))
@@ -584,19 +554,16 @@ impl RestirRenderer {
         let prev_ind_spec_reservoir;
         let prev_ind_spec_hit_pos;
         let prev_ind_spec_hit_radiance;
-        let prev_ind_spec;
         match self.prev_indirect_specular.take() {
             Some(ind_spec) => {
                 prev_ind_spec_reservoir = rg.convert_to_transient(ind_spec.reservoir);
                 prev_ind_spec_hit_pos = rg.convert_to_transient(ind_spec.hit_pos);
                 prev_ind_spec_hit_radiance = rg.convert_to_transient(ind_spec.hit_radiance);
-                prev_ind_spec = rg.convert_to_transient(ind_spec.lighting);
             }
             None => {
                 prev_ind_spec_reservoir = rg.register_texture(default_res.dummy_uint_texture);
                 prev_ind_spec_hit_pos = rg.register_texture(default_res.dummy_texture);
                 prev_ind_spec_hit_radiance = rg.register_texture(default_res.dummy_texture);
-                prev_ind_spec = rg.register_texture(default_res.dummy_texture);
             }
         }
 
@@ -672,30 +639,11 @@ impl RestirRenderer {
                 1,
             );
 
-        // Pass: Indirect Specular Temporal Filtering
-        let mut filtered_indirect_specular;
-        if has_prev_ind_spec && self.config.ind_spec_taa && !self.config.new_denoiser {
-            let desc = rg.get_texture_desc(indirect_specular);
-            filtered_indirect_specular = rg.create_texutre(*desc);
-
-            rg.new_compute("Ind. Spec. Temporal Filter")
-                .compute_shader("restir/ind_spec_temporal_filter.hlsl")
-                .texture("depth_buffer", gbuffer.depth)
-                .texture("history_texture", prev_ind_spec)
-                .texture("source_texture", indirect_specular)
-                .rw_texture("rw_filtered_texture", filtered_indirect_specular)
-                .group_count(
-                    div_round_up(main_size.x, 8),
-                    div_round_up(main_size.y, 4),
-                    1,
-                );
-        } else {
-            filtered_indirect_specular = indirect_specular;
-        }
-
         // Passes: ReLAX style denoiser
+        let denoised_indirect_diffuse;
+        let denoised_indirect_specular;
         let denoiser_dbv;
-        if self.config.new_denoiser && (has_prev_depth && has_prev_gbuffer_color) {
+        if self.config.denoise && (has_prev_depth && has_prev_gbuffer_color) {
             let input = denoising::Input {
                 depth: gbuffer.depth,
                 gbuffer: gbuffer.color,
@@ -706,8 +654,8 @@ impl RestirRenderer {
             };
             let denoised = self.denoiser.add_passes(rg, default_res, input);
 
-            filtered_indirect_diffuse = denoised.diffuse;
-            filtered_indirect_specular = denoised.specular;
+            denoised_indirect_diffuse = denoised.diffuse;
+            denoised_indirect_specular = denoised.specular;
             denoiser_dbv = denoised.debug_views;
         } else {
             self.denoiser.reset();
@@ -715,16 +663,18 @@ impl RestirRenderer {
                 history_len: rg.register_texture(default_res.dummy_uint_texture),
                 variance: rg.register_texture(default_res.dummy_texture),
             };
+
+            denoised_indirect_diffuse = indirect_diffuse;
+            denoised_indirect_specular = indirect_specular;
         }
 
         self.prev_indirect_diffuse_texture
-            .replace(rg.convert_to_temporal(filtered_indirect_diffuse));
+            .replace(rg.convert_to_temporal(denoised_indirect_diffuse));
         self.prev_indirect_specular
             .replace(IndirectSpecularTextures {
                 reservoir: rg.convert_to_temporal(ind_spec_temporal_reservoir),
                 hit_pos: rg.convert_to_temporal(ind_spec_hit_pos),
                 hit_radiance: rg.convert_to_temporal(ind_spec_hit_radiance),
-                lighting: rg.convert_to_temporal(filtered_indirect_specular),
             });
 
         self.prev_gbuffer_color
@@ -803,8 +753,8 @@ impl RestirRenderer {
                 .compute_shader("restir/final_lighting.hlsl")
                 .texture("gbuffer_color", gbuffer.color)
                 .texture_view("shadow_mask_buffer", raytraced_shadow_mask.1)
-                .texture("indirect_diffuse_texture", filtered_indirect_diffuse)
-                .texture("indirect_specular_texture", filtered_indirect_specular)
+                .texture("indirect_diffuse_texture", denoised_indirect_diffuse)
+                .texture("indirect_specular_texture", denoised_indirect_specular)
                 .rw_texture("rw_color_buffer", scene_color)
                 .group_count(
                     div_round_up(main_size.x, 8),
@@ -877,8 +827,8 @@ impl RestirRenderer {
             let color_texture = match self.config.debug_view {
                 DebugView::AO => curr_ao_texture,
                 DebugView::AOFiltered => filtered_ao_texture,
-                DebugView::IndDiff => filtered_indirect_diffuse,
-                DebugView::IndSpec => filtered_indirect_specular,
+                DebugView::IndDiff => denoised_indirect_diffuse,
+                DebugView::IndSpec => denoised_indirect_specular,
                 DebugView::DenoiserVariance => denoiser_dbv.variance,
                 DebugView::HashGridCell => hash_grid_vis,
                 DebugView::HashGridRadiance => hash_grid_vis,
