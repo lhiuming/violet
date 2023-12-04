@@ -68,7 +68,7 @@ impl Denoiser {
                 diffuse: rg.register_texture(default_res.dummy_texture),
                 specular: rg.register_texture(default_res.dummy_texture),
                 moments: rg.register_texture(default_res.dummy_texture),
-                history_len: rg.register_texture(default_res.dummy_uint_texture),
+                history_len: rg.register_texture(default_res.dummy_texture),
             });
 
         let (width, height) = {
@@ -83,7 +83,7 @@ impl Denoiser {
             ..TextureDesc::compute_default()
         };
 
-        // 1. Temporal Filter (Reprojection)
+        // Pass: Temporal Filter (Reprojection)
         let diffuse = rg.create_texutre(color_desc);
         let specular = rg.create_texutre(color_desc);
         let moments = rg.create_texutre(TextureDesc {
@@ -91,7 +91,7 @@ impl Denoiser {
             ..color_desc
         });
         let history_len = rg.create_texutre(TextureDesc {
-            format: vk::Format::R8_UINT,
+            format: vk::Format::R8_UNORM,
             ..color_desc
         });
         let variance = rg.create_texutre(TextureDesc {
@@ -124,7 +124,33 @@ impl Denoiser {
             spec: RGHandle<Texture>,
         }
 
-        // 2. Spatial Filter (A-Trous), Iterated
+        // Pass: Spatial Fallback (Spatial Variance Estimation)
+        let (diffuse, specular, variance) = {
+            let new_diffuse = rg.create_texutre(color_desc);
+            let new_specular = rg.create_texutre(color_desc);
+            let new_variance = rg.create_texutre(TextureDesc {
+                format: vk::Format::R16G16_SFLOAT,
+                ..color_desc
+            });
+
+            rg.new_compute("Spatial Fallback")
+                .compute_shader("denoise/svgf_spatial_fallback_filter.hlsl")
+                .texture("depth_texture", input.depth)
+                .texture("gbuffer_texture", input.gbuffer)
+                .texture("history_len_texture", history_len)
+                .texture("diff_texture", diffuse)
+                .texture("spec_texture", specular)
+                .texture("moments_texture", moments)
+                .texture("variance_texture", variance)
+                .rw_texture("rw_diff_texture", new_diffuse)
+                .rw_texture("rw_spec_texture", new_specular)
+                .rw_texture("rw_variance_texture", new_variance)
+                .group_count(width.div_round_up(8), height.div_round_up(8), 1);
+
+            (new_diffuse, new_specular, new_variance)
+        };
+
+        // Pass: Spatial Filter (A-Trous), Iterated
         let diffuse_filtered;
         let specular_filtered;
         let mut feedback: Option<Feedback> = None;
@@ -156,7 +182,7 @@ impl Denoiser {
                 let step_size = 1 << i;
 
                 // Dispatch
-                rg.new_compute(&format!("Spatial Fileter: {}", i))
+                rg.new_compute(&format!("Spatial Filter: {}", i))
                     .compute_shader("denoise/svgf_atrous_filter.hlsl")
                     .texture("depth_texture", input.depth)
                     .texture("gbuffer_texture", input.gbuffer)

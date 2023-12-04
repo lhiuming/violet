@@ -829,17 +829,16 @@ impl RestirRenderer {
                 DebugView::AOFiltered => filtered_ao_texture,
                 DebugView::IndDiff => denoised_indirect_diffuse,
                 DebugView::IndSpec => denoised_indirect_specular,
+                DebugView::DenoiserHistLen => denoiser_dbv.history_len,
                 DebugView::DenoiserVariance => denoiser_dbv.variance,
                 DebugView::HashGridCell => hash_grid_vis,
                 DebugView::HashGridRadiance => hash_grid_vis,
                 _ => rg.register_texture(default_res.dummy_texture),
             };
             let uint_texture = match self.config.debug_view {
-                DebugView::DenoiserHistLen => denoiser_dbv.history_len,
                 _ => rg.register_texture(default_res.dummy_uint_texture),
             };
             let is_uint = match self.config.debug_view {
-                DebugView::DenoiserHistLen => true,
                 _ => false,
             } as u32;
             rg.new_compute("Debug View")

@@ -2,6 +2,8 @@
 #include "../gbuffer.hlsl"
 #include "../util.hlsl"
 
+#include "svgf.inc.hlsl"
+
 Texture2D<float> depth_texture;
 GBUFFER_TEXTURE_TYPE gbuffer_texture;
 Texture2D<float3> diff_source_texture;
@@ -12,13 +14,13 @@ GBUFFER_TEXTURE_TYPE prev_gbuffer_texture;
 Texture2D<float3> diff_history_texture;
 Texture2D<float3> spec_history_texture;
 Texture2D<float4> moments_history_texture;
-Texture2D<uint> history_len_texture;
+Texture2D<float> history_len_texture;
 
 // TODO pack diffuse and spec to a uint2 texture
 RWTexture2D<float3> rw_diff_texture; 
 RWTexture2D<float3> rw_spec_texture;
 RWTexture2D<float4> rw_moments_texture; // xy: 1st moment; zw: 2nd moment
-RWTexture2D<uint> rw_history_len_texture;
+RWTexture2D<float> rw_history_len_texture;
 // TODO pack to uint ?
 RWTexture2D<float2> rw_variance_texture; // x: diffuse variance, y: specular variance
 
@@ -77,6 +79,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     if (has_no_geometry_via_depth(depth))
     {
         // TODO fill zeros
+        rw_history_len_texture[dispatch_id] = 0.0;
         return;
     }
 
@@ -144,12 +147,13 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
                     diff_sum += weight * diff_history_texture[pix_coord];
                     spec_sum += weight * spec_history_texture[pix_coord];
                     moments_sum += weight * moments_history_texture[pix_coord];
-                    history_len_sum += weight * float(history_len_texture[pix_coord]);
+                    history_len_sum += weight * history_len_texture[pix_coord];
                 }
             }
         }
 
-        valid = weight_sum > 0.015625; // (1/8)^2
+        //valid = weight_sum > 0.015625; // (1/8)^2
+        valid = weight_sum > 0.00390625; // (1/16)^2
         if (valid)
         {
             diff_history = diff_sum / weight_sum;
@@ -171,7 +175,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         moments_history = float4(0.0, 0.0, 0.0, 0.0);
         history_len = 0.0f;
     }
-    history_len += 1.0f;
+    history_len += HISTORY_LEN_UNIT;
 
     float3 diff_source = diff_source_texture[dispatch_id];
     float3 spec_source = spec_source_texture[dispatch_id];
@@ -182,7 +186,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     // Blend ("Integrate")
     const float BLEND_FACTOR = 1.0 / 16.0f;
     // linearly blend before gathering a long history (1/BLEND_FACTOR)
-    float alpha = max(BLEND_FACTOR, 1.0 / float(history_len));
+    float alpha = max(BLEND_FACTOR, HISTORY_LEN_UNIT / history_len);
     float3 diff_filtered = lerp(diff_history, diff_source, alpha);
     float3 spec_filtered = lerp(spec_history, spec_source, alpha);
     float4 moments_filtered = lerp(moments_history, moments_source, alpha);
@@ -193,6 +197,6 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     rw_diff_texture[dispatch_id] = diff_filtered;
     rw_spec_texture[dispatch_id] = spec_filtered;
     rw_moments_texture[dispatch_id] = moments_filtered;
-    rw_history_len_texture[dispatch_id] = uint(history_len); // truncate
+    rw_history_len_texture[dispatch_id] = history_len;
     rw_variance_texture[dispatch_id] = variance;
 }
