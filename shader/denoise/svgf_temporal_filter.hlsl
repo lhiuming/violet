@@ -13,16 +13,14 @@ Texture2D<float> prev_depth_texture;
 GBUFFER_TEXTURE_TYPE prev_gbuffer_texture;
 Texture2D<float3> diff_history_texture;
 Texture2D<float3> spec_history_texture;
-Texture2D<float4> moments_history_texture;
+Texture2D<float2> moments_history_texture;
 Texture2D<float> history_len_texture;
 
 // TODO pack diffuse and spec to a uint2 texture
 RWTexture2D<float3> rw_diff_texture; 
 RWTexture2D<float3> rw_spec_texture;
-RWTexture2D<float4> rw_moments_texture; // xy: 1st moment; zw: 2nd moment
+RWTexture2D<float2> rw_moments_texture; // // 2nd moment of: x: diffuse, y: specular
 RWTexture2D<float> rw_history_len_texture;
-// TODO pack to uint ?
-RWTexture2D<float2> rw_variance_texture; // x: diffuse variance, y: specular variance
 
 [[vk::push_constant]]
 struct PC 
@@ -110,7 +108,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     // Sample prev-frame data
     float3 diff_history;
     float3 spec_history;
-    float4 moments_history;
+    float2 sec_moments_history;
     float history_len;
     bool valid = all(history_uv == saturate(history_uv)) && bool(pc.has_history);
     if (valid)
@@ -125,7 +123,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         // 2x2 bilinear filter with geometry test
         float3 diff_sum = 0.0;
         float3 spec_sum = 0.0;
-        float4 moments_sum = 0.0;
+        float2 moments_sum = 0.0;
         float history_len_sum = 0.0;
         float weight_sum = 0.0;
         float2x2 weights = bilinear_weights(pix_coord_frac);
@@ -158,7 +156,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         {
             diff_history = diff_sum / weight_sum;
             spec_history = spec_sum / weight_sum;
-            moments_history = moments_sum / weight_sum;
+            sec_moments_history = moments_sum / weight_sum;
             history_len = history_len_sum / weight_sum;
         }
         else
@@ -172,16 +170,15 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         // disocclusion
         diff_history = float3(0.0, 0.0, 0.0);
         spec_history = float3(0.0, 0.0, 0.0);
-        moments_history = float4(0.0, 0.0, 0.0, 0.0);
+        sec_moments_history = float2(0.0, 0.0);
         history_len = 0.0f;
     }
     history_len += HISTORY_LEN_UNIT;
 
     float3 diff_source = diff_source_texture[dispatch_id];
     float3 spec_source = spec_source_texture[dispatch_id];
-    float4 moments_source;
-    moments_source.xy = float2(luminance(diff_source), luminance(spec_source));
-    moments_source.zw = moments_source.xy * moments_source.xy;
+    float2 lumi_source = float2(luminance(diff_source), luminance(spec_source));
+    float2 sec_moments_source = lumi_source * lumi_source;
 
     // Blend ("Integrate")
     const float BLEND_FACTOR = 1.0 / 16.0f;
@@ -189,14 +186,10 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     float alpha = max(BLEND_FACTOR, HISTORY_LEN_UNIT / history_len);
     float3 diff_filtered = lerp(diff_history, diff_source, alpha);
     float3 spec_filtered = lerp(spec_history, spec_source, alpha);
-    float4 moments_filtered = lerp(moments_history, moments_source, alpha);
-
-    // Pre-compute variance
-    float2 variance = max(moments_filtered.zw - moments_filtered.xy * moments_filtered.xy, 0.0);
+    float2 sec_moments_filtered = lerp(sec_moments_history, sec_moments_source, alpha);
 
     rw_diff_texture[dispatch_id] = diff_filtered;
     rw_spec_texture[dispatch_id] = spec_filtered;
-    rw_moments_texture[dispatch_id] = moments_filtered;
+    rw_moments_texture[dispatch_id] = sec_moments_filtered;
     rw_history_len_texture[dispatch_id] = history_len;
-    rw_variance_texture[dispatch_id] = variance;
 }

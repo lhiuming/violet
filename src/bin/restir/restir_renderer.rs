@@ -136,6 +136,13 @@ impl RestirRenderer {
         ui.heading("RESTIR RENDERER");
         ui.checkbox(&mut config.taa, "taa");
         ui.checkbox(&mut config.denoise, "denoise");
+        ui.add_enabled_ui(config.denoise, |ui| {
+            ui.checkbox(&mut self.denoiser.disocclusion_fix, "disocclusion fix");
+            ui.add(
+                egui::Slider::new(&mut self.denoiser.atrous_iterations, 0..=5)
+                    .text("atrous iterations"),
+            );
+        });
         ui.checkbox(&mut config.ind_diff_validate, "ind.diff.s.validate");
         ui.checkbox(&mut config.ind_spec_validate, "ind.spec.s.validate");
         ui.checkbox(&mut config.hash_grid_cache_decay, "hg.cache.decay");

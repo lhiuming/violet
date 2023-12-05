@@ -36,12 +36,20 @@ struct History<Handle> {
 }
 
 pub struct Denoiser {
+    // Config
+    pub disocclusion_fix: bool, // ReLAX-style disocclusion fix pass
+    pub atrous_iterations: u32, // number of a-trous iterations
+
     history: Option<History<RGTemporal<Texture>>>,
 }
 
 impl Denoiser {
     pub fn new() -> Self {
-        Self { history: None }
+        Self {
+            disocclusion_fix: true,
+            atrous_iterations: 4,
+            history: None,
+        }
     }
 
     pub fn reset(&mut self) {
@@ -54,6 +62,9 @@ impl Denoiser {
         default_res: &DefaultResources,
         input: Input,
     ) -> Output {
+        // Sanity check
+        let atrous_iterations = self.atrous_iterations.clamp(0, 5);
+
         let has_history = self.history.is_some() as u32;
         let history = self
             .history
@@ -87,15 +98,11 @@ impl Denoiser {
         let diffuse = rg.create_texutre(color_desc);
         let specular = rg.create_texutre(color_desc);
         let moments = rg.create_texutre(TextureDesc {
-            format: vk::Format::R16G16B16A16_SFLOAT,
+            format: vk::Format::R16G16_SFLOAT,
             ..color_desc
         });
         let history_len = rg.create_texutre(TextureDesc {
             format: vk::Format::R8_UNORM,
-            ..color_desc
-        });
-        let variance = rg.create_texutre(TextureDesc {
-            format: vk::Format::R16G16_SFLOAT,
             ..color_desc
         });
         rg.new_compute("Temporal Filter")
@@ -114,21 +121,52 @@ impl Denoiser {
             .rw_texture("rw_spec_texture", specular)
             .rw_texture("rw_moments_texture", moments)
             .rw_texture("rw_history_len_texture", history_len)
-            .rw_texture("rw_variance_texture", variance)
             .push_constant(&[width as f32, height as f32])
             .push_constant(&has_history)
             .group_count(width.div_round_up(8), height.div_round_up(8), 1);
 
-        struct Feedback {
-            diff: RGHandle<Texture>,
-            spec: RGHandle<Texture>,
-        }
-
-        // Pass: Spatial Fallback (Spatial Variance Estimation)
-        let (diffuse, specular, variance) = {
+        // Pass: Disocclusion Fix
+        let (diffuse, specular, moments) = if self.disocclusion_fix {
             let new_diffuse = rg.create_texutre(color_desc);
             let new_specular = rg.create_texutre(color_desc);
-            let new_variance = rg.create_texutre(TextureDesc {
+            let new_moments = rg.create_texutre(TextureDesc {
+                format: vk::Format::R16G16_SFLOAT,
+                ..color_desc
+            });
+
+            rg.new_compute("Disocclusion Fix")
+                .compute_shader("denoise/relax_disocclusion_fix.hlsl")
+                .texture("depth_texture", input.depth)
+                .texture("gbuffer_texture", input.gbuffer)
+                .texture("history_len_texture", history_len)
+                .texture("diff_texture", diffuse)
+                .texture("spec_texture", specular)
+                .texture("moments_texture", moments)
+                .rw_texture("rw_diff_texture", new_diffuse)
+                .rw_texture("rw_spec_texture", new_specular)
+                .rw_texture("rw_moments_texture", new_moments)
+                .group_count(width.div_round_up(8), height.div_round_up(8), 1);
+
+            (new_diffuse, new_specular, new_moments)
+        } else {
+            (diffuse, specular, moments)
+        };
+
+        // Temporal feedback before SVGF spatial passes
+        // [2021 ReLAX]
+        self.history = Some(History {
+            diffuse: rg.convert_to_temporal(diffuse),
+            specular: rg.convert_to_temporal(specular),
+            moments: rg.convert_to_temporal(moments),
+            history_len: rg.convert_to_temporal(history_len),
+        });
+
+        // Pass: Spatial Fallback (Spatial Variance Estimation)
+        let variance;
+        let (diffuse, specular) = {
+            let new_diffuse = rg.create_texutre(color_desc);
+            let new_specular = rg.create_texutre(color_desc);
+            variance = rg.create_texutre(TextureDesc {
                 format: vk::Format::R16G16_SFLOAT,
                 ..color_desc
             });
@@ -141,21 +179,19 @@ impl Denoiser {
                 .texture("diff_texture", diffuse)
                 .texture("spec_texture", specular)
                 .texture("moments_texture", moments)
-                .texture("variance_texture", variance)
                 .rw_texture("rw_diff_texture", new_diffuse)
                 .rw_texture("rw_spec_texture", new_specular)
-                .rw_texture("rw_variance_texture", new_variance)
+                .rw_texture("rw_variance_texture", variance)
                 .group_count(width.div_round_up(8), height.div_round_up(8), 1);
 
-            (new_diffuse, new_specular, new_variance)
+            (new_diffuse, new_specular)
         };
 
         // Pass: Spatial Filter (A-Trous), Iterated
         let diffuse_filtered;
         let specular_filtered;
-        let mut feedback: Option<Feedback> = None;
         {
-            let feedback_iteration = 0;
+            let _feedback_iteration = 0;
 
             // Create ping-pong texture set
             let mut diff_src = diffuse;
@@ -168,17 +204,9 @@ impl Denoiser {
                 ..color_desc
             });
 
-            // Iterates
-            for i in 0..5 {
-                // Avoid writing to the feedbacks again
-                if i == (feedback_iteration + 2) {
-                    assert!(diff_dst == feedback.as_ref().unwrap().diff);
-                    diff_dst = rg.create_texutre(color_desc);
-                    spec_dst = rg.create_texutre(color_desc);
-                }
-
+            // Iterates (can be zero, e.g. in debug)
+            for i in 0..atrous_iterations {
                 // Each iteration introduces extra space of 2^(i-1)
-                //   step_size(i) - step_size(i-1) = 2^(i-1)
                 let step_size = 1 << i;
 
                 // Dispatch
@@ -195,14 +223,6 @@ impl Denoiser {
                     .push_constant(&step_size)
                     .group_count(width.div_round_up(8), height.div_round_up(8), 1);
 
-                // Feedback the first-iteration result for temporal filter
-                if i == feedback_iteration {
-                    feedback = Some(Feedback {
-                        diff: diff_dst,
-                        spec: spec_dst,
-                    });
-                }
-
                 // Swap src and dst
                 std::mem::swap(&mut diff_src, &mut diff_dst);
                 std::mem::swap(&mut spec_src, &mut spec_dst);
@@ -213,15 +233,6 @@ impl Denoiser {
             diffuse_filtered = diff_src;
             specular_filtered = spec_src;
         }
-
-        // Update History
-        let feedback = feedback.unwrap();
-        self.history = Some(History {
-            diffuse: rg.convert_to_temporal(feedback.diff),
-            specular: rg.convert_to_temporal(feedback.spec),
-            moments: rg.convert_to_temporal(moments),
-            history_len: rg.convert_to_temporal(history_len),
-        });
 
         Output {
             diffuse: diffuse_filtered,

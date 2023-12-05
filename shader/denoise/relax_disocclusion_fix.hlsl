@@ -3,12 +3,14 @@
 
 #include "svgf.inc.hlsl"
 
-#define ENABLE_SPATIAL_FALLBACK_FILTER 1
+#define ENABLE_DISOCCLUSION_FIX 1
 
-#define SPATIAL_FALLBACK_FRAME_NUM 4
+#define DISOCCLUSION_FIX_FRAME_LEN 4
 
-// Enable this to skip thin disocclusion (e.g. 1-pixel wide).
-// Otherwise a bunch of short-history/disoccluded pixels along geometry edges, genreated by TAA jitter, will trigger this spatial filter, cost a non-trivial frame time (~0.2 ms) constantly (even if camera and scene is static).
+// frame after disocclusion: 14, 7, 4
+#define DISOCCLUSION_FIX_TAP_STRIDE 14
+
+// Enable this to skip thin disocclusion (e.g. 1-pixel wide) to save time.
 #define SKIP_THIN_DISOCCLUSION 1
 
 Texture2D<float> depth_texture;
@@ -20,7 +22,7 @@ Texture2D<float2> moments_texture;
 
 RWTexture2D<float3> rw_diff_texture;
 RWTexture2D<float3> rw_spec_texture;
-RWTexture2D<float2> rw_variance_texture;
+RWTexture2D<float2> rw_moments_texture;
 
 [numthreads(8, 8, 1)]
 void main(uint2 dispatch_id: SV_DispatchThreadID, uint2 group_id: SV_GroupID, uint local_thread_index: SV_GroupIndex)
@@ -46,7 +48,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID, uint2 group_id: SV_GroupID, ui
     max_hisotry_len = max(max_hisotry_len, QuadReadAcrossY(max_hisotry_len));
     #endif
 
-    // Early out
+    // Early out (no geometry)
     if (histoty_len == 0.0f)
     {
         return;
@@ -57,69 +59,64 @@ void main(uint2 dispatch_id: SV_DispatchThreadID, uint2 group_id: SV_GroupID, ui
     histoty_len = max_hisotry_len;
     #endif
 
-    // Variance fallback for pixels with short history
-    float3 diff;
-    float3 spec;
-    float2 sec_moments;
-    if ((histoty_len < (SPATIAL_FALLBACK_FRAME_NUM * HISTORY_LEN_UNIT)) && (ENABLE_SPATIAL_FALLBACK_FILTER != 0))
+    // Fill disocclusion areas
+    if ((histoty_len < (DISOCCLUSION_FIX_FRAME_LEN * HISTORY_LEN_UNIT)) && (ENABLE_DISOCCLUSION_FIX != 0))
     {
-        float depth_center = depth_texture[dispatch_id];
-        GBuffer gbuffer = load_gbuffer(gbuffer_texture, dispatch_id);
-        float sigma_z_boost = 3.0; // ref: SVGF code sample
-        EdgeStoppingFunc edge_stopping = EdgeStoppingFunc::create(depth_center, gbuffer.fwidth_z * sigma_z_boost, gbuffer.normal);
-        float2 lumi_unused = 0.0;
+        const float depth_center = depth_texture[dispatch_id];
+        const GBuffer gbuffer = load_gbuffer(gbuffer_texture, dispatch_id);
+        const EdgeStoppingFunc edge_stopping = EdgeStoppingFunc::create(depth_center, gbuffer.fwidth_z, gbuffer.normal)
+            .sigma_depth(5.0) // relaxed depth test
+            .sigma_normal(32.0); // relaxed normal test
 
         const int2 center_coord = int2(dispatch_id.xy);
 
-        // 7x7 box filter, with Edge-stopping weights.
+        // 5x5 bilateral filter, using Edge-stopping weights (depth and normal).
         float2 weight_sum = 0.0;
         float3 diff_sum = 0.0;
         float3 spec_sum = 0.0;
         float2 sec_momoents_sum = 0.0;
-        const int radius = 3;
+        const int stride = int((DISOCCLUSION_FIX_TAP_STRIDE * HISTORY_LEN_UNIT) / histoty_len);
+        const int radius = 2;
         for (int y = -radius; y <= radius; y++)
         {
             for (int x = -radius; x <= radius; x++)
             {
-                int2 coord_unclampped = center_coord + int2(x, y);
+                int2 coord_offset = int2(x, y) * stride;
+                int2 coord_unclampped = center_coord + coord_offset;
                 int2 coord = clamp(coord_unclampped, int2(0, 0), int2(buffer_size - 1));
                 bool valid_coord = all(coord_unclampped == coord);
                 if (valid_coord)
                 {
+                    // TODO pack normal&depth?
                     float depth = depth_texture[coord];
                     float3 normal = load_gbuffer(gbuffer_texture, coord).normal;
-                    float weight = edge_stopping.weight(length(float2(x, y)), depth, normal, lumi_unused).x;
+                    float2 weight = edge_stopping.weight(length(float2(coord_offset)), depth, normal, float2(0, 0));
 
                     float3 diff = diff_texture[coord];
                     float3 spec = spec_texture[coord];
-                    float2 sec_moments = moments_texture[coord].xy;
+                    float2 sec_moments = moments_texture[coord];
 
                     weight_sum += weight;
-                    diff_sum += diff * weight;
-                    spec_sum += spec * weight;
-                    sec_momoents_sum += sec_moments * weight;
+                    diff_sum += diff * weight.x;
+                    spec_sum += spec * weight.y;
+                    sec_momoents_sum += sec_moments * weight.xy;
                 }
             }
         }
 
-        diff = diff_sum / weight_sum.x;
-        spec = spec_sum / weight_sum.y;
-        sec_moments = sec_momoents_sum / weight_sum.xy;
+        float3 diff = diff_sum / weight_sum.x;
+        float3 spec = spec_sum / weight_sum.y;
+        float2 sec_moments = sec_momoents_sum / weight_sum.xy;
+
+        rw_diff_texture[dispatch_id] = diff;
+        rw_spec_texture[dispatch_id] = spec;
+        rw_moments_texture[dispatch_id] = sec_moments;
     }
     else
     {
-        diff = diff_texture[dispatch_id];
-        spec = spec_texture[dispatch_id];
-        sec_moments = moments_texture[dispatch_id].xy;
+        // TODO collapse copy using conditional read in next shader?
+        rw_diff_texture[dispatch_id] = diff_texture[dispatch_id];
+        rw_spec_texture[dispatch_id] = spec_texture[dispatch_id];
+        rw_moments_texture[dispatch_id] = moments_texture[dispatch_id];
     }
-
-    float2 fst_moments = float2(luminance(diff), luminance(spec));
-    float2 variance = max(sec_moments - fst_moments.xy * fst_moments.xy, 0.0);
-
-    // Variance boost for first frames 
-    variance *= max(1.0, (float(SPATIAL_FALLBACK_FRAME_NUM) * HISTORY_LEN_UNIT) / histoty_len);
-
-    rw_diff_texture[dispatch_id] = diff;
-    rw_spec_texture[dispatch_id] = spec;
-    rw_variance_texture[dispatch_id] = variance;
 }

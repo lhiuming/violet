@@ -33,7 +33,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     float2 lumi_center = float2(luminance(diff_center), luminance(spec_center));
     // TODO Gaussian filter on variance
     float2 variance_center = variance_texture[dispatch_id];
-    const EdgeStoppingFunc edge_stopping = EdgeStoppingFunc::create(depth_center, gbuffer.fwidth_z, gbuffer.normal, lumi_center, variance_center);
+    const EdgeStoppingFunc edge_stopping = EdgeStoppingFunc::create(depth_center, gbuffer.fwidth_z, gbuffer.normal).enable_lumi(lumi_center, variance_center);
 
     // A-Trous: 5x5 taps, with increaing step size in each pass
     const int2 pix_coord_center = int2(dispatch_id);
