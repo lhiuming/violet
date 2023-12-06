@@ -4,6 +4,7 @@
 #include "../rand.hlsl"
 #include "../util.hlsl"
 
+#include "config.inc.hlsl"
 #include "reservoir.hlsl"
 
 #define IND_SPEC_ENABLE_SPATIAL_REUSE 1
@@ -380,6 +381,10 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         //lighting = reservoir.W;
         //lighting = vndf;
         //lighting = float3(vndf, reservoir.W, 0.0f);
+
+        #if DEMODULATE_INDIRECT_SPECULAR_FOR_DENOISER
+        lighting /= max(1e-6, ggx_brdf_integral_approx(NoV, roughness, specular_f0));
+        #endif
 
         #if 0
         if (roughness <= 0.0)

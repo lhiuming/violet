@@ -2,6 +2,8 @@
 #include "../brdf.hlsl"
 #include "../frame_bindings.hlsl"
 
+#include "config.inc.hlsl"
+
 #define SPECULAR_SUPRESSION 1
 
 GBUFFER_TEXTURE_TYPE gbuffer_color;
@@ -38,10 +40,17 @@ void main(uint2 dispatch_id : SV_DispatchThreadID) {
     float NoL = saturate(dot(gbuffer.normal, frame_params.sun_dir.xyz));
     float3 directi_lighting = eval_GGX_Lambertian(view_dir, frame_params.sun_dir.xyz, gbuffer.normal, perceptual_roughness, diffuse_rho, specular_f0) * (NoL * direct_atten) * frame_params.sun_inten.rgb;
 
+    #if DEMODULATE_INDIRECT_SPECULAR_FOR_DENOISER
+    float NoV = saturate(dot(gbuffer.normal, view_dir));
+    float3 specular_reflectance = max(1e-6, ggx_brdf_integral_approx(NoV, perceptual_roughness * perceptual_roughness, specular_f0));
+    #else
+    float3 specular_reflectance = 1.0;
+    #endif
+
     // Indirect lighting
     float3 indirect_diffuse = indirect_diffuse_texture[dispatch_id];
     float3 indirect_specular = indirect_specular_texture[dispatch_id];
-    float3 indirect_lighting = indirect_diffuse * diffuse_rho + indirect_specular;
+    float3 indirect_lighting = indirect_diffuse * diffuse_rho + indirect_specular * specular_reflectance;
 
     // Output
     rw_color_buffer[dispatch_id] = directi_lighting + indirect_lighting;
