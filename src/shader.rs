@@ -510,6 +510,7 @@ impl ShaderLoader {
 
             // Breakpoint to let user fix shader
             if shader.is_none() {
+                #[cfg(feature = "core_intrinsics")]
                 unsafe {
                     std::intrinsics::breakpoint();
                 }

@@ -13,6 +13,22 @@
 		},
 		{
 			"type": "cargo",
+			"command": "build",
+			"args": [
+				"--release"
+			],
+			"problemMatcher": [
+				"$rustc",
+				"$rust-panic"
+			],
+			"group": {
+				"kind": "build",
+				"isDefault": true
+			},
+			"label": "rust: cargo build release"
+		},
+		{
+			"type": "cargo",
 			"command": "+nightly",
 			"args": [
 				"build"
@@ -25,23 +41,6 @@
 				"kind": "build",
 			},
 			"label": "rust: cargo build nightly"
-		},
-		{
-			"type": "cargo",
-			"command": "+nightly",
-			"args": [
-				"build",
-				"--release"
-			],
-			"problemMatcher": [
-				"$rustc",
-				"$rust-panic"
-			],
-			"group": {
-				"kind": "build",
-				"isDefault": true
-			},
-			"label": "rust: cargo build release nightly"
 		},
 	]
 }

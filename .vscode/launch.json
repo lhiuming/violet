@@ -8,7 +8,7 @@
 			"name": "release-restir",
 			"type": "cppvsdbg",
 			"request": "launch",
-			"preLaunchTask": "rust: cargo build release nightly",
+			"preLaunchTask": "rust: cargo build release",
 			"program": "${workspaceFolder}/target/release/restir.exe",
 			"args": [
 				"./assets/Sponza/Sponza.gltf",

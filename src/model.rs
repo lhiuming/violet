@@ -36,7 +36,7 @@ pub struct Model {
 }
 
 // rkyv support for Mat4
-struct ArchiveMat4;
+pub struct ArchiveMat4;
 
 impl ArchiveWith<Mat4> for ArchiveMat4 {
     type Archived = Archived<[f32; 16]>;

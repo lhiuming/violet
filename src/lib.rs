@@ -1,5 +1,6 @@
-// TODO only in debug build
-#![feature(core_intrinsics)]
+// Enable core_intrinsics in debug build, to use:
+//   - std::intrinsics::breakpoint
+#![cfg_attr(debug_assertions, feature(core_intrinsics))]
 
 pub mod app;
 pub mod command_buffer;
