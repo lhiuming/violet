@@ -38,3 +38,5 @@ This project benefits from a bunch of wonderful open-source projects, especially
 - [puffin](https://github.com/EmbarkStudios/puffin): easy to use profile for Rust (it also comes with a integration with `egui`👏)
 - [rspirv-reflect](https://github.com/Traverse-Research/rspirv-reflect): minimalism SPIR-V reflection libray.
 - [MinimalAtmosphere](https://github.com/Fewes/MinimalAtmosphere): single-file atmospheric scattering implementation from Felix Westin.
+
+And special thanks to @h3r2tic for his brilliant [💡kajiya](https://github.com/EmbarkStudios/kajiya), which inspired this entire journey into Rust and Vulkan rendering.
