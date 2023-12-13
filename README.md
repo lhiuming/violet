@@ -5,14 +5,15 @@
 
 `violet` is a hobby project for experimenting new rendering techniques with 🦀Rust and 🌋Vulkan. Currently it features:
 
-- ReSTIR-based hybrid-renderer, with ray-traced dynamic GI
-- SVGF/ReLAX style denoiser, filtering indirect diffuse and specular separately 
+- A ReSTIR-based hybrid-renderer, with real-time ray-traced GI
+- SVGF/ReLAX style denoiser, filtering indirect diffuse and specular separately
+- Spatial Hash Grid world radiance cache (scratch)
 - Reference Path tracer
 - glTF model loading
 - Render graph (scratch)
 
 ![Sponza rendered with restir](https://github.com/lhiuming/violet/assets/2281376/527df52f-1130-43c2-a38f-8a2f1467d43a)
-(Sponza rendererd with `restir`)
+(*Sponza* rendererd with `restir`)
 
 ## Dig into the Codebase
 
@@ -31,7 +32,7 @@ cargo run --bin restir --release -- "./assets/Sponza/Sponza.gltf"
 
 ## Acknowledgments
 
-This project benefits from a bunch of wonderful open-source projects, especially: 
+This project benefits from a bunch of wonderful open-source projects, including: 
 
 - [ash](https://github.com/ash-rs/ash): thin and simple, should be your go-to rust binding for Vulkan!
 - [egui](https://github.com/emilk/egui): lovely ImGUI written in pure rust.
