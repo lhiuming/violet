@@ -1,0 +1,2 @@
+# Just dont format shader (disable formatting in slang extension)
+DisableFormat: true
