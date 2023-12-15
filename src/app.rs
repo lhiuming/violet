@@ -272,33 +272,41 @@ where
                 moved = (forward != 0.0) || (right != 0.0) || (up != 0.0);
 
                 // Rotate (by mouse darg with right button pressed)
-                if let Some((beg_x, beg_y, end_x, end_y)) = window.effective_darg() {
-                    let w = rd.swapchain.extent.width as f32;
-                    let h = rd.swapchain.extent.height as f32;
-                    let right_x = (fov * 0.5).tan() * 1.0;
-                    let down_y = right_x * h / w;
-                    let screen_pos_to_world_dir = |x: i16, y: i16| -> Vec3 {
-                        let x = right_x * ((x as f32) / w * 2.0 - 1.0);
-                        let y = down_y * ((y as f32) / h * 2.0 - 1.0);
-                        let dir = Vec3::new(x, y, 1.0).normalize(); // in camera space
-                        dir.x * camera.right + dir.y * camera.down + dir.z * camera.forward
+                let (drag_x, drag_y) = window.effective_darg_delta();
+                if (drag_x != 0) || (drag_y != 0) {
+                    let drag = Vec2::new(drag_x as f32, drag_y as f32);
+
+                    // Estimate the target direction
+                    let target_dir_unnorm = {
+                        let w = rd.swapchain.extent.width as f32;
+                        let h = rd.swapchain.extent.height as f32;
+                        let right_x = (fov * 0.5).tan() * 1.0;
+                        let down_y = right_x * h / w;
+
+                        let x = right_x * (drag.x / w * 2.0);
+                        let y = down_y * (drag.y / h * 2.0);
+                        x * camera.right + y * camera.down + camera.forward
                     };
 
-                    let from_dir = screen_pos_to_world_dir(beg_x, beg_y);
-                    let to_dir = screen_pos_to_world_dir(end_x, end_y);
-                    let rot_axis = from_dir.cross(to_dir);
-                    if let Some(rot_axis) = rot_axis.try_normalize() {
-                        let rot_cos = from_dir.dot(to_dir);
-                        let rot_sin = (1.0 - rot_cos * rot_cos).sqrt();
-                        camera.forward = rot_cos * camera.forward
-                            + rot_sin * rot_axis.cross(camera.forward)
-                            + (1.0 - rot_cos) * rot_axis.dot(camera.forward) * rot_axis;
+                    // Use estimated target direction to get rotate axis
+                    let rot_axis_unnorm = camera.forward.cross(target_dir_unnorm);
+
+                    if let Some(rot_axis) = rot_axis_unnorm.try_normalize() {
+                        const RAD_PER_PIXEL: f32 = 0.001;
+                        let angle = RAD_PER_PIXEL * drag.length();
+                        let (rot_sin, rot_cos) = angle.sin_cos();
+
+                        // Rotate forward
+                        camera.forward =
+                            rot_cos * camera.forward + rot_sin * rot_axis.cross(camera.forward);
                         camera.forward = camera.forward.normalize(); // avoid precision loss
+
+                        // Re-derive right and down direction
                         camera.right = camera.forward.cross(CAMERA_UP).normalize();
                         camera.down = camera.forward.cross(camera.right).normalize();
-                    }
 
-                    moved = true;
+                        moved = true;
+                    }
                 }
             }
 

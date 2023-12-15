@@ -4,8 +4,14 @@ use std::{ffi, mem, ptr};
 use glam::UVec2;
 
 use windows_sys::Win32::{
-    Foundation::*, System::LibraryLoader::*, System::Memory::*, UI::HiDpi::*, UI::Input::Ime,
-    UI::Input::KeyboardAndMouse::*, UI::WindowsAndMessaging::*,
+    Foundation::*,
+    Graphics::Gdi::{ClientToScreen, ScreenToClient},
+    System::LibraryLoader::*,
+    System::Memory::*,
+    UI::HiDpi::*,
+    UI::Input::Ime,
+    UI::Input::KeyboardAndMouse::*,
+    UI::WindowsAndMessaging::*,
 };
 
 // TODO this process shoule be run in compile time, and return a const u16 array; but currently this is hard to write in Rust (might need to use proc_macro)
@@ -139,10 +145,9 @@ struct MessageHandler {
     pub minimized: bool,
 
     // TODO move these kind of logic to app side
-    pub mouse_pos: (i16, i16),    // most up-to-dated mouse pos
-    pub mouse_right_button: bool, // most up-to-dated right-button down
-    pub curr_drag_beg_mouse_pos: Option<(i16, i16)>, // current frame init mouse pos with right-button down
-    pub curr_drag_end_mouse_pos: Option<(i16, i16)>, // current frame last mouse pos with right-button down
+    pub mouse_pos: (i16, i16),                 // most up-to-dated mouse pos
+    pub mouse_right_button: bool,              // most up-to-dated right-button down
+    pub curr_drag_delta_mouse_pos: (i16, i16), // current frame mouse pos movement with right-button down
     pub push_states: [bool; u8::MAX as usize],
     pub click_states: [bool; u8::MAX as usize],
 }
@@ -156,8 +161,7 @@ impl MessageHandler {
             minimized: false,
             mouse_pos: (0, 0),
             mouse_right_button: false,
-            curr_drag_beg_mouse_pos: None,
-            curr_drag_end_mouse_pos: None,
+            curr_drag_delta_mouse_pos: (0, 0),
             push_states: [false; u8::MAX as usize],
             click_states: [false; u8::MAX as usize],
         }
@@ -165,13 +169,7 @@ impl MessageHandler {
 
     pub fn new_frame(&mut self) {
         self.msg_stream.clear();
-        // Continue last frame unrelease drag
-        self.curr_drag_beg_mouse_pos = if self.mouse_right_button {
-            Some(self.mouse_pos)
-        } else {
-            None
-        };
-        self.curr_drag_end_mouse_pos = None;
+        self.curr_drag_delta_mouse_pos = (0, 0);
         self.click_states.fill(false);
     }
 
@@ -258,13 +256,9 @@ unsafe extern "system" fn wnd_callback(
                 left: true,
                 pressed: true,
             });
-            let (x, y) = decode_cursor_pos();
             {
                 handler.mouse_pos = (x, y);
                 handler.mouse_right_button = true;
-                if handler.curr_drag_beg_mouse_pos.is_none() {
-                    handler.curr_drag_beg_mouse_pos = Some((x, y));
-                }
             }
         }
         WM_RBUTTONUP => {
@@ -276,11 +270,17 @@ unsafe extern "system" fn wnd_callback(
                 left: false,
                 pressed: false,
             });
-            let (x, y) = decode_cursor_pos();
             {
+                // record drag
+                if handler.mouse_right_button {
+                    let latest = handler.mouse_pos;
+                    let delta = (x - latest.0, y - latest.1);
+                    handler.curr_drag_delta_mouse_pos.0 += delta.0;
+                    handler.curr_drag_delta_mouse_pos.1 += delta.1;
+                }
+
                 handler.mouse_pos = (x, y);
                 handler.mouse_right_button = false;
-                handler.curr_drag_end_mouse_pos = Some((x, y));
             }
             //println!("Win32 message: right button up");
         }
@@ -288,9 +288,58 @@ unsafe extern "system" fn wnd_callback(
             let rb_down = (w_param as u32) == MK_RBUTTON;
             let (x, y) = decode_cursor_pos();
             handler.msg_stream.push(Message::MouseMove { x, y });
-            handler.mouse_pos = (x, y);
-            if rb_down {
-                handler.curr_drag_end_mouse_pos = Some((x, y));
+            {
+                let mut wrapped_pos = (x, y);
+
+                // record drag
+                if rb_down && handler.mouse_right_button {
+                    let latest = handler.mouse_pos;
+                    let delta = (x - latest.0, y - latest.1);
+                    handler.curr_drag_delta_mouse_pos.0 += delta.0;
+                    handler.curr_drag_delta_mouse_pos.1 += delta.1;
+
+                    // wrap on mouse drag
+                    let mut min: POINT;
+                    let mut max: POINT;
+                    unsafe {
+                        let mut uninited = std::mem::MaybeUninit::<RECT>::uninit();
+                        GetClientRect(hwnd, &mut *uninited.as_mut_ptr());
+                        let client_rect = uninited.assume_init();
+
+                        min = POINT {
+                            x: client_rect.left,
+                            y: client_rect.top,
+                        };
+                        max = POINT {
+                            x: client_rect.right - 1,
+                            y: client_rect.bottom - 1,
+                        };
+                        ClientToScreen(hwnd, &mut min);
+                        ClientToScreen(hwnd, &mut max);
+                    };
+
+                    let mut cursor = unsafe {
+                        let mut uninited = std::mem::MaybeUninit::<POINT>::uninit();
+                        GetCursorPos(uninited.as_mut_ptr());
+                        uninited.assume_init()
+                    };
+
+                    // horizontal
+                    if (delta.0 > 0) && cursor.x >= max.x {
+                        cursor.x = min.x + (cursor.x - max.x);
+                    }
+                    if (delta.0 < 0) && cursor.x <= min.x {
+                        cursor.x = max.x - (min.x - cursor.x);
+                    }
+
+                    // done
+                    SetCursorPos(cursor.x, cursor.y);
+                    ScreenToClient(hwnd, &mut cursor);
+                    wrapped_pos = (cursor.x as i16, cursor.y as i16)
+                }
+
+                handler.mouse_pos = wrapped_pos;
+                handler.mouse_right_button = rb_down;
             }
             /*
             println!(
@@ -562,19 +611,10 @@ impl Window {
         )
     }
 
-    // Drag start pos, darg end pos
-    pub fn effective_darg(&self) -> Option<(i16, i16, i16, i16)> {
+    // Drag delta in logical screen pos (points)
+    pub fn effective_darg_delta(&self) -> (i16, i16) {
         let handler = self.message_handler.as_ref().unwrap();
-        if let Some((end_x, end_y)) = handler.curr_drag_end_mouse_pos {
-            if let Some((beg_x, beg_y)) = handler.curr_drag_beg_mouse_pos {
-                Some((beg_x, beg_y, end_x, end_y))
-            } else {
-                println!("Window: has end drag pos, but no beg drag pos ?!");
-                Some((end_x, end_y, end_x, end_y))
-            }
-        } else {
-            None
-        }
+        return handler.curr_drag_delta_mouse_pos;
     }
 
     pub fn pushed(&self, key: char) -> bool {
