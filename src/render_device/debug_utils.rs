@@ -2,7 +2,7 @@ use std::borrow::Cow;
 use std::ffi::CStr;
 use std::os::raw::c_void;
 
-#[cfg(feature = "core_intrinsics")]
+#[cfg(feature = "nightly")]
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use ash::extensions::ext;
@@ -55,7 +55,7 @@ pub(super) unsafe extern "system" fn vulkan_debug_report_callback(
     // Allow break on error
     // TODO insert command line option
     if message_severity >= vk::DebugUtilsMessageSeverityFlagsEXT::ERROR {
-        #[cfg(feature = "core_intrinsics")]
+        #[cfg(feature = "nightly")]
         {
             // Mocking the implementation of Backtrace::enabled();
             let breakpoint_enabled = {
@@ -81,7 +81,7 @@ pub(super) unsafe extern "system" fn vulkan_debug_report_callback(
             }
         }
 
-        #[cfg(not(feature = "core_intrinsics"))]
+        #[cfg(not(feature = "nightly"))]
         println!("Backtrace:\n{}", std::backtrace::Backtrace::capture());
     }
 

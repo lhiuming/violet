@@ -1,6 +1,7 @@
-// Enable core_intrinsics in debug build, to use:
+// If nightly is allowed,
+// enable core_intrinsics to use:
 //   - std::intrinsics::breakpoint
-#![cfg_attr(debug_assertions, feature(core_intrinsics))]
+#![cfg_attr(feature = "nightly", feature(core_intrinsics))]
 
 pub mod app;
 pub mod command_buffer;

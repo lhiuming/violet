@@ -31,7 +31,9 @@
 			"type": "cargo",
 			"command": "+nightly",
 			"args": [
-				"build"
+				"build",
+				"--features",
+				"nightly"
 			],
 			"problemMatcher": [
 				"$rustc",
@@ -41,6 +43,24 @@
 				"kind": "build",
 			},
 			"label": "rust: cargo build nightly"
+		},
+		{
+			"type": "cargo",
+			"command": "+nightly",
+			"args": [
+				"build",
+				"--release",
+				"--features",
+				"nightly"
+			],
+			"problemMatcher": [
+				"$rustc",
+				"$rust-panic"
+			],
+			"group": {
+				"kind": "build",
+			},
+			"label": "rust: cargo build nightly release"
 		},
 	]
 }
