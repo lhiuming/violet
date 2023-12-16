@@ -383,7 +383,8 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         //lighting = float3(vndf, reservoir.W, 0.0f);
 
         #if DEMODULATE_INDIRECT_SPECULAR_FOR_DENOISER
-        lighting /= max(1e-6, ggx_brdf_integral_approx(NoV, roughness, specular_f0));
+        float3 specular_reflectance = max(ggx_brdf_integral_approx(NoV, roughness, specular_f0), DEMODULATE_INDIRECT_SPECULAR_RG_INTERGRAL_MIN);
+        lighting /= specular_reflectance;
         #endif
 
         #if 0

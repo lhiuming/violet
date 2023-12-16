@@ -5,6 +5,7 @@
 #include "../rand.hlsl"
 #include "../util.hlsl"
 
+#include "config.inc.hlsl"
 #include "reservoir.hlsl"
 
 #define IND_SPEC_ENABLE_TEMPORAL_REUSE 1

@@ -69,5 +69,3 @@ ReservoirSimple reservoir_decode_u32(uint2 u)
     r.W = asfloat(u.y);
     return r;
 }
-
-#define IND_SPEC_R_MIN 0.002

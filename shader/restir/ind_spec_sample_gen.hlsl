@@ -6,6 +6,7 @@
 #include "../sampling.hlsl"
 #include "../util.hlsl"
 
+#include "config.inc.hlsl"
 #include "raytrace.inc.hlsl"
 #include "reservoir.hlsl"
 

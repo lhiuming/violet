@@ -3,8 +3,9 @@
 #include "../frame_bindings.hlsl"
 
 #include "config.inc.hlsl"
+#include "reservoir.hlsl"
 
-#define SPECULAR_SUPRESSION 1
+#define DIRECT_SPECULAR_SUPRESSION 1
 
 GBUFFER_TEXTURE_TYPE gbuffer_color;
 Texture2D<float> shadow_mask_buffer;
@@ -27,7 +28,7 @@ void main(uint2 dispatch_id : SV_DispatchThreadID) {
     // Direct lighting
     float direct_atten = shadow_mask_buffer[dispatch_id];
     float3 view_dir = -cs_view_ray_direction(dispatch_id, buffer_size, 0.0f.xx);
-#if SPECULAR_SUPRESSION
+#if DIRECT_SPECULAR_SUPRESSION 
 	// Clamp for cheap specular aliasing under punctual light (Frostbite)
     // ref: https://google.github.io/filament/Filament.html
     // TODO may be disk lighting
@@ -42,7 +43,12 @@ void main(uint2 dispatch_id : SV_DispatchThreadID) {
 
     #if DEMODULATE_INDIRECT_SPECULAR_FOR_DENOISER
     float NoV = saturate(dot(gbuffer.normal, view_dir));
-    float3 specular_reflectance = max(1e-6, ggx_brdf_integral_approx(NoV, perceptual_roughness * perceptual_roughness, specular_f0));
+    float roughness = gbuffer.perceptual_roughness * gbuffer.perceptual_roughness;
+    if (IND_SPEC_R_MIN > 0)
+    {
+        roughness = max(roughness, IND_SPEC_R_MIN);
+    }
+    float3 specular_reflectance = max(ggx_brdf_integral_approx(NoV, roughness, specular_f0), DEMODULATE_INDIRECT_SPECULAR_RG_INTERGRAL_MIN);
     #else
     float3 specular_reflectance = 1.0;
     #endif
