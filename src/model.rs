@@ -10,6 +10,8 @@ use std::{
     fs::{File, OpenOptions},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+    thread,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -110,7 +112,7 @@ pub struct MaterialMap {
     pub image_index: u32,
 }
 
-#[derive(Archive, Deserialize, Serialize)]
+#[derive(Archive, Deserialize, Serialize, Clone)]
 pub enum ImageFormat {
     R8G8B8A8Unorm,
     R8G8B8A8Srgb,
@@ -119,7 +121,7 @@ pub enum ImageFormat {
     BC7Srgb,
 }
 
-#[derive(Archive, Deserialize, Serialize)]
+#[derive(Archive, Deserialize, Serialize, Clone)]
 pub struct Image {
     pub width: u32,
     pub height: u32,
@@ -703,11 +705,44 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
         });
     }
 
-    // Load, Create mipmap, and Compress images
-    let mut model_images = Vec::<Image>::new();
-    for (image_index, image) in images.iter().enumerate() {
+    // Filter-out unused image
+    let mut used_image_indices = Vec::with_capacity(image_usages.len());
+    let mut image_indices_remap = Vec::with_capacity(images.len());
+    let mut next_image_index = 0;
+    for i in 0..images.len() as u32 {
+        let new_index;
+        if image_usages.contains_key(&i) {
+            new_index = next_image_index;
+            next_image_index += 1;
+            used_image_indices.push(i);
+        } else {
+            new_index = u32::MAX;
+        }
+        image_indices_remap.push(new_index);
+    }
+
+    // Re-map the material images
+    let image_index_remap = |opt: &mut Option<MaterialMap>| {
+        if let Some(opt) = opt.as_mut() {
+            let old_index = opt.image_index;
+            let new_index = image_indices_remap[old_index as usize];
+            assert!(new_index != u32::MAX);
+            opt.image_index = new_index;
+        }
+    };
+    for mat in &mut model_materials {
+        image_index_remap(&mut mat.base_color_map);
+        image_index_remap(&mut mat.metallic_roughness_map);
+        image_index_remap(&mut mat.normal_map);
+    }
+
+    // Load, Create mipmap, and Compress (used) images
+    let image_work_func = |image_index: usize,
+                           image: &gltf::image::Data,
+                           imported_usage: ImportedImageUsage,
+                           config: &LoadConfig|
+     -> Image {
         let image_index = image_index as ImageIndex;
-        let imported_usage = image_usages.get(&image_index);
 
         // Log
         println!(
@@ -718,13 +753,6 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
             imported_usage,
             image.pixels.split_at(8).0
         );
-
-        // Insert a placeholder for not used image slot (too keep the `model_images` array fully packed)
-        if imported_usage.is_none() {
-            model_images.push(Image::empty());
-            continue;
-        }
-        let imported_usage = *imported_usage.unwrap();
 
         if imported_usage.bits().count_ones() > 1 {
             println!(
@@ -857,13 +885,80 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
             }
         };
 
-        model_images.push(Image {
+        Image {
             width: image.width,
             height: image.height,
             format,
             mips_data,
+        }
+    };
+
+    let num_used_images = used_image_indices.len();
+
+    // Input data for multi threading
+    let config = Arc::new(config);
+    let raw_images = Arc::new(images);
+    let image_usages = Arc::new(image_usages);
+    let used_image_indices = Arc::new(used_image_indices);
+
+    // Shared memory
+    let next_image_index = Arc::new(Mutex::new(0usize));
+    let model_images_holder = Arc::new(Mutex::new(vec![Image::empty(); num_used_images]));
+
+    // Multi-thread processing
+    let num_threads = thread::available_parallelism().unwrap().get();
+    (0..num_threads)
+        .map(|_thread_index| {
+            let config = config.clone();
+            let raw_images = raw_images.clone();
+            let image_usages = image_usages.clone();
+            let used_image_indices = used_image_indices.clone();
+
+            let next_image_index = next_image_index.clone();
+            let model_images_holder = model_images_holder.clone();
+            thread::spawn(move || {
+                loop {
+                    // Get next work
+                    let image_index;
+                    {
+                        let mut m = next_image_index.lock().unwrap();
+                        image_index = *m;
+                        if image_index >= num_used_images {
+                            break;
+                        }
+                        *m = image_index + 1;
+                    };
+
+                    // remap to raw image index
+                    let raw_image_index = used_image_indices[image_index];
+
+                    // Work
+                    let data = &raw_images[raw_image_index as usize];
+                    let image_usage = *image_usages.get(&raw_image_index).unwrap();
+                    let image = image_work_func(image_index, data, image_usage, &config);
+
+                    // Fill resullt
+                    {
+                        let mut m = model_images_holder.lock().unwrap();
+                        m[image_index] = image;
+                    }
+                }
+            })
+        })
+        .collect::<Vec<_>>() // make sure all thread is spawned
+        .drain(..)
+        .for_each(|handle| {
+            handle
+                .join()
+                .expect("Image processing thread can not complete.");
         });
-    }
+
+    assert!(*next_image_index.lock().unwrap() == num_used_images);
+    let model_images = Arc::try_unwrap(model_images_holder)
+        .ok()
+        .unwrap()
+        .into_inner()
+        .unwrap();
 
     return Ok(Model {
         instances,

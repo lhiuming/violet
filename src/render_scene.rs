@@ -26,6 +26,10 @@ impl AllocBuffer {
         }
     }
 
+    pub fn unused_space(&self) -> usize {
+        self.buffer.desc.size as usize - self.next_pos as usize
+    }
+
     pub fn alloc<'a, T>(&mut self, count: u32) -> (&'a mut [T], u32) {
         assert!((size_of::<T>() as u32 * count) <= (self.buffer.desc.size as u32 - self.next_pos));
         let pos = self.next_pos;
@@ -331,8 +335,8 @@ pub struct RenderScene {
 impl RenderScene {
     pub fn new(rd: &RenderDevice) -> RenderScene {
         // Buffer for whole scene
-        let ib_size = 4 * 1024 * 1024;
-        let vb_size = 16 * 1024 * 1024;
+        let ib_size = 8 * 1024 * 1024;
+        let vb_size = 128 * 1024 * 1024;
         let accel_struct_usage = if rd.support_raytracing {
             vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
                 | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
@@ -381,7 +385,7 @@ impl RenderScene {
         let mesh_param_size = std::mem::size_of::<MeshParams>() as vk::DeviceSize;
         let mesh_param_buffer = rd
             .create_buffer(BufferDesc {
-                size: mesh_param_size * 1024,
+                size: mesh_param_size * 2048,
                 usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
                 memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
             })
@@ -869,6 +873,10 @@ impl RenderScene {
             }
         }
 
+        // TODO auto growing the buffer?
+        assert!(total_vertex_bytesize <= vertex_buffer.unused_space());
+        assert!(total_index_bytesize <= index_buffer.unused_space());
+
         // Get staging buffer for all trangle meshes
         let index_staging_buffer =
             upload_context.borrow_staging_buffer(rd, total_index_bytesize as u64);
@@ -1072,6 +1080,9 @@ impl RenderScene {
             let param_count = self.mesh_params.len() - global_mesh_index_offset;
             let data_offset = global_mesh_index_offset as usize * param_size;
             let data_size = param_size * param_count;
+
+            // TODO auto grow buffer size?
+            assert!(data_offset + data_size <= self.mesh_param_buffer.desc.size as usize);
 
             let staging_buffer = upload_context.borrow_staging_buffer(rd, data_size as u64);
 
