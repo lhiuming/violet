@@ -4,14 +4,8 @@ use std::{ffi, mem, ptr};
 use glam::UVec2;
 
 use windows_sys::Win32::{
-    Foundation::*,
-    Graphics::Gdi::{ClientToScreen, ScreenToClient},
-    System::LibraryLoader::*,
-    System::Memory::*,
-    UI::HiDpi::*,
-    UI::Input::Ime,
-    UI::Input::KeyboardAndMouse::*,
-    UI::WindowsAndMessaging::*,
+    Foundation::*, Graphics::Gdi::ClientToScreen, System::LibraryLoader::*, System::Memory::*,
+    UI::HiDpi::*, UI::Input::Ime, UI::Input::KeyboardAndMouse::*, UI::WindowsAndMessaging::*,
 };
 
 // TODO this process shoule be run in compile time, and return a const u16 array; but currently this is hard to write in Rust (might need to use proc_macro)
@@ -150,6 +144,8 @@ struct MessageHandler {
     pub curr_drag_delta_mouse_pos: (i16, i16), // current frame mouse pos movement with right-button down
     pub push_states: [bool; u8::MAX as usize],
     pub click_states: [bool; u8::MAX as usize],
+
+    pub pending_set_cursor_pos: Option<POINT>, // wrap mouse pos to the other side of the window
 }
 
 impl MessageHandler {
@@ -164,6 +160,7 @@ impl MessageHandler {
             curr_drag_delta_mouse_pos: (0, 0),
             push_states: [false; u8::MAX as usize],
             click_states: [false; u8::MAX as usize],
+            pending_set_cursor_pos: None,
         }
     }
 
@@ -171,6 +168,10 @@ impl MessageHandler {
         self.msg_stream.clear();
         self.curr_drag_delta_mouse_pos = (0, 0);
         self.click_states.fill(false);
+        if let Some(pos) = self.pending_set_cursor_pos {
+            self.mouse_pos = (pos.x as i16, pos.y as i16);
+            self.pending_set_cursor_pos = None;
+        }
     }
 
     pub fn pushed(&self, c: char) -> bool {
@@ -289,8 +290,6 @@ unsafe extern "system" fn wnd_callback(
             let (x, y) = decode_cursor_pos();
             handler.msg_stream.push(Message::MouseMove { x, y });
             {
-                let mut wrapped_pos = (x, y);
-
                 // record drag
                 if rb_down && handler.mouse_right_button {
                     let latest = handler.mouse_pos;
@@ -299,46 +298,37 @@ unsafe extern "system" fn wnd_callback(
                     handler.curr_drag_delta_mouse_pos.1 += delta.1;
 
                     // wrap on mouse drag
-                    let mut min: POINT;
-                    let mut max: POINT;
-                    unsafe {
+
+                    // get window rect (client space)
+                    let client_rect = unsafe {
                         let mut uninited = std::mem::MaybeUninit::<RECT>::uninit();
                         GetClientRect(hwnd, &mut *uninited.as_mut_ptr());
-                        let client_rect = uninited.assume_init();
-
-                        min = POINT {
-                            x: client_rect.left,
-                            y: client_rect.top,
-                        };
-                        max = POINT {
-                            x: client_rect.right - 1,
-                            y: client_rect.bottom - 1,
-                        };
-                        ClientToScreen(hwnd, &mut min);
-                        ClientToScreen(hwnd, &mut max);
-                    };
-
-                    let mut cursor = unsafe {
-                        let mut uninited = std::mem::MaybeUninit::<POINT>::uninit();
-                        GetCursorPos(uninited.as_mut_ptr());
                         uninited.assume_init()
                     };
 
-                    // horizontal
-                    if (delta.0 > 0) && cursor.x >= max.x {
-                        cursor.x = min.x + (cursor.x - max.x);
+                    let width = client_rect.right - client_rect.left;
+                    let x_min = client_rect.left;
+                    let x_max = client_rect.right - 1;
+
+                    let x = x as i32;
+                    let y = y as i32;
+                    let mut wrapped = POINT { x, y };
+
+                    // horizontal wrapping
+                    if (delta.0 > 0) && (x >= x_max) {
+                        wrapped.x = x_min + (x - x_max) % width;
                     }
-                    if (delta.0 < 0) && cursor.x <= min.x {
-                        cursor.x = max.x - (min.x - cursor.x);
+                    if (delta.0 < 0) && (x <= x_min) {
+                        wrapped.x = x_max - (x_min - x) % width;
                     }
 
-                    // done
-                    SetCursorPos(cursor.x, cursor.y);
-                    ScreenToClient(hwnd, &mut cursor);
-                    wrapped_pos = (cursor.x as i16, cursor.y as i16)
+                    // delay SetCursorPos (out of message handling loop)
+                    if (wrapped.x != x as i32) || (wrapped.y != y as i32) {
+                        handler.pending_set_cursor_pos = Some(wrapped);
+                    }
                 }
 
-                handler.mouse_pos = wrapped_pos;
+                handler.mouse_pos = (x, y);
                 handler.mouse_right_button = rb_down;
             }
             /*
@@ -563,6 +553,15 @@ impl Window {
         // Clear global state
         unsafe {
             self.message_handler = S_MESSAGE_HANDLER.take();
+        }
+
+        // process delayed request at the end of message frame
+        let handle = self.message_handler.as_ref().unwrap();
+        if let Some(mut pos) = handle.pending_set_cursor_pos {
+            unsafe {
+                ClientToScreen(handle.hwnd, &mut pos);
+                SetCursorPos(pos.x, pos.y);
+            }
         }
     }
 
