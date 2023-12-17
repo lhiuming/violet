@@ -321,7 +321,7 @@ impl RestirRenderer {
             rg.new_raytracing("HashGridCache Raygen")
                 .raygen_shader("restir/hash_grid_raygen.hlsl")
                 .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
-                .closest_hit_shader("raytrace/geometry.rchit.hlsl")
+                .closest_hit_shader("raytrace/geometry_ind.rchit.hlsl")
                 // raytrace.inc.hlsl
                 .accel_struct("scene_tlas", scene_tlas)
                 .texture_view("skycube", skycube)
@@ -367,7 +367,7 @@ impl RestirRenderer {
             rg.new_raytracing("Ind. Diff. Sample Gen.")
                 .raygen_shader("restir/ind_diff_sample_gen.hlsl")
                 .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
-                .closest_hit_shader("raytrace/geometry.rchit.hlsl")
+                .closest_hit_shader("raytrace/geometry_ind.rchit.hlsl")
                 .accel_struct("scene_tlas", scene_tlas)
                 .texture_view("skycube", skycube)
                 .texture(
@@ -394,7 +394,7 @@ impl RestirRenderer {
             rg.new_raytracing("Ind. Diff. Sample Validate")
                 .raygen_shader("restir/ind_diff_sample_validate.hlsl")
                 .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
-                .closest_hit_shader("raytrace/geometry.rchit.hlsl")
+                .closest_hit_shader("raytrace/geometry_ind.rchit.hlsl")
                 .accel_struct("scene_tlas", scene_tlas)
                 .texture_view("skycube", skycube)
                 .texture(
@@ -535,7 +535,7 @@ impl RestirRenderer {
             rg.new_raytracing("Ind. Spec. Sample Gen.")
                 .raygen_shader("restir/ind_spec_sample_gen.hlsl")
                 .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
-                .closest_hit_shader("raytrace/geometry.rchit.hlsl")
+                .closest_hit_shader("raytrace/geometry_ind.rchit.hlsl")
                 .accel_struct("scene_tlas", scene_tlas)
                 .texture_view("skycube", skycube)
                 .texture(
@@ -581,7 +581,7 @@ impl RestirRenderer {
             rg.new_raytracing("Ind. Spec. Sample Validate")
                 .raygen_shader("restir/ind_spec_sample_validate.hlsl")
                 .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
-                .closest_hit_shader("raytrace/geometry.rchit.hlsl")
+                .closest_hit_shader("raytrace/geometry_ind.rchit.hlsl")
                 .accel_struct("scene_tlas", scene_tlas)
                 .texture_view("skycube", skycube)
                 .texture(

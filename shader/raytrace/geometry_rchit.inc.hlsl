@@ -4,8 +4,13 @@
 
 #include "geometry_ray.inc.hlsl"
 
+// Options
+#ifndef TEX_LOD_BIAS
+#define TEX_LOD_BIAS 0
+#endif
+
+// Experimental config
 #define SKIP_POSITION_LOAD 0
-#define TEX_LOD_BIAS 2
 
 // ----------------
 // Geometry loading
