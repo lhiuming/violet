@@ -16,7 +16,7 @@ use std::{
 };
 
 macro_rules! warning {
-    ($fmt:expr $(, $arg:tt )*) => {
+    ($fmt:expr $(, $arg:expr )*) => {
         println!("{}", format!(concat!("Warning: ", $fmt) $(, $arg)*).yellow())
     };
 }
@@ -110,6 +110,7 @@ pub struct Material {
     pub base_color_map: Option<MaterialMap>,
     pub metallic_roughness_map: Option<MaterialMap>,
     pub normal_map: Option<MaterialMap>,
+    pub base_color_factor: [f32; 4],
     pub metallic_factor: f32,
     pub roughness_factor: f32,
 }
@@ -204,9 +205,11 @@ impl mikktspace::Geometry for MikktspaceGeometry<'_> {
             let a = Vec4::from_array(self.out_tangents[index]);
             let b = Vec4::from_array(tangent);
             if !Vec4::abs_diff_eq(a, b, 0.0000001) {
-                println!(
+                warning!(
                     "Writing to same tangent index with different value ({} times): {} -> {}",
-                    self.debug_tangent_counts[index], a, b
+                    self.debug_tangent_counts[index],
+                    a,
+                    b
                 )
             }
         }
@@ -453,7 +456,9 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
                         gltf::mesh::util::ReadIndices::U16(iter) => {
                             model_indicies.append(&mut iter.collect());
                         }
-                        gltf::mesh::util::ReadIndices::U32(_) => todo!("Read u32 indices"),
+                        gltf::mesh::util::ReadIndices::U32(iter) => {
+                            model_indicies.append(&mut iter.map(|i| i as u16).collect());
+                        }
                     }
                     assert!(model_indicies.len() % 3 == 0);
                 } else {
@@ -613,11 +618,6 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
     for material in document.materials() {
         let pbr_texs = material.pbr_metallic_roughness();
 
-        let base_color_factor = pbr_texs.base_color_factor();
-        if base_color_factor != [1.0, 1.0, 1.0, 1.0] {
-            warning!("GLTF Loader: base_color_factor is not default value but ignored!");
-        }
-
         let base_color_map = if let Some(base_color) = pbr_texs.base_color_texture() {
             if base_color.tex_coord() != 0 {
                 warning!("GLTF Loader: Only texture coordinate 0 is supported");
@@ -699,6 +699,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
             base_color_map,
             metallic_roughness_map,
             normal_map,
+            base_color_factor: pbr_texs.base_color_factor(),
             metallic_factor: pbr_texs.metallic_factor(),
             roughness_factor: pbr_texs.roughness_factor(),
         });

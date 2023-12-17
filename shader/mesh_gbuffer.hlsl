@@ -83,6 +83,7 @@ void ps_main(
     float4 normal_map = bindless_textures[mat.normal_index].Sample(sampler_linear_wrap, uv);
 
     // Apply scale factors
+    base_color *= mat.base_color_factor;
     metal_rough.r *= mat.metallic_factor;
     metal_rough.g *= mat.roughness_factor;
 

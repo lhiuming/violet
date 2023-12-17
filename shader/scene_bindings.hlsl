@@ -27,6 +27,7 @@ struct MaterialParams
     uint normal_index;
     float metallic_factor;
     float roughness_factor;
+    float4 base_color_factor;
 
     uint base_color_index() {
         return color_metalrough_index_packed & 0xFFFF;

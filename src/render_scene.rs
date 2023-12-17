@@ -248,6 +248,7 @@ pub struct MaterialParams {
     pub normal_index: u32,
     pub metallic_factor: f32,
     pub roughness_factor: f32,
+    pub base_color_factor: [f32; 4],
 }
 
 impl MaterialParams {
@@ -255,6 +256,7 @@ impl MaterialParams {
         base_color_index: u32,
         metallic_roughness_index: u32,
         normal_index: u32,
+        base_color_factor: [f32; 4],
         metallic_factor: f32,
         roughness_factor: f32,
     ) -> Self {
@@ -265,6 +267,7 @@ impl MaterialParams {
             normal_index,
             metallic_factor,
             roughness_factor,
+            base_color_factor,
         }
     }
 }
@@ -795,6 +798,7 @@ impl RenderScene {
                 resolve(&material.base_color_map),
                 resolve(&material.metallic_roughness_map),
                 resolve(&material.normal_map),
+                material.base_color_factor,
                 material.metallic_factor,
                 material.roughness_factor,
             ));

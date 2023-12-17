@@ -89,6 +89,7 @@ void main(inout GeometryRayPayload payload, in Attribute attr)
     float4 normal_map = bindless_textures[mat.normal_index].SampleLevel(sampler_linear_wrap, uv, TEX_LOD_BIAS);
 
     // Apply scale factors
+    base_color *= mat.base_color_factor;
     metal_rough.r *= mat.metallic_factor;
     metal_rough.g *= mat.roughness_factor;
 
