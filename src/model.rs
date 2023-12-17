@@ -1,3 +1,4 @@
+use colored::Colorize;
 use glam::{Mat4, Vec4};
 use intel_tex_2::{bc5, bc7};
 use rkyv::{
@@ -13,6 +14,12 @@ use std::{
     sync::{Arc, Mutex},
     thread,
 };
+
+macro_rules! warning {
+    ($fmt:expr $(, $arg:tt )*) => {
+        println!("{}", format!(concat!("Warning: ", $fmt) $(, $arg)*).yellow())
+    };
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct LoadConfig {
@@ -103,7 +110,7 @@ pub struct Material {
     pub base_color_map: Option<MaterialMap>,
     pub metallic_roughness_map: Option<MaterialMap>,
     pub normal_map: Option<MaterialMap>,
-    pub metaliic_factor: f32,
+    pub metallic_factor: f32,
     pub roughness_factor: f32,
 }
 
@@ -428,11 +435,11 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
             for primitive in geometry_group.primitives() {
                 // Check
                 if primitive.mode() != gltf::mesh::Mode::Triangles {
-                    println!("Warning: Mesh primitive is not triangulated. Ignored.");
+                    warning!("Mesh primitive is not triangulated. Ignored.");
                     continue;
                 }
                 if primitive.material().index().is_none() {
-                    println!("Warning: Mesh primitive has no material. Ignored.");
+                    warning!("Mesh primitive has no material. Ignored.");
                     continue;
                 }
 
@@ -450,7 +457,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
                     }
                     assert!(model_indicies.len() % 3 == 0);
                 } else {
-                    println!("Warning: Mesh primitive has no indices.");
+                    warning!("Mesh primitive has no indices.");
                     continue;
                 }
 
@@ -459,7 +466,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
                 if let Some(positions) = reader.read_positions() {
                     model_positions.append(&mut positions.collect());
                 } else {
-                    println!("Warning: Mesh primitive has no positions.");
+                    warning!("Mesh primitive has no positions.");
                     continue;
                 }
 
@@ -499,7 +506,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
                             if mikktspace::generate_tangents(&mut geometry) {
                                 return Some(tangents);
                             } else {
-                                println!("Warning: mikktspace Failed to generate tangents.");
+                                warning!("mikktspace Failed to generate tangents.");
                             }
                         }
                         None
@@ -507,7 +514,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
 
                 // Log unsupported
                 if reader.read_colors(0).is_some() {
-                    println!("Warning: Mesh primitive has vertex colors. Ignored.")
+                    warning!("Mesh primitive has vertex colors. Ignored.")
                 }
 
                 let material_index = primitive.material().index().unwrap() as u32;
@@ -606,22 +613,14 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
     for material in document.materials() {
         let pbr_texs = material.pbr_metallic_roughness();
 
-        if pbr_texs.metallic_factor() != 1.0 {
-            println!(
-                "Warning: metallic factor {} is ignored by violet.",
-                pbr_texs.metallic_factor()
-            );
-        }
-        if pbr_texs.roughness_factor() != 1.0 {
-            println!(
-                "Warning: roughness factor {} is ignored by violet.",
-                pbr_texs.roughness_factor()
-            );
+        let base_color_factor = pbr_texs.base_color_factor();
+        if base_color_factor != [1.0, 1.0, 1.0, 1.0] {
+            warning!("GLTF Loader: base_color_factor is not default value but ignored!");
         }
 
         let base_color_map = if let Some(base_color) = pbr_texs.base_color_texture() {
             if base_color.tex_coord() != 0 {
-                println!("Warning: GLTF Loader: Only texture coordinate 0 is supported");
+                warning!("GLTF Loader: Only texture coordinate 0 is supported");
             }
 
             let image_index = base_color.texture().source().index() as ImageIndex;
@@ -641,7 +640,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
         let metallic_roughness_map =
             if let Some(metal_rough) = pbr_texs.metallic_roughness_texture() {
                 if metal_rough.tex_coord() != 0 {
-                    println!("Warning: GLTF Loader: Only texture coordinate 0 is supported");
+                    warning!("GLTF Loader: Only texture coordinate 0 is supported");
                 }
 
                 let image_index = metal_rough.texture().index() as ImageIndex;
@@ -662,7 +661,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
 
         let normal_map = if let Some(normal) = material.normal_texture() {
             if normal.tex_coord() != 0 {
-                println!("Warning: GLTF Loader: Only texture coordinate 0 is supported");
+                warning!("GLTF Loader: Only texture coordinate 0 is supported");
             }
 
             let image_index = normal.texture().source().index() as ImageIndex;
@@ -690,17 +689,17 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
 
         // Log ignored
         if material.emissive_texture().is_some() {
-            println!("Warning: GLTF Loader: Emissive textures are not supported yet");
+            warning!("GLTF Loader: Emissive textures are not supported yet");
         }
         if material.occlusion_texture().is_some() {
-            println!("Warning: GLTF Loader: Occlusion textures are not supported yet");
+            warning!("GLTF Loader: Occlusion textures are not supported yet");
         }
 
         model_materials.push(Material {
             base_color_map,
             metallic_roughness_map,
             normal_map,
-            metaliic_factor: pbr_texs.metallic_factor(),
+            metallic_factor: pbr_texs.metallic_factor(),
             roughness_factor: pbr_texs.roughness_factor(),
         });
     }
@@ -755,9 +754,10 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
         );
 
         if imported_usage.bits().count_ones() > 1 {
-            println!(
-                "Warning: Image {} is used for multiple purposes ({:?}) !!!",
-                image_index, imported_usage
+            warning!(
+                "Image {} is used for multiple purposes ({:?}) !!!",
+                image_index,
+                imported_usage
             );
         }
 

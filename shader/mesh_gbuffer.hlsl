@@ -78,9 +78,13 @@ void ps_main(
     MaterialParams mat = material_params[pc.material_index];
 
     // TODO sampler based on model definition
-    float4 base_color = bindless_textures[mat.base_color_index].Sample(sampler_linear_wrap, uv);
+    float4 base_color = bindless_textures[mat.base_color_index()].Sample(sampler_linear_wrap, uv);
+    float4 metal_rough = bindless_textures[mat.metallic_roughness_index()].Sample(sampler_linear_wrap, uv);
     float4 normal_map = bindless_textures[mat.normal_index].Sample(sampler_linear_wrap, uv);
-    float4 metal_rough = bindless_textures[mat.metallic_roughness_index].Sample(sampler_linear_wrap, uv);
+
+    // Apply scale factors
+    metal_rough.r *= mat.metallic_factor;
+    metal_rough.g *= mat.roughness_factor;
 
     #if HACK_MAKE_EVERYTHING_GLOSSY 
     metal_rough.g *= HACK_ROUGHNESS_MULTIPLIER;

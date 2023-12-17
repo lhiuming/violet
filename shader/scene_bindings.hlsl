@@ -23,10 +23,18 @@ Buffer<uint> index_buffer;
 Buffer<uint> vertex_buffer;
 struct MaterialParams
 {
-    uint base_color_index;
-    uint metallic_roughness_index;
+    uint color_metalrough_index_packed;
     uint normal_index;
-    uint pad;
+    float metallic_factor;
+    float roughness_factor;
+
+    uint base_color_index() {
+        return color_metalrough_index_packed & 0xFFFF;
+    }
+
+    uint metallic_roughness_index() {
+        return color_metalrough_index_packed >> 16;
+    }
 };
 [[vk::binding(2, SCENE_DESCRIPTOR_SET_INDEX)]]
 StructuredBuffer<MaterialParams> material_params;

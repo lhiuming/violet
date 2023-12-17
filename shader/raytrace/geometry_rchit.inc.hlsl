@@ -84,9 +84,13 @@ void main(inout GeometryRayPayload payload, in Attribute attr)
 
     // TODO inlining the material parameters?
     MaterialParams mat = material_params[mesh.material_index];
-    float4 base_color = bindless_textures[mat.base_color_index].SampleLevel(sampler_linear_wrap, uv, TEX_LOD_BIAS);
-    float4 metal_rough = bindless_textures[mat.metallic_roughness_index].SampleLevel(sampler_linear_wrap, uv, TEX_LOD_BIAS);
+    float4 base_color = bindless_textures[mat.base_color_index()].SampleLevel(sampler_linear_wrap, uv, TEX_LOD_BIAS);
+    float4 metal_rough = bindless_textures[mat.metallic_roughness_index()].SampleLevel(sampler_linear_wrap, uv, TEX_LOD_BIAS);
     float4 normal_map = bindless_textures[mat.normal_index].SampleLevel(sampler_linear_wrap, uv, TEX_LOD_BIAS);
+
+    // Apply scale factors
+    metal_rough.r *= mat.metallic_factor;
+    metal_rough.g *= mat.roughness_factor;
 
     #if HACK_MAKE_EVERYTHING_GLOSSY 
     metal_rough.g *= HACK_ROUGHNESS_MULTIPLIER;

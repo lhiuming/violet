@@ -244,10 +244,29 @@ impl UploadContext {
 // TODO inlining in MeshParams?
 #[repr(C)]
 pub struct MaterialParams {
-    pub base_color_index: u32,
-    pub metallic_roughness_index: u32,
+    pub color_metalrough_index_packed: u32,
     pub normal_index: u32,
-    pub pad: u32,
+    pub metallic_factor: f32,
+    pub roughness_factor: f32,
+}
+
+impl MaterialParams {
+    pub fn new(
+        base_color_index: u32,
+        metallic_roughness_index: u32,
+        normal_index: u32,
+        metallic_factor: f32,
+        roughness_factor: f32,
+    ) -> Self {
+        let color_metalrough_index_packed =
+            base_color_index & 0xFFFF | (metallic_roughness_index & 0xFFFF) << 16;
+        MaterialParams {
+            color_metalrough_index_packed,
+            normal_index,
+            metallic_factor,
+            roughness_factor,
+        }
+    }
 }
 
 // Representing a triangle mesh with a materal.
@@ -772,12 +791,13 @@ impl RenderScene {
                 None => 0,
             };
 
-            self.material_parmas.push(MaterialParams {
-                base_color_index: resolve(&material.base_color_map),
-                metallic_roughness_index: resolve(&material.metallic_roughness_map),
-                normal_index: resolve(&material.normal_map),
-                pad: 0,
-            });
+            self.material_parmas.push(MaterialParams::new(
+                resolve(&material.base_color_map),
+                resolve(&material.metallic_roughness_map),
+                resolve(&material.normal_map),
+                material.metallic_factor,
+                material.roughness_factor,
+            ));
         }
 
         // Upload new material params
