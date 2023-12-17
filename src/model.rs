@@ -452,7 +452,9 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
                 let mut model_indicies = Vec::<u16>::new();
                 if let Some(indices) = reader.read_indices() {
                     match indices {
-                        gltf::mesh::util::ReadIndices::U8(_) => todo!("Read u8 indices"),
+                        gltf::mesh::util::ReadIndices::U8(iter) => {
+                            model_indicies.append(&mut iter.map(|i| i as u16).collect());
+                        }
                         gltf::mesh::util::ReadIndices::U16(iter) => {
                             model_indicies.append(&mut iter.collect());
                         }
@@ -643,7 +645,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
                     warning!("GLTF Loader: Only texture coordinate 0 is supported");
                 }
 
-                let image_index = metal_rough.texture().index() as ImageIndex;
+                let image_index = metal_rough.texture().source().index() as ImageIndex;
                 println!(
                     "Material metal rough texture: {}, sampler {:?}",
                     image_index,
@@ -652,9 +654,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
 
                 mark_image_usage(image_index, ImportedImageUsage::MetalRough);
 
-                Some(MaterialMap {
-                    image_index: metal_rough.texture().source().index() as u32,
-                })
+                Some(MaterialMap { image_index })
             } else {
                 None
             };
@@ -680,9 +680,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
 
             mark_image_usage(image_index, ImportedImageUsage::Normal);
 
-            Some(MaterialMap {
-                image_index: normal.texture().index() as u32,
-            })
+            Some(MaterialMap { image_index })
         } else {
             None
         };
@@ -790,7 +788,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
             gltf::image::Format::R8G8B8A8 => {
                 if swizzle_bgxx {
                     raw_data = Vec::with_capacity(texel_count as usize * 4);
-                    for pixel in image.pixels.chunks(3) {
+                    for pixel in image.pixels.chunks(4) {
                         raw_data.push(pixel[2]); // b
                         raw_data.push(pixel[1]); // g
                         raw_data.push(pixel[0]); // r
