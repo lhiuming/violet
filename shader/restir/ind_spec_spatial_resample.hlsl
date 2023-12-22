@@ -13,6 +13,9 @@
 #define INIT_RADIUS_FACTOR 0.05
 #define MIN_RADIUS 1.5
 
+#define ADAPTIVE_ITERATION_COUNT 1
+#define MIN_ITERATION min(1, MAX_ITERATION)
+
 #define ADAPTIVE_RADIUS 1
 
 GBUFFER_TEXTURE_TYPE gbuffer_color;
@@ -190,11 +193,19 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     SpecTragetFunction center_target_function = new_spec_target_function(pixcoord_center, buffer_size, depth, gbuffer);
     float reservoir_target_function = hit_pos_xyzw.w;
 
+    // Adaptive kernel
+    #if ADAPTIVE_ITERATION_COUNT
+    // spatial resample is less useful for shiny surface (instead introducing noise).
+    const uint num_iteration = uint(lerp(MIN_ITERATION, MAX_ITERATION, gbuffer.perceptual_roughness));
+    #else
+    const uint num_iteration = MAX_ITERATION;
+    #endif
+
     // Search neighborhood
     float radius = min(buffer_size.x, buffer_size.y) * INIT_RADIUS_FACTOR;
     uint rng_state = lcg_init(dispatch_id, buffer_size, pc.frame_index);
     //float rand_angle = lcg_rand(rng_state) * TWO_PI;
-    for (uint i = 0; i < MAX_ITERATION; i++)
+    for (uint i = 0; i < num_iteration; i++)
     {
         float x, y;
         // Uniform sampling in a disk

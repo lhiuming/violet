@@ -219,16 +219,6 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         #if IND_SPEC_PROPER_RESAMPLING_MIS_WEIGHT
         prev_gbuffer = load_gbuffer(prev_gbuffer_color, prev_pos);
         #endif
-
-        // Bound the temporal information to avoid stale sample
-        if (1)
-        {
-            // const uint M_MAX = 20; // [Benedikt 2020]
-            // const uint M_MAX = 30; // [Ouyang 2021]
-            // const uint M_MAX = 10; // [h3r2tic 2022]
-            const uint M_MAX = 16;
-            reservoir.M = min(reservoir.M, M_MAX);
-        }
     }
     else
     {
@@ -249,6 +239,20 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     float3 new_sample_hit_radiance = rw_hit_radiance_texture[dispatch_id];
 
     GBuffer gbuffer = load_gbuffer(gbuffer_color, dispatch_id);
+
+    // Bound the temporal information to avoid stale sample
+    if (1)
+    {
+        // const uint M_MAX = 20; // [Benedikt 2020]
+        // const uint M_MAX = 30; // [Ouyang 2021]
+        // const uint M_MAX = 10; // [h3r2tic 2022]
+        const uint M_MAX = 16;
+
+        // Adaptive hisotry confidence
+        // for shiny surface, history is less useful
+        uint M_max = uint(lerp(1, M_MAX, gbuffer.perceptual_roughness));
+        reservoir.M = min(reservoir.M, M_max);
+    }
 
     // Sampling parameters for current sample on current pixel (brdf)
     Sampling curr_sampling = calc_things(view_params().view_pos, position_ws, gbuffer.normal, gbuffer.perceptual_roughness, get_specular_f0(gbuffer.color, gbuffer.metallic), new_sample_hit_pos);
