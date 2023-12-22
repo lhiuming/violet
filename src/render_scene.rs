@@ -2,10 +2,10 @@ use std::mem::size_of;
 use std::slice;
 
 use ash::vk;
-use glam::{Mat4, Vec3};
+use glam::{Affine3A, Mat3, Vec3};
 
 use crate::{
-    model::{ImageFormat, Model},
+    model::{Image, ImageFormat, Model},
     render_device::{
         texture::TextureUsage, AccelerationStructure, Buffer, BufferDesc, RenderDevice, Texture,
         TextureDesc, TextureView, TextureViewDesc,
@@ -301,8 +301,23 @@ pub struct GeometryGroupParams {
 
 pub struct Instance {
     pub geometry_group_index: u32, // This is also the BLAS index
-    pub transform: Mat4,
-    pub normal_transform: Mat4,
+    pub transform: Affine3A,
+    pub normal_transform: Mat3,
+    pub transform_det: f32,
+}
+
+impl Instance {
+    pub fn transform_rows(&self) -> [f32; 12] {
+        let x = self.transform.matrix3.x_axis;
+        let y = self.transform.matrix3.y_axis;
+        let z = self.transform.matrix3.z_axis;
+        let t = self.transform.translation;
+        [
+            x.x, y.x, z.x, t.x, //
+            x.y, y.y, z.y, t.y, //
+            x.z, y.z, z.z, t.z, //
+        ]
+    }
 }
 
 // Matching constants in `shader/scene_bindings.hlsl`
@@ -313,6 +328,10 @@ pub const MATERIAL_PARAMS_BINDING_INDEX: u32 = 2;
 pub const BINDLESS_TEXTURE_BINDING_INDEX: u32 = 3;
 pub const MESH_PARAMS_BINDING_INDEX: u32 = 4;
 pub const GEOMETRY_GROUP_PARAMS_BINDING_INDEX: u32 = 5;
+
+pub const DEFAULT_TEXTURE_INDEX_BEGIN: u32 = 0;
+pub const DEFAULT_TEXTURE_INDEX_WHITE: u32 = 0;
+pub const DEFAULT_TEXTURE_INDEX_NORMAL_UP: u32 = 1;
 
 // Contain everything to be rendered
 pub struct RenderScene {
@@ -573,7 +592,7 @@ impl RenderScene {
             }
         }
 
-        RenderScene {
+        let mut ret = RenderScene {
             upload_context: UploadContext::new(rd),
             descriptor_pool,
             descriptor_set_layout,
@@ -592,6 +611,230 @@ impl RenderScene {
             mesh_bottom_level_accel_structs: Vec::new(),
             scene_top_level_accel_struct: None,
             sun_dir: Vec3::new(0.0, 0.0, 1.0),
+        };
+
+        // default textures
+        ret.populate_default_material_textures(rd);
+
+        ret
+    }
+
+    fn upload_texture_data(
+        rd: &RenderDevice,
+        upload_context: &mut UploadContext,
+        texture: &Texture,
+        image: &Image,
+    ) {
+        let mip_level_count = image.mips_data.len() as u32;
+        let data_size = image.mips_data.iter().map(Vec::len).sum();
+
+        // Create staging buffer
+        let staging_buffer = upload_context.borrow_staging_buffer(rd, data_size as u64);
+
+        // Write to staging buffer
+        let mut buffer_offsets = Vec::with_capacity(image.mips_data.len());
+        {
+            let staging_slice =
+                unsafe { std::slice::from_raw_parts_mut(staging_buffer.0.data, data_size) };
+            let mut dst = 0;
+            for mip in image.mips_data.iter() {
+                let dst_end = dst + mip.len();
+                staging_slice[dst..dst_end].copy_from_slice(mip);
+                buffer_offsets.push(dst);
+                dst = dst_end;
+            }
+        }
+
+        // Transfer to texture
+        upload_context.immediate_submit(rd, |command_buffer| {
+            // Transfer to proper image layout
+            unsafe {
+                let barrier = vk::ImageMemoryBarrier::builder()
+                    .image(texture.image)
+                    .old_layout(vk::ImageLayout::UNDEFINED)
+                    .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: mip_level_count,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    });
+                rd.device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[*barrier],
+                );
+            }
+
+            // Copy
+            let mut width = image.width;
+            let mut height = image.height;
+            let mut regions = Vec::with_capacity(mip_level_count as usize);
+            for mip_level in 0..mip_level_count {
+                let region = vk::BufferImageCopy::builder()
+                    .buffer_offset(buffer_offsets[mip_level as usize] as vk::DeviceSize)
+                    .buffer_row_length(0) // zero means tightly packed
+                    .buffer_image_height(0) // zero means tightly packed
+                    .image_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+                    .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+                    .image_extent(vk::Extent3D {
+                        width,
+                        height,
+                        depth: 1,
+                    });
+                regions.push(region.build());
+
+                // ref: https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#resources-image-mip-level-sizing
+                width = (width / 2).max(1);
+                height = (height / 2).max(1);
+            }
+            let dst_image_layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
+            unsafe {
+                rd.device.cmd_copy_buffer_to_image(
+                    command_buffer,
+                    staging_buffer.0.handle,
+                    texture.image,
+                    dst_image_layout,
+                    &regions,
+                )
+            }
+
+            // Transfer to shader ready layout
+            unsafe {
+                let barrier = vk::ImageMemoryBarrier::builder()
+                    .image(texture.image)
+                    .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+                    .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::SHADER_READ)
+                    .subresource_range(vk::ImageSubresourceRange {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        base_mip_level: 0,
+                        level_count: mip_level_count,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    });
+                rd.device.cmd_pipeline_barrier(
+                    command_buffer,
+                    vk::PipelineStageFlags::TRANSFER,
+                    vk::PipelineStageFlags::FRAGMENT_SHADER,
+                    vk::DependencyFlags::empty(),
+                    &[],
+                    &[],
+                    &[*barrier],
+                );
+            }
+
+            // Return the staging buffer
+            unsafe {
+                rd.device.cmd_set_event(
+                    command_buffer,
+                    staging_buffer.1,
+                    vk::PipelineStageFlags::TRANSFER,
+                );
+            }
+        });
+    }
+
+    fn populate_default_material_textures(&mut self, rd: &RenderDevice) {
+        let upload_context = &mut self.upload_context;
+
+        let white_image = Image {
+            width: 1,
+            height: 1,
+            format: ImageFormat::R8G8B8A8Unorm,
+            mips_data: vec![vec![255, 255, 255, 255]],
+        };
+        let white_texture = rd
+            .create_texture(TextureDesc {
+                width: 1,
+                height: 1,
+                format: vk::Format::R8G8B8A8_UNORM,
+                usage: TextureUsage::new().sampled().transfer_dst().into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let white_texture_view = rd
+            .create_texture_view(
+                white_texture,
+                TextureViewDesc {
+                    view_type: vk::ImageViewType::TYPE_2D,
+                    format: white_texture.desc.format,
+                    aspect: vk::ImageAspectFlags::COLOR,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        let normal_up_texture = rd
+            .create_texture(TextureDesc {
+                width: 1,
+                height: 1,
+                format: vk::Format::R8G8B8A8_UNORM,
+                usage: TextureUsage::new().sampled().transfer_dst().into(),
+                ..Default::default()
+            })
+            .unwrap();
+        let normal_up_image = Image {
+            width: 1,
+            height: 1,
+            format: ImageFormat::R8G8B8A8Unorm,
+            mips_data: vec![vec![128, 128, 255, 255]],
+        };
+        let normal_up_texture_view = rd
+            .create_texture_view(
+                normal_up_texture,
+                TextureViewDesc {
+                    view_type: vk::ImageViewType::TYPE_2D,
+                    format: normal_up_texture.desc.format,
+                    aspect: vk::ImageAspectFlags::COLOR,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+
+        Self::upload_texture_data(rd, upload_context, &white_texture, &white_image);
+        Self::upload_texture_data(rd, upload_context, &normal_up_texture, &normal_up_image);
+
+        self.material_textures.push(white_texture);
+        self.material_textures.push(normal_up_texture);
+
+        self.material_texture_views.push(white_texture_view);
+        self.material_texture_views.push(normal_up_texture_view);
+
+        // Add texture view to bindless texture array
+        {
+            let image_infos = [white_texture_view, normal_up_texture_view]
+                .iter()
+                .map(|view| {
+                    vk::DescriptorImageInfo::builder()
+                        .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
+                        .image_view(view.image_view)
+                        .sampler(vk::Sampler::null())
+                        .build()
+                })
+                .collect::<Vec<_>>();
+            let write = vk::WriteDescriptorSet::builder()
+                .dst_set(self.descriptor_set)
+                .dst_binding(BINDLESS_TEXTURE_BINDING_INDEX)
+                .dst_array_element(DEFAULT_TEXTURE_INDEX_BEGIN)
+                .descriptor_type(vk::DescriptorType::SAMPLED_IMAGE)
+                .image_info(&image_infos);
+            unsafe {
+                rd.device.update_descriptor_sets(&[*write], &[]);
+            }
         }
     }
 
@@ -643,129 +886,9 @@ impl RenderScene {
                 })
                 .unwrap();
 
-            let buffer_size = image.mips_data.iter().map(Vec::len).sum();
-
-            // Create staging buffer
-            let staging_buffer = upload_context.borrow_staging_buffer(rd, buffer_size as u64);
-
-            // Write to staging buffer
-            let mut buffer_offsets = Vec::with_capacity(image.mips_data.len());
-            {
-                let staging_slice =
-                    unsafe { std::slice::from_raw_parts_mut(staging_buffer.0.data, buffer_size) };
-                let mut dst = 0;
-                for mip in image.mips_data.iter() {
-                    let dst_end = dst + mip.len();
-                    staging_slice[dst..dst_end].copy_from_slice(mip);
-                    buffer_offsets.push(dst);
-                    dst = dst_end;
-                }
-            }
-
-            // Transfer to texture
-            upload_context.immediate_submit(rd, |command_buffer| {
-                // Transfer to proper image layout
-                unsafe {
-                    let barrier = vk::ImageMemoryBarrier::builder()
-                        .image(texture.image)
-                        .old_layout(vk::ImageLayout::UNDEFINED)
-                        .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                        .src_access_mask(vk::AccessFlags::empty())
-                        .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                        .subresource_range(vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0,
-                            level_count: mip_level_count,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        });
-                    rd.device.cmd_pipeline_barrier(
-                        command_buffer,
-                        vk::PipelineStageFlags::TOP_OF_PIPE,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[*barrier],
-                    );
-                }
-
-                // Copy
-                let mut width = image.width;
-                let mut height = image.height;
-                let mut regions = Vec::with_capacity(mip_level_count as usize);
-                for mip_level in 0..mip_level_count {
-                    let region = vk::BufferImageCopy::builder()
-                        .buffer_offset(buffer_offsets[mip_level as usize] as vk::DeviceSize)
-                        .buffer_row_length(0) // zero means tightly packed
-                        .buffer_image_height(0) // zero means tightly packed
-                        .image_subresource(vk::ImageSubresourceLayers {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            mip_level,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        })
-                        .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-                        .image_extent(vk::Extent3D {
-                            width,
-                            height,
-                            depth: 1,
-                        });
-                    regions.push(region.build());
-
-                    // ref: https://registry.khronos.org/vulkan/specs/1.3-extensions/html/vkspec.html#resources-image-mip-level-sizing
-                    width = (width / 2).max(1);
-                    height = (height / 2).max(1);
-                }
-                let dst_image_layout = vk::ImageLayout::TRANSFER_DST_OPTIMAL;
-                unsafe {
-                    rd.device.cmd_copy_buffer_to_image(
-                        command_buffer,
-                        staging_buffer.0.handle,
-                        texture.image,
-                        dst_image_layout,
-                        &regions,
-                    )
-                }
-
-                // Transfer to shader ready layout
-                unsafe {
-                    let barrier = vk::ImageMemoryBarrier::builder()
-                        .image(texture.image)
-                        .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
-                        .new_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)
-                        .src_access_mask(vk::AccessFlags::empty())
-                        .dst_access_mask(vk::AccessFlags::SHADER_READ)
-                        .subresource_range(vk::ImageSubresourceRange {
-                            aspect_mask: vk::ImageAspectFlags::COLOR,
-                            base_mip_level: 0,
-                            level_count: mip_level_count,
-                            base_array_layer: 0,
-                            layer_count: 1,
-                        });
-                    rd.device.cmd_pipeline_barrier(
-                        command_buffer,
-                        vk::PipelineStageFlags::TRANSFER,
-                        vk::PipelineStageFlags::FRAGMENT_SHADER,
-                        vk::DependencyFlags::empty(),
-                        &[],
-                        &[],
-                        &[*barrier],
-                    );
-                }
-
-                // Return the staging buffer
-                unsafe {
-                    rd.device.cmd_set_event(
-                        command_buffer,
-                        staging_buffer.1,
-                        vk::PipelineStageFlags::TRANSFER,
-                    );
-                }
-            });
+            Self::upload_texture_data(rd, upload_context, &texture, &image);
 
             // Queue to upload to scene data
-
             self.material_textures.push(texture);
         }
 
@@ -773,8 +896,7 @@ impl RenderScene {
         for material in &model.materials {
             // Create texture view for each material and add to scene
             // TODO collect and reduce duplicate in view?
-            // TODO default textures
-            let mut resolve = |map: &Option<crate::model::MaterialMap>| match map {
+            let mut resolve = |map: &Option<crate::model::MaterialMap>, default: u32| match map {
                 Some(map) => {
                     let texture = {
                         let texture_index = global_texture_index_offset + map.image_index;
@@ -791,13 +913,16 @@ impl RenderScene {
                     self.material_texture_views.push(texture_view);
                     texture_view_index
                 }
-                None => 0,
+                None => default,
             };
 
             self.material_parmas.push(MaterialParams::new(
-                resolve(&material.base_color_map),
-                resolve(&material.metallic_roughness_map),
-                resolve(&material.normal_map),
+                resolve(&material.base_color_map, DEFAULT_TEXTURE_INDEX_WHITE),
+                resolve(
+                    &material.metallic_roughness_map,
+                    DEFAULT_TEXTURE_INDEX_WHITE,
+                ),
+                resolve(&material.normal_map, DEFAULT_TEXTURE_INDEX_NORMAL_UP),
                 material.base_color_factor,
                 material.metallic_factor,
                 material.roughness_factor,
@@ -1191,10 +1316,12 @@ impl RenderScene {
         for instance in &model.instances {
             let geometry_group_index =
                 instance.geometry_group_index + global_geometry_group_index_offset as u32;
+            let transform = Affine3A::from_mat4(instance.transform);
             self.instances.push(Instance {
                 geometry_group_index,
-                transform: instance.transform,
-                normal_transform: instance.transform.inverse().transpose(),
+                transform,
+                normal_transform: Mat3::from_mat4(instance.transform).inverse().transpose(),
+                transform_det: transform.matrix3.determinant(),
             });
         }
 
@@ -1363,11 +1490,7 @@ impl RenderScene {
             let blas = self.mesh_bottom_level_accel_structs[blas_index as usize];
 
             // Fill instance buffer (3x4 row-major affine transform)
-            let mut matrix = [0.0f32; 12];
-            {
-                let row_data = instance.transform.transpose().to_cols_array();
-                matrix[0..12].copy_from_slice(&row_data[0..12]);
-            }
+            let matrix = instance.transform_rows();
             let instance = vk::AccelerationStructureInstanceKHR {
                 transform: vk::TransformMatrixKHR { matrix },
                 instance_custom_index_and_mask: vk::Packed24_8::new(

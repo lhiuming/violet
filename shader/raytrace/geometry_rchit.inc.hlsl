@@ -76,11 +76,11 @@ void main(inout GeometryRayPayload payload, in Attribute attr)
 
     // transform mesh data
     float4x3 normal_xform = WorldToObject4x3(); // transpose(inverse(ObjectToWorld()))
-    float3 normal = normalize(mul(normal_xform, normal_ls).xyz);
-    float3 tangent = normalize(mul(normal_xform, tangent_ls.xyz).xyz);
+    float3 normal = mul(normal_xform, normal_ls).xyz;
+    float3 tangent = mul(normal_xform, tangent_ls.xyz).xyz;
 
-    // TODO calculate before interpolation?
-    float3 bitangent = normalize(tangent_ls.w * cross(normal, tangent.xyz));
+    // mikktspace tangent
+    float3 bitangent = tangent_ls.w * cross(normal, tangent.xyz);
 
     // TODO inlining the material parameters?
     MaterialParams mat = material_params[mesh.material_index];

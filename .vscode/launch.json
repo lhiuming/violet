@@ -11,8 +11,7 @@
 			"preLaunchTask": "rust: cargo build release",
 			"program": "${workspaceFolder}/target/release/restir.exe",
 			"args": [
-				//"./assets/Sponza/Sponza.gltf",
-				"./assets/SunTemple_glTF/SunTemple.gltf",
+				"./assets/Sponza/Sponza.gltf",
 				"--profiler",
 				"--vsync",
 				"--camera-preset",
@@ -31,6 +30,7 @@
 			"program": "${workspaceFolder}/target/release/restir.exe",
 			"args": [
 				//"./assets/Sponza/Sponza.gltf",
+				//"./assets/pica_pica_-_mini_diorama_01/scene.gltf",
 				"./assets/SunTemple_glTF/SunTemple.gltf",
 				"--profiler",
 				"--camera-preset",
@@ -57,7 +57,8 @@
 			"preLaunchTask": "rust: cargo build nightly",
 			"program": "${workspaceFolder}/target/debug/restir.exe",
 			"args": [
-				"./assets/SunTemple_glTF/SunTemple.gltf",
+				//"./assets/Sponza/Sponza.gltf",
+				"./assets/pica_pica_-_mini_diorama_01/scene.gltf",
 				"--profiler",
 				"--camera-preset",
 				"1.8,3.5,2.0,-75.0,0.0,6.0,-0.35,5.0,-80.0,-16.0,8.5,0.5,0.15,-80.0,30.0",

@@ -10,7 +10,7 @@ struct PushConstants
     float4 model_xform_r0;
     float4 model_xform_r1;
     float4 model_xform_r2;
-    float4 normal_xform_r0;
+    float4 normal_xform_r0; // w: sign of determinant of transform
     float4 normal_xform_r1;
     float4 normal_xform_r2;
     uint mesh_index;
@@ -19,7 +19,7 @@ struct PushConstants
 [[vk::push_constant]]
 PushConstants pc;
 
-void vs_main(uint vert_id: SV_VertexID, out float4 hpos: SV_Position, out float2 uv: TEXCOORD0, out float3 normal: TEXCOORD1, out float4 tangent: TEXCOORD2, out float2 screen_pos: TEXCOORD3, out float3 bitangent: TEXCOORD4)
+void vs_main(uint vert_id: SV_VertexID, out float4 hpos: SV_Position, out float2 uv: TEXCOORD0, out float3 normal: TEXCOORD1, out float4 tangent: TEXCOORD2, out float2 screen_pos: TEXCOORD3)
 {
     MeshParams mesh = mesh_params[pc.mesh_index];
 
@@ -40,16 +40,15 @@ void vs_main(uint vert_id: SV_VertexID, out float4 hpos: SV_Position, out float2
         asfloat(vertex_buffer[mesh.tangents_offset + vert_id * 4 + 2]),
         asfloat(vertex_buffer[mesh.tangents_offset + vert_id * 4 + 3]));
 
-    normal = normalize(float3(
+    // NOTE: normalize is skipped to match with ray tracing interpolation
+    normal = float3(
         dot(pc.normal_xform_r0.xyz, normal),
         dot(pc.normal_xform_r1.xyz, normal),
-        dot(pc.normal_xform_r2.xyz, normal)));
-    tangent.xyz = normalize(float3(
+        dot(pc.normal_xform_r2.xyz, normal));
+    tangent.xyz = float3(
         dot(pc.normal_xform_r0.xyz, tangent.xyz),
         dot(pc.normal_xform_r1.xyz, tangent.xyz),
-        dot(pc.normal_xform_r2.xyz, tangent.xyz)));
-
-    bitangent = normalize(tangent.w * cross(normal, tangent.xyz));
+        dot(pc.normal_xform_r2.xyz, tangent.xyz));
 
     float3 wpos = float3(
         dot(pc.model_xform_r0, float4(pos, 1.0)),
@@ -67,7 +66,6 @@ void ps_main(
     float3 normal: TEXCOORD1,
     float4 tangent: TEXCOORD2,
     noperspective float2 screen_pos: TEXCOORD3,
-    float3 bitangent: TEXCOORD4,
     bool is_front_face: SV_IsFrontFace,
     // Output
     out uint output0: SV_Target0,
@@ -91,11 +89,22 @@ void ps_main(
     metal_rough.g *= HACK_ROUGHNESS_MULTIPLIER;
     #endif
 
+    // mikktspace tangent
+    float3 bitangent = tangent.w * cross(normal, tangent.xyz);
+
     // normal mapping
     float3 normal_ts = normal_map.xyz * 2.0f - 1.0f;
-    float3 normal_ws = normal_ts.x * tangent.xyz + normal_ts.y * bitangent + normal_ts.z * normal;
-    normal_ws *= is_front_face ? 1.0f : -1.0f;
-    normal_ws = normalize(normal_ws);
+    float3 normal_ws = normalize(normal_ts.x * tangent.xyz + normal_ts.y * bitangent + normal_ts.z * normal);
+
+    // flip normal if not drawing with the expected winding order (we are rendering both face, to match ray tracing)
+    #if 1
+    bool flip_normal = (pc.normal_xform_r0.w > 0.0) ^ is_front_face;
+    if (flip_normal) {
+        normal_ws *= -1.0;
+    }
+    #else
+    normal_ws *= select(is_front_face, pc.normal_xform_r0.w, -pc.normal_xform_r0.w);
+    #endif
 
     // denoiser guide
     float fwidth_z = fwidth(hpos.z);

@@ -91,6 +91,7 @@ where
 #[derive(Archive, Deserialize, Serialize, Debug)]
 pub struct GeometryGroupInstance {
     pub geometry_group_index: u32,
+    // TODO just store glam::Affine3A
     #[with(ArchiveMat4)]
     pub transform: Mat4,
 }
@@ -636,6 +637,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
 
             Some(MaterialMap { image_index })
         } else {
+            println!("Material base color texture is empty.");
             None
         };
 
@@ -656,6 +658,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
 
                 Some(MaterialMap { image_index })
             } else {
+                println!("Material metal rough texture is empty.");
                 None
             };
 
@@ -672,7 +675,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
             );
 
             if normal.scale() != 1.0f32 {
-                println!(
+                warning!(
                     "\t normal texture required scale {}, is ignored.",
                     normal.scale()
                 );
@@ -682,6 +685,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
 
             Some(MaterialMap { image_index })
         } else {
+            println!("Material normal texture is empty.");
             None
         };
 

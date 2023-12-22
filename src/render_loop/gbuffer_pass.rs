@@ -100,8 +100,15 @@ pub fn add_gbuffer_pass<'a, 'render>(
             cb.bind_pipeline(vk::PipelineBindPoint::GRAPHICS, pipeline.handle);
             for instance in &scene.instances {
                 // Fetch geometry group instance
-                let model_xform_rows = instance.transform.transpose().to_cols_array();
-                let normal_xform_rows = instance.normal_transform.transpose().to_cols_array();
+                let model_xform_rows = instance.transform_rows();
+                let mut normal_xform_rows_packed = [0f32; 12];
+                {
+                    let rows = instance.normal_transform.transpose().to_cols_array_2d();
+                    normal_xform_rows_packed[0..3].copy_from_slice(&rows[0]);
+                    normal_xform_rows_packed[3] = 1.0f32.copysign(instance.transform_det);
+                    normal_xform_rows_packed[4..7].copy_from_slice(&rows[1]);
+                    normal_xform_rows_packed[8..11].copy_from_slice(&rows[2]);
+                }
                 let geometry_group =
                     &scene.geometry_group_params[instance.geometry_group_index as usize];
                 // Draw the meshes in the group, with instanced transform
@@ -112,8 +119,8 @@ pub fn add_gbuffer_pass<'a, 'render>(
                     // PushConstant for everything per-draw
                     let mesh_index = mesh_index as u32;
                     let constants = PushConstantsBuilder::new()
-                        .push_slice(&model_xform_rows[0..12])
-                        .push_slice(&normal_xform_rows[0..12])
+                        .push_slice(&model_xform_rows)
+                        .push_slice(&normal_xform_rows_packed)
                         .push(&mesh_index)
                         .push(&mesh.material_index);
                     cb.push_constants(
