@@ -126,6 +126,12 @@ pub enum Message {
     },
 }
 
+macro_rules! msg_debug_log {
+    ($($arg:tt)*) => {{
+        //println!($($arg)*)
+    }};
+}
+
 #[allow(non_snake_case)]
 struct MessageHandler {
     // Copied this from Window, for validation porpose
@@ -172,6 +178,7 @@ impl MessageHandler {
             self.mouse_pos = (pos.x as i16, pos.y as i16);
             self.pending_set_cursor_pos = None;
         }
+        msg_debug_log!("Msg: new frame");
     }
 
     pub fn pushed(&self, c: char) -> bool {
@@ -237,6 +244,7 @@ unsafe extern "system" fn wnd_callback(
                 left: true,
                 pressed: true,
             });
+            msg_debug_log!("mouse left-button down at {} {}", x, y);
         }
         WM_LBUTTONUP => {
             ReleaseCapture();
@@ -247,6 +255,7 @@ unsafe extern "system" fn wnd_callback(
                 left: true,
                 pressed: false,
             });
+            msg_debug_log!("mouse left-button up at {} {}", x, y)
         }
         WM_RBUTTONDOWN => {
             SetCapture(hwnd);
@@ -254,13 +263,14 @@ unsafe extern "system" fn wnd_callback(
             handler.msg_stream.push(Message::MouseButton {
                 x,
                 y,
-                left: true,
+                left: false,
                 pressed: true,
             });
             {
                 handler.mouse_pos = (x, y);
                 handler.mouse_right_button = true;
             }
+            msg_debug_log!("mouse right-button down at {} {}", x, y)
         }
         WM_RBUTTONUP => {
             ReleaseCapture();
@@ -283,7 +293,7 @@ unsafe extern "system" fn wnd_callback(
                 handler.mouse_pos = (x, y);
                 handler.mouse_right_button = false;
             }
-            //println!("Win32 message: right button up");
+            msg_debug_log!("mouse right-button up at {} {}", x, y)
         }
         WM_MOUSEMOVE => {
             let rb_down = (w_param as u32) == MK_RBUTTON;
@@ -331,12 +341,7 @@ unsafe extern "system" fn wnd_callback(
                 handler.mouse_pos = (x, y);
                 handler.mouse_right_button = rb_down;
             }
-            /*
-            println!(
-                "Win32 message: mouse move x {}, y {}, right button down {}",
-                x, y, rb_down
-            );
-            */
+            msg_debug_log!("mouse move x {}, y {}, right button down {}", x, y, rb_down);
         }
         WM_KEYDOWN => {
             let vk_code = w_param as u16;

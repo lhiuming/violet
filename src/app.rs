@@ -204,6 +204,7 @@ where
     let mut sun_dir_phi = 0.524f32;
 
     // Init time
+    let init_time = time::Instant::now();
     let mut prev_time = time::Instant::now();
     let mut frame_durations = VecDeque::<time::Duration>::new();
     let avg_delta_time_ms = |durations: &VecDeque<time::Duration>| {
@@ -372,7 +373,8 @@ where
         let imgui_output = if show_gui {
             puffin::profile_scope!("ImGUI");
 
-            Some(imgui.run(window_size, &window, |ctx| {
+            let ui_time = (time::Instant::now() - init_time).as_secs_f64();
+            Some(imgui.run(window_size, &window, Some(ui_time), |ctx| {
                 // Render Loop
                 imgui::Window::new("Render Loop")
                     .default_open(false)

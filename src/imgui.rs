@@ -58,7 +58,12 @@ impl ImGUI {
     }
 
     // Gather input (mouse, touches, keyboard, screen size, etc):
-    pub fn gather_input(&self, window_size: UVec2, window: &window::Window) -> egui::RawInput {
+    pub fn gather_input(
+        &self,
+        window_size: UVec2,
+        window: &window::Window,
+        time: Option<f64>,
+    ) -> egui::RawInput {
         let pixels_per_point = window.pixels_per_point();
         let mut raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect {
@@ -69,6 +74,7 @@ impl ImGUI {
                 },
             }),
             pixels_per_point: Some(pixels_per_point),
+            time,
             ..Default::default()
         };
 
@@ -136,9 +142,10 @@ impl ImGUI {
         &mut self,
         window_size: UVec2,
         window: &window::Window,
+        time_secs: Option<f64>,
         add_ui: impl FnOnce(&egui::Context),
     ) -> ImGUIOuput {
-        self.begin(self.gather_input(window_size, window));
+        self.begin(self.gather_input(window_size, window, time_secs));
         add_ui(&self.egui_ctx);
         self.end()
     }
