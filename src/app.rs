@@ -7,9 +7,8 @@ use std::time;
 use clap::Parser;
 use glam::{Mat4, UVec2, Vec2, Vec3, Vec4};
 
-use crate::imgui;
 use crate::{
-    model,
+    imgui, model,
     render_device::{DeviceConfig, RenderDevice},
     render_loop::{RenderLoop, ViewInfo},
     render_scene::RenderScene,
@@ -123,7 +122,26 @@ impl Camera {
     }
 }
 
+pub struct Config {
+    pub optional_shader_path: Option<String>,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            optional_shader_path: None,
+        }
+    }
+}
+
 pub fn run_with_renderloop<T>()
+where
+    T: RenderLoop,
+{
+    run_with_config::<T>(Config::default());
+}
+
+pub fn run_with_config<T>(config: Config)
 where
     T: RenderLoop,
 {
@@ -157,6 +175,9 @@ where
 
     // Initialize shaders
     let mut shaders = Shaders::new(&rd);
+    if let Some(path) = config.optional_shader_path {
+        shaders.add_path(path);
+    }
 
     // Set up the scene
     let mut render_scene = RenderScene::new(&rd);

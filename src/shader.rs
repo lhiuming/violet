@@ -9,6 +9,13 @@ use spirq::{self};
 
 use crate::render_device::RenderDevice;
 
+use colored::Colorize;
+macro_rules! error{
+    ($fmt:expr $(, $arg:expr )*) => {
+        println!("{}", format!(concat!("Error: ", $fmt) $(, $arg)*).red())
+    };
+}
+
 const LOG_REFLECTION_INFO: bool = false;
 const LOG_DESCRIPTOR_INFO: bool = false;
 
@@ -120,6 +127,10 @@ impl Shaders {
             pipelines: Vec::new(),
             generation: 0,
         }
+    }
+
+    pub fn add_path(&mut self, path: String) {
+        self.shader_loader.add_path(path);
     }
 
     pub fn shader_debug(&self) -> bool {
@@ -484,6 +495,8 @@ struct ShaderLoader {
     _dxc: hassle_rs::Dxc, // delacare this last to drop it after {compiler, library}
 
     shader_debug: bool,
+    search_pathes: Vec<String>,
+    longest_path_len: usize,
 }
 
 impl ShaderLoader {
@@ -491,12 +504,38 @@ impl ShaderLoader {
         let dxc = hassle_rs::Dxc::new(None).unwrap();
         let compiler = dxc.create_compiler().unwrap();
         let library = dxc.create_library().unwrap();
+        let default_path = "./shader/".to_string();
         ShaderLoader {
             compiler,
             library,
             _dxc: dxc,
             shader_debug: false,
+            longest_path_len: default_path.len(),
+            search_pathes: vec![default_path],
         }
+    }
+
+    pub fn add_path(&mut self, path: String) {
+        self.longest_path_len = self.longest_path_len.max(path.len());
+        self.search_pathes.push(path);
+    }
+
+    fn find_shader_file(&self, virtual_path: &str) -> Option<PathBuf> {
+        let len_hint = self.longest_path_len + virtual_path.len();
+        let mut path_buf = PathBuf::with_capacity(len_hint);
+
+        for dir in &self.search_pathes {
+            path_buf.push(dir);
+            path_buf.push(&virtual_path);
+            if path_buf.is_file() && path_buf.exists() {
+                return Some(path_buf);
+            }
+
+            path_buf.clear();
+        }
+
+        error!("Shaders: failed to find shader file: {}", virtual_path);
+        None
     }
 
     // Load shader with retry
@@ -514,6 +553,9 @@ impl ShaderLoader {
                 unsafe {
                     std::intrinsics::breakpoint();
                 }
+
+                #[cfg(not(feature = "core_intrinsics"))]
+                return None;
             } else {
                 return shader;
             }
@@ -525,10 +567,10 @@ impl ShaderLoader {
         device: &PipelineDevice,
         shader_def: &ShaderDefinition,
     ) -> Option<CompiledShader> {
+        // Seach file from pathes
         // todo map v_path to actuall pathes
-        let mut path = PathBuf::new();
-        path.push("./shader/");
-        path.push(&shader_def.virtual_path);
+        let path = self.find_shader_file(shader_def.virtual_path)?;
+
         let display = path.display();
 
         // Read file content
