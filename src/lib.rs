@@ -3,6 +3,10 @@
 //   - std::intrinsics::breakpoint
 #![cfg_attr(feature = "nightly", feature(core_intrinsics))]
 
+// re-export
+pub use ash::vk;
+pub use glam;
+
 pub mod app;
 pub mod command_buffer;
 pub mod gpu_profiling;
