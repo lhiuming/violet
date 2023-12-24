@@ -304,6 +304,17 @@ pub trait PassBuilderTrait<'render>: PrivatePassBuilderTrait<'render> {
         self
     }
 
+    fn texture_as(
+        &mut self,
+        name: &'static str,
+        texture: RGHandle<Texture>,
+        view_desc: TextureViewDesc,
+    ) -> &mut Self {
+        let view = self.rg().create_texture_view(texture, Some(view_desc));
+        self.inner().textures.push((name, view));
+        self
+    }
+
     /// Binding texture to per-pass descriptor set, as a TextureView
     fn texture_view(&mut self, name: &'static str, texture: RGHandle<TextureView>) -> &mut Self {
         self.inner().textures.push((name, texture));
@@ -1594,6 +1605,7 @@ impl RenderGraphBuilder<'_> {
         if depth_attachment.is_some() {
             // TODO maybe set also/only stencil_attachment in some case?
             rendering_info = rendering_info.depth_attachment(depth_attachment.as_ref().unwrap());
+            rendering_info = rendering_info.stencil_attachment(depth_attachment.as_ref().unwrap());
         };
 
         command_buffer.begin_rendering(&rendering_info);
@@ -1774,7 +1786,8 @@ impl RenderGraphBuilder<'_> {
                     }
                     if let Some(ds) = &gfx.depth_stencil {
                         let view = self.get_texture_view(ctx, ds.view);
-                        if (view.texture.image == image) && (view.desc.aspect == aspect) {
+                        // NOTE: if any depth of stencil is touched, we transition both at the same time, for simplicity
+                        if (view.texture.image == image) && view.desc.aspect.intersects(aspect) {
                             // TODO RenderPass Load ops?
                             let mut access = vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE;
                             // TODO READ only with depth/stencil test is enabled
@@ -1789,7 +1802,8 @@ impl RenderGraphBuilder<'_> {
                 }
                 for rw in &pass.rw_textures {
                     let rw_view = self.get_texture_view(ctx, rw.1);
-                    if (rw_view.texture.image == image) && (rw_view.desc.aspect == aspect) {
+                    if (rw_view.texture.image == image) && (rw_view.desc.aspect.intersects(aspect))
+                    {
                         // TODO render pass can specify write-only
                         let access = vk::AccessFlags::SHADER_WRITE | vk::AccessFlags::SHADER_READ;
                         return Some((pass_index, access, vk::ImageLayout::GENERAL));
@@ -1798,7 +1812,9 @@ impl RenderGraphBuilder<'_> {
                 // Check all sampling view
                 for tex_view in &pass.textures {
                     let tex_view = self.get_texture_view(ctx, tex_view.1);
-                    if (tex_view.texture.image == image) && (tex_view.desc.aspect == aspect) {
+                    if (tex_view.texture.image == image)
+                        && (tex_view.desc.aspect.intersects(aspect))
+                    {
                         return Some((
                             pass_index,
                             vk::AccessFlags::SHADER_READ,
@@ -1817,7 +1833,7 @@ impl RenderGraphBuilder<'_> {
                              dst_access_mask: vk::AccessFlags,
                              new_layout: vk::ImageLayout| {
             if let Some((last_pass_index, src_access_mask, last_layout)) =
-                get_last_access(image, vk::ImageAspectFlags::COLOR, pass_index)
+                get_last_access(image, range.aspect_mask, pass_index)
             {
                 command_buffer.transition_image_layout(
                     image,

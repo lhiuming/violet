@@ -108,6 +108,7 @@ pub struct Shaders {
             ShaderDefinition,
             Vec<ShaderDefinition>,
             Option<ShaderDefinition>,
+            RayTracingDesc,
         ),
         Handle<Pipeline>,
     >,
@@ -212,7 +213,7 @@ impl Shaders {
     ) -> Option<Handle<Pipeline>> {
         assert!(miss_def.len() > 0);
 
-        let key = (ray_gen_def, miss_def.to_vec(), hit_def);
+        let key = (ray_gen_def, miss_def.to_vec(), hit_def, *desc);
 
         if !self.raytracing_pipelines_map.contains_key(&key) {
             let raygen_cs = self
@@ -447,6 +448,7 @@ impl Default for GraphicsDesc {
     }
 }
 
+#[derive(Hash, Eq, PartialEq, Copy, Clone)]
 pub struct RayTracingDesc {
     pub ray_recursiion_depth: u32,
 }

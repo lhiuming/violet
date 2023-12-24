@@ -27,10 +27,10 @@ impl CommandBuffer {
 }
 
 pub struct StencilOps {
-    fail_op: vk::StencilOp,
-    pass_op: vk::StencilOp,
-    depth_fail_op: vk::StencilOp,
-    compare_op: vk::CompareOp,
+    pub fail_op: vk::StencilOp,
+    pub pass_op: vk::StencilOp,
+    pub depth_fail_op: vk::StencilOp,
+    pub compare_op: vk::CompareOp,
 }
 
 impl StencilOps {
