@@ -99,7 +99,8 @@ pub struct PipelineProgram {
 
 pub struct Shaders {
     pipeline_device: PipelineDevice,
-    gfx_pipelines_map: HashMap<(ShaderDefinition, ShaderDefinition), Handle<Pipeline>>,
+    gfx_pipelines_map:
+        HashMap<(ShaderDefinition, ShaderDefinition, GraphicsDesc), Handle<Pipeline>>,
     compute_pipelines_map: HashMap<ShaderDefinition, Handle<Pipeline>>,
     // TODO trim down this monsterous 'key' type
     raytracing_pipelines_map: HashMap<
@@ -161,7 +162,7 @@ impl Shaders {
         // look from cache
         // If not in cache, create and push into cache
         // TODO currenty need to query twice even if cache can hit (constians_key, get)
-        let key = (vs_def, ps_def);
+        let key = (vs_def, ps_def, *desc);
 
         if !self.gfx_pipelines_map.contains_key(&key) {
             let vs = self.shader_loader.load(&self.pipeline_device, &vs_def)?;
@@ -425,6 +426,7 @@ pub struct ShadersConfig {
     pub set_layout_override: HashMap<u32, vk::DescriptorSetLayout>,
 }
 
+#[derive(Hash, Eq, PartialEq, Copy, Clone)]
 pub struct GraphicsDesc {
     pub color_attachment_count: u8,
     pub color_attachments: [vk::Format; 4],
