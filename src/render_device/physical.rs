@@ -7,6 +7,9 @@ pub struct PhysicalDevice {
     instance: ash::Instance, // keep a copy, for convinience
     pub handle: vk::PhysicalDevice,
     pub properties: vk::PhysicalDeviceProperties,
+    pub properties_vk11: vk::PhysicalDeviceVulkan11Properties,
+    pub properties_vk12: vk::PhysicalDeviceVulkan12Properties,
+    pub properties_vk13: vk::PhysicalDeviceVulkan13Properties,
     pub ray_tracing_pipeline_properties: vk::PhysicalDeviceRayTracingPipelinePropertiesKHR,
     pub accel_struct_properties: vk::PhysicalDeviceAccelerationStructurePropertiesKHR,
     pub memory_properties: vk::PhysicalDeviceMemoryProperties,
@@ -38,11 +41,17 @@ impl PhysicalDevice {
         };
 
         // Get PhysicalDevice extended properties
+        let mut vulkan11_properties = vk::PhysicalDeviceVulkan11Properties::default();
+        let mut vulkan12_properties = vk::PhysicalDeviceVulkan12Properties::default();
+        let mut vulkan13_properties = vk::PhysicalDeviceVulkan13Properties::default();
         let mut ray_tracing_pipeline_properties =
             vk::PhysicalDeviceRayTracingPipelinePropertiesKHR::default();
         let mut accel_struct_properties =
             vk::PhysicalDeviceAccelerationStructurePropertiesKHR::default();
         let mut properties2 = vk::PhysicalDeviceProperties2::builder()
+            .push_next(&mut vulkan11_properties)
+            .push_next(&mut vulkan12_properties)
+            .push_next(&mut vulkan13_properties)
             .push_next(&mut ray_tracing_pipeline_properties)
             .push_next(&mut accel_struct_properties)
             .build();
@@ -51,6 +60,9 @@ impl PhysicalDevice {
 
             // clean up for safety
             properties2.p_next = std::ptr::null_mut();
+            vulkan11_properties.p_next = std::ptr::null_mut();
+            vulkan12_properties.p_next = std::ptr::null_mut();
+            vulkan13_properties.p_next = std::ptr::null_mut();
             ray_tracing_pipeline_properties.p_next = std::ptr::null_mut();
             accel_struct_properties.p_next = std::ptr::null_mut();
         }
@@ -63,6 +75,9 @@ impl PhysicalDevice {
             instance: instance.clone(),
             handle: physical_device_handle,
             properties: properties2.properties,
+            properties_vk11: vulkan11_properties,
+            properties_vk12: vulkan12_properties,
+            properties_vk13: vulkan13_properties,
             ray_tracing_pipeline_properties,
             accel_struct_properties,
             memory_properties,
