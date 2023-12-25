@@ -980,7 +980,7 @@ impl RenderScene {
         }
 
         // Add new texture view to bindless texture array
-        {
+        if self.material_texture_views.len() > global_texture_index_offset as usize {
             let image_infos: Vec<vk::DescriptorImageInfo> = self.material_texture_views
                 [global_texture_index_offset as usize..]
                 .iter()

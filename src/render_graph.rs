@@ -522,9 +522,16 @@ impl<'a, 'render> GraphicsPassBuilder<'a, 'render> {
     pub fn depth_stencil(&mut self, ds: DepthStencilTarget) -> &mut Self {
         let format = self.render_graph.get_texture_desc(ds.tex).format;
 
-        // TODO maybe only one is needed? (sometimes)
-        self.gfx().desc.depth_attachment = Some(format);
-        self.gfx().desc.stencil_attachment = Some(format);
+        self.gfx().desc.depth_attachment = if ds.aspect.contains(vk::ImageAspectFlags::DEPTH) {
+            Some(format)
+        } else {
+            None
+        };
+        self.gfx().desc.stencil_attachment = if ds.aspect.contains(vk::ImageAspectFlags::STENCIL) {
+            Some(format)
+        } else {
+            None
+        };
 
         let view = self.rg().create_texture_view(
             ds.tex,
@@ -1573,11 +1580,13 @@ impl RenderGraphBuilder<'_> {
             })
             .collect();
 
-        let depth_attachment = gfx.depth_stencil.as_ref().map(|target| {
-            let image_view = self.get_texture_view(ctx, target.view).image_view;
+        let mut depth_attachment = None;
+        let mut stencil_attachment = None;
+        if let Some(target) = gfx.depth_stencil.as_ref() {
+            let texture_view = self.get_texture_view(ctx, target.view);
 
             let mut builder = vk::RenderingAttachmentInfoKHR::builder()
-                .image_view(image_view)
+                .image_view(texture_view.image_view)
                 .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                 .store_op(target.store_op);
 
@@ -1591,8 +1600,24 @@ impl RenderGraphBuilder<'_> {
                 DepthLoadOp::DontCare => builder.load_op(vk::AttachmentLoadOp::DONT_CARE),
             };
 
-            builder.build()
-        });
+            let attachment = builder.build();
+
+            if texture_view
+                .desc
+                .aspect
+                .contains(vk::ImageAspectFlags::DEPTH)
+            {
+                depth_attachment = Some(attachment);
+            }
+
+            if texture_view
+                .desc
+                .aspect
+                .contains(vk::ImageAspectFlags::STENCIL)
+            {
+                stencil_attachment = Some(attachment);
+            }
+        }
 
         let mut rendering_info = vk::RenderingInfo::builder()
             .render_area(vk::Rect2D {
@@ -1602,11 +1627,12 @@ impl RenderGraphBuilder<'_> {
             .layer_count(1)
             .view_mask(0)
             .color_attachments(&color_attachments);
-        if depth_attachment.is_some() {
-            // TODO maybe set also/only stencil_attachment in some case?
-            rendering_info = rendering_info.depth_attachment(depth_attachment.as_ref().unwrap());
-            rendering_info = rendering_info.stencil_attachment(depth_attachment.as_ref().unwrap());
+        if let Some(attachment) = depth_attachment.as_ref() {
+            rendering_info = rendering_info.depth_attachment(attachment);
         };
+        if let Some(attachment) = stencil_attachment.as_ref() {
+            rendering_info = rendering_info.stencil_attachment(attachment);
+        }
 
         command_buffer.begin_rendering(&rendering_info);
 
