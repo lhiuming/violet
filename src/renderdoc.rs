@@ -35,8 +35,36 @@ impl RenderDoc {
 
         // Some initialize setup
         rdoc.set_capture_file_path_template("./capture/violet.rdc");
+        let enable_validation_layer = match std::env::var_os("VIOLET_VALIDATION_LAYER") {
+            Some(val) => val != "0",
+            None => false,
+        };
+        if enable_validation_layer {
+            rdoc.set_enable_api_validation(true);
+            rdoc.set_debug_output_mute(false);
+        }
 
         Some(rdoc)
+    }
+
+    /// Default: false
+    pub fn set_enable_api_validation(&self, value: bool) {
+        unsafe {
+            (*self.api).SetCaptureOptionU32.unwrap()(
+                renderdoc_sys::eRENDERDOC_Option_APIValidation,
+                value as u32,
+            );
+        }
+    }
+
+    /// Default: true
+    pub fn set_debug_output_mute(&self, value: bool) {
+        unsafe {
+            (*self.api).SetCaptureOptionU32.unwrap()(
+                renderdoc_sys::eRENDERDOC_Option_DebugOutputMute,
+                value as u32,
+            );
+        }
     }
 
     pub fn set_capture_file_path_template(&self, template: &str) {
