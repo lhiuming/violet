@@ -2,13 +2,13 @@
 Integration of egui.
 */
 
-use egui::{Event, Key, *};
 use glam::UVec2;
+
+// TODO kind of wild :(
+pub use egui::*;
 
 use crate::window;
 use crate::window::Message;
-
-pub use egui::{TopBottomPanel, Ui, Window};
 
 pub struct ImGUI {
     pub egui_ctx: egui::Context,
