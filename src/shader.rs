@@ -553,12 +553,12 @@ impl ShaderLoader {
 
             // Breakpoint to let user fix shader
             if shader.is_none() {
-                #[cfg(feature = "core_intrinsics")]
+                #[cfg(feature = "nightly")]
                 unsafe {
                     std::intrinsics::breakpoint();
                 }
 
-                #[cfg(not(feature = "core_intrinsics"))]
+                #[cfg(not(feature = "nightly"))]
                 return None;
             } else {
                 return shader;
