@@ -152,6 +152,7 @@ struct GraphicsPassData {
     vertex_shader: Option<ShaderDefinition>,
     pixel_shader: Option<ShaderDefinition>,
     desc: GraphicsDesc,
+    viewports: Vec<vk::Viewport>,
     color_targets: Vec<InternalColorTarget>,
     depth_stencil: Option<InternalDepthStencilTarget>,
 }
@@ -444,6 +445,7 @@ impl<'a, 'render> GraphicsPassBuilder<'a, 'render> {
             vertex_shader: None,
             pixel_shader: None,
             desc: GraphicsDesc::default(),
+            viewports: Vec::new(),
             color_targets: Vec::new(),
             depth_stencil: None,
         });
@@ -481,6 +483,15 @@ impl<'a, 'render> GraphicsPassBuilder<'a, 'render> {
             entry_point: entry_point,
             stage: shader::ShaderStage::Frag,
         });
+        self
+    }
+
+    // Optional. Default: use the color target or depth target size, with [0, 1] depth range.
+    pub fn viewports(&mut self, viewports: &[vk::Viewport]) -> &mut Self {
+        // TODO get from physical devices
+        assert!(viewports.len() <= 1);
+        self.gfx().viewports.clear();
+        self.gfx().viewports.extend_from_slice(viewports);
         self
     }
 
@@ -1548,13 +1559,38 @@ impl RenderGraphBuilder<'_> {
     ) {
         let gfx = pass.ty.gfx().unwrap();
 
-        let size = if gfx.color_targets.len() > 0 {
-            self.get_texture_desc_from_view(gfx.color_targets[0].view)
-                .size_2d()
-        } else if let Some(ds) = &gfx.depth_stencil {
-            self.get_texture_desc_from_view(ds.view).size_2d()
+        let viewport_0 = if gfx.viewports.len() > 0 {
+            // NOTE: only supporting one viewport
+            gfx.viewports[0]
         } else {
-            panic!();
+            // Deduce a typical viewport
+            let size = if gfx.color_targets.len() > 0 {
+                self.get_texture_desc_from_view(gfx.color_targets[0].view)
+                    .size_2d()
+            } else if let Some(ds) = &gfx.depth_stencil {
+                self.get_texture_desc_from_view(ds.view).size_2d()
+            } else {
+                panic!("Error[RenderGraph]: Graphics pass has no viewport infomation.");
+            };
+            vk::Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: size.width as f32,
+                height: size.height as f32,
+                min_depth: 0.0,
+                max_depth: 1.0,
+            }
+        };
+
+        let full_rect = vk::Rect2D {
+            offset: vk::Offset2D {
+                x: viewport_0.x as i32,
+                y: viewport_0.y as i32,
+            },
+            extent: vk::Extent2D {
+                width: viewport_0.width as u32,
+                height: viewport_0.height as u32,
+            },
         };
 
         let color_attachments: Vec<_> = gfx
@@ -1620,10 +1656,7 @@ impl RenderGraphBuilder<'_> {
         }
 
         let mut rendering_info = vk::RenderingInfo::builder()
-            .render_area(vk::Rect2D {
-                offset: vk::Offset2D { x: 0, y: 0 },
-                extent: size,
-            })
+            .render_area(full_rect)
             .layer_count(1)
             .view_mask(0)
             .color_attachments(&color_attachments);
@@ -1637,20 +1670,9 @@ impl RenderGraphBuilder<'_> {
         command_buffer.begin_rendering(&rendering_info);
 
         // Extra auto setups
-        // Full viewport
-        command_buffer.set_viewport_0(vk::Viewport {
-            x: 0.0,
-            y: 0.0,
-            width: size.width as f32,
-            height: size.height as f32,
-            min_depth: 0.0,
-            max_depth: 1.0,
-        });
-        // Full scissor
-        command_buffer.set_scissor_0(vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent: size,
-        });
+        command_buffer.set_viewport_0(viewport_0);
+        // NOTE: Full scissor
+        command_buffer.set_scissor_0(full_rect);
     }
 
     fn end_graphics(&mut self, command_buffer: &CommandBuffer) {
