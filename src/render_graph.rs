@@ -15,8 +15,8 @@ use crate::render_device::{
     TextureViewDesc,
 };
 use crate::shader::{
-    self, GraphicsDesc, Handle, Pipeline, PushConstantsBuilder, RayTracingDesc, ShaderDefinition,
-    Shaders, ShadersConfig,
+    self, Blend, BlendDesc, GraphicsDesc, Handle, Pipeline, PushConstantsBuilder, RayTracingDesc,
+    ShaderDefinition, Shaders, ShadersConfig,
 };
 
 pub struct RGHandle<T> {
@@ -564,8 +564,8 @@ impl<'a, 'render> GraphicsPassBuilder<'a, 'render> {
         self
     }
 
-    pub fn blend_enabled(&mut self, enabled: bool) -> &mut Self {
-        self.gfx().desc.blend_enabled = enabled;
+    pub fn blend_enabled(&mut self, desc: BlendDesc) -> &mut Self {
+        self.gfx().desc.blend = Blend::Enable(desc);
         self
     }
 }
@@ -1822,7 +1822,7 @@ impl RenderGraphBuilder<'_> {
                         if (rt_view.texture.image == image) && (rt_view.desc.aspect == aspect) {
                             // TODO RenderPass Load ops?
                             let mut access = vk::AccessFlags::COLOR_ATTACHMENT_WRITE;
-                            if gfx.desc.blend_enabled {
+                            if gfx.desc.blend_enabled() {
                                 access |= vk::AccessFlags::COLOR_ATTACHMENT_READ;
                             }
                             return Some((
@@ -1936,7 +1936,7 @@ impl RenderGraphBuilder<'_> {
         if let Some(gfx) = pass.ty.gfx() {
             for (_rt_index, rt) in gfx.color_targets.iter().enumerate() {
                 let mut dst_access_mask = vk::AccessFlags::COLOR_ATTACHMENT_WRITE;
-                if gfx.desc.blend_enabled {
+                if gfx.desc.blend_enabled() {
                     dst_access_mask |= vk::AccessFlags::COLOR_ATTACHMENT_READ;
                 }
                 transition_view_to(

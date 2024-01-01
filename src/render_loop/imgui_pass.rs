@@ -12,7 +12,7 @@ use crate::{
     },
     render_graph::{ColorLoadOp, ColorTarget, PassBuilderTrait, RGHandle, RenderGraphBuilder},
     render_scene::UploadContext,
-    shader::PushConstantsBuilder,
+    shader::{BlendDesc, PushConstantsBuilder},
 };
 
 use super::StreamLinedFrameResource;
@@ -590,7 +590,7 @@ impl ImGUIPass {
                     load_op,
                     ..Default::default()
                 }])
-                .blend_enabled(true)
+                .blend_enabled(BlendDesc::premultiplied_alpha())
                 .buffer("vertex_buffer", rg_vertex_buffer)
                 .pre_render(move |cb, _pipeline| {
                     // Wait for transfer finished

@@ -245,10 +245,12 @@ impl UploadContext {
 #[repr(C)]
 pub struct MaterialParams {
     pub color_metalrough_index_packed: u32,
-    pub normal_index: u32,
+    pub normal_trans_index_packed: u32,
     pub metallic_factor: f32,
     pub roughness_factor: f32,
     pub base_color_factor: [f32; 4],
+    pub transmission_factor: f32,
+    pub padding: [u32; 3],
 }
 
 impl MaterialParams {
@@ -256,18 +258,24 @@ impl MaterialParams {
         base_color_index: u32,
         metallic_roughness_index: u32,
         normal_index: u32,
+        transmission_index: u32,
         base_color_factor: [f32; 4],
         metallic_factor: f32,
         roughness_factor: f32,
+        transmission_factor: f32,
     ) -> Self {
         let color_metalrough_index_packed =
             base_color_index & 0xFFFF | (metallic_roughness_index & 0xFFFF) << 16;
+        let normal_trans_index_packed =
+            (normal_index & 0xFFFF) | (transmission_index & 0xFFFF) << 16;
         MaterialParams {
             color_metalrough_index_packed,
-            normal_index,
+            normal_trans_index_packed,
             metallic_factor,
             roughness_factor,
             base_color_factor,
+            transmission_factor,
+            padding: [0; 3],
         }
     }
 }
@@ -868,6 +876,7 @@ impl RenderScene {
             let format = match image.format {
                 ImageFormat::R8G8B8A8Unorm => vk::Format::R8G8B8A8_UNORM,
                 ImageFormat::R8G8B8A8Srgb => vk::Format::R8G8B8A8_SRGB,
+                ImageFormat::BC4Unorm => vk::Format::BC4_UNORM_BLOCK,
                 ImageFormat::BC5Unorm => vk::Format::BC5_UNORM_BLOCK,
                 ImageFormat::BC7Unorm => vk::Format::BC7_UNORM_BLOCK,
                 ImageFormat::BC7Srgb => vk::Format::BC7_SRGB_BLOCK,
@@ -923,9 +932,11 @@ impl RenderScene {
                     DEFAULT_TEXTURE_INDEX_WHITE,
                 ),
                 resolve(&material.normal_map, DEFAULT_TEXTURE_INDEX_NORMAL_UP),
+                resolve(&material.transmission_map, DEFAULT_TEXTURE_INDEX_WHITE),
                 material.base_color_factor,
                 material.metallic_factor,
                 material.roughness_factor,
+                material.transmission_factor,
             ));
         }
 

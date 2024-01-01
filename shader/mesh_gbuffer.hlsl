@@ -78,7 +78,7 @@ void ps_main(
     // TODO sampler based on model definition
     float4 base_color = bindless_textures[mat.base_color_index()].Sample(sampler_linear_wrap, uv);
     float4 metal_rough = bindless_textures[mat.metallic_roughness_index()].Sample(sampler_linear_wrap, uv);
-    float4 normal_map = bindless_textures[mat.normal_index].Sample(sampler_linear_wrap, uv);
+    float4 normal_map = bindless_textures[mat.normal_index()].Sample(sampler_linear_wrap, uv);
 
     // Apply scale factors
     base_color *= mat.base_color_factor;

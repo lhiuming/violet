@@ -24,10 +24,14 @@ Buffer<uint> vertex_buffer;
 struct MaterialParams
 {
     uint color_metalrough_index_packed;
-    uint normal_index;
+    uint normal_trans_index_packed;
     float metallic_factor;
     float roughness_factor;
     float4 base_color_factor;
+    float transmission_factor;
+    float padding0;
+    float padding1;
+    float padding2;
 
     uint base_color_index() {
         return color_metalrough_index_packed & 0xFFFF;
@@ -35,6 +39,14 @@ struct MaterialParams
 
     uint metallic_roughness_index() {
         return color_metalrough_index_packed >> 16;
+    }
+
+    uint normal_index() {
+        return normal_trans_index_packed & 0xFFFF;
+    }
+
+    uint transmission_index() {
+        return normal_trans_index_packed >> 16;
     }
 };
 [[vk::binding(2, SCENE_DESCRIPTOR_SET_INDEX)]]

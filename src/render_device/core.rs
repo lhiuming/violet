@@ -144,6 +144,7 @@ impl super::RenderDevice {
         features.core_mut().sampler_anisotropy = vk::TRUE;
         // TODO make this optional?
         features.core_mut().fragment_stores_and_atomics = vk::TRUE;
+        features.core_mut().dual_src_blend = vk::TRUE;
         // dynamic rendering
         features.vulkan13.dynamic_rendering = vk::TRUE;
         // bindless

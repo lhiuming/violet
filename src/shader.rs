@@ -428,12 +428,49 @@ pub struct ShadersConfig {
 }
 
 #[derive(Hash, Eq, PartialEq, Copy, Clone)]
+pub struct BlendDesc {
+    pub src_color_blend_factor: vk::BlendFactor,
+    pub dst_color_blend_factor: vk::BlendFactor,
+    pub color_blend_op: vk::BlendOp,
+    pub src_alpha_blend_factor: vk::BlendFactor,
+    pub dst_alpha_blend_factor: vk::BlendFactor,
+    pub alpha_blend_op: vk::BlendOp,
+}
+
+impl BlendDesc {
+    /// Alpha blending with premultiplied alpha output,
+    /// e.g. to achieve Porter and Duff 'over' operator, typically used in UI.
+    pub fn premultiplied_alpha() -> Self {
+        Self {
+            src_color_blend_factor: vk::BlendFactor::ONE,
+            dst_color_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+            color_blend_op: vk::BlendOp::ADD,
+            src_alpha_blend_factor: vk::BlendFactor::ONE,
+            dst_alpha_blend_factor: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+            alpha_blend_op: vk::BlendOp::ADD,
+        }
+    }
+}
+
+#[derive(Hash, Eq, PartialEq, Copy, Clone)]
+pub enum Blend {
+    Disable,
+    Enable(BlendDesc),
+}
+
+#[derive(Hash, Eq, PartialEq, Copy, Clone)]
 pub struct GraphicsDesc {
     pub color_attachment_count: u8,
     pub color_attachments: [vk::Format; 4],
     pub depth_attachment: Option<vk::Format>,
     pub stencil_attachment: Option<vk::Format>,
-    pub blend_enabled: bool,
+    pub blend: Blend,
+}
+
+impl GraphicsDesc {
+    pub fn blend_enabled(&self) -> bool {
+        return self.blend != Blend::Disable;
+    }
 }
 
 impl Default for GraphicsDesc {
@@ -443,7 +480,7 @@ impl Default for GraphicsDesc {
             color_attachments: [vk::Format::UNDEFINED; 4],
             depth_attachment: None,
             stencil_attachment: None,
-            blend_enabled: false,
+            blend: Blend::Disable,
         }
     }
 }
@@ -1141,17 +1178,17 @@ pub fn create_graphics_pipeline(
     let blend_state_attachments = (0..desc.color_attachment_count)
         .map(|_| {
             let mut attachment = vk::PipelineColorBlendAttachmentState::builder()
-                .blend_enable(desc.blend_enabled)
+                .blend_enable(desc.blend != Blend::Disable)
                 .color_write_mask(vk::ColorComponentFlags::RGBA)
                 .build();
-            if desc.blend_enabled {
+            if let Blend::Enable(blend) = desc.blend {
                 // NOTE: currently the only use case if pre-multiplied alpha (UI)
-                attachment.src_color_blend_factor = vk::BlendFactor::ONE;
-                attachment.dst_color_blend_factor = vk::BlendFactor::ONE_MINUS_SRC_ALPHA;
-                attachment.color_blend_op = vk::BlendOp::ADD;
-                attachment.src_alpha_blend_factor = vk::BlendFactor::ONE;
-                attachment.dst_alpha_blend_factor = vk::BlendFactor::ONE_MINUS_SRC_ALPHA;
-                attachment.alpha_blend_op = vk::BlendOp::ADD;
+                attachment.src_color_blend_factor = blend.src_color_blend_factor;
+                attachment.dst_color_blend_factor = blend.dst_color_blend_factor;
+                attachment.color_blend_op = blend.color_blend_op;
+                attachment.src_alpha_blend_factor = blend.src_alpha_blend_factor;
+                attachment.dst_alpha_blend_factor = blend.dst_alpha_blend_factor;
+                attachment.alpha_blend_op = blend.alpha_blend_op;
             }
             attachment
         })

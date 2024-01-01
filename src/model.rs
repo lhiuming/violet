@@ -1,6 +1,6 @@
 use colored::Colorize;
 use glam::{Mat4, Vec4};
-use intel_tex_2::{bc5, bc7};
+use intel_tex_2::{bc4, bc5, bc7};
 use rkyv::{
     ser::Serializer,
     with::{ArchiveWith, DeserializeWith, SerializeWith},
@@ -114,6 +114,20 @@ pub struct Material {
     pub base_color_factor: [f32; 4],
     pub metallic_factor: f32,
     pub roughness_factor: f32,
+
+    pub transmission_map: Option<MaterialMap>,
+    pub transmission_factor: f32,
+}
+
+impl Material {
+    pub fn maps_mut<'a>(&'a mut self) -> [&'a mut Option<MaterialMap>; 4] {
+        [
+            &mut self.base_color_map,
+            &mut self.metallic_roughness_map,
+            &mut self.normal_map,
+            &mut self.transmission_map,
+        ]
+    }
 }
 
 #[derive(Archive, Deserialize, Serialize)]
@@ -125,6 +139,7 @@ pub struct MaterialMap {
 pub enum ImageFormat {
     R8G8B8A8Unorm,
     R8G8B8A8Srgb,
+    BC4Unorm,
     BC5Unorm,
     BC7Unorm,
     BC7Srgb,
@@ -336,9 +351,10 @@ pub fn import_gltf(path: &Path, config: LoadConfig) -> Result<Model> {
 bitflags::bitflags! {
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 struct ImportedImageUsage: u8 {
-    const BaseColor  = 0b00000001;
-    const Normal     = 0b00000010;
-    const MetalRough = 0b00000100;
+    const BaseColor    = 0b00000001;
+    const Normal       = 0b00000010;
+    const MetalRough   = 0b00000100;
+    const Transmission = 0b00001000;
 }
 }
 
@@ -689,6 +705,31 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
             None
         };
 
+        let (transmission_map, transmission_factor) =
+            if let Some(transmission) = material.transmission() {
+                let transmission_map = if let Some(trans) = transmission.transmission_texture() {
+                    if trans.tex_coord() != 0 {
+                        warning!("GLTF Loader: Only texture cooridate 0 is supported");
+                    }
+
+                    let image_index = trans.texture().source().index() as ImageIndex;
+                    println!(
+                        "Material transmission texture: {}, sampler {}",
+                        image_index,
+                        fmt_sampler(&trans.texture().sampler())
+                    );
+
+                    mark_image_usage(image_index, ImportedImageUsage::Transmission);
+
+                    Some(MaterialMap { image_index })
+                } else {
+                    None
+                };
+                (transmission_map, transmission.transmission_factor())
+            } else {
+                (None, 0.0f32)
+            };
+
         // Log ignored
         if material.emissive_texture().is_some() {
             warning!("GLTF Loader: Emissive textures are not supported yet");
@@ -704,6 +745,8 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
             base_color_factor: pbr_texs.base_color_factor(),
             metallic_factor: pbr_texs.metallic_factor(),
             roughness_factor: pbr_texs.roughness_factor(),
+            transmission_factor,
+            transmission_map,
         });
     }
 
@@ -733,9 +776,9 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
         }
     };
     for mat in &mut model_materials {
-        image_index_remap(&mut mat.base_color_map);
-        image_index_remap(&mut mat.metallic_roughness_map);
-        image_index_remap(&mut mat.normal_map);
+        for map in mat.maps_mut() {
+            image_index_remap(map);
+        }
     }
 
     // Load, Create mipmap, and Compress (used) images
@@ -867,6 +910,14 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
                         .map(|mip| bc5::compress_blocks(&BlockAlignedImage::from(mip).as_surface()))
                         .collect();
                     (mips_data, ImageFormat::BC5Unorm)
+                }
+                ImportedImageUsage::Transmission => {
+                    //NOTE: transmission only has r channel (linear unorm)
+                    let mips_data = raw_mips
+                        .drain(..)
+                        .map(|mip| bc4::compress_blocks(&BlockAlignedImage::from(mip).as_surface()))
+                        .collect();
+                    (mips_data, ImageFormat::BC4Unorm)
                 }
                 _ => (
                     raw_mips
