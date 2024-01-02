@@ -7,10 +7,11 @@ use crate::{
 
 use super::{div_round_up, DivRoundUp};
 
-pub fn clear_buffer<'a>(
+pub fn clear_buffer_uint<'a>(
     rd: &RenderDevice,
     rg: &'a mut RenderGraphBuilder<'_>,
     buffer: RGHandle<Buffer>,
+    value: u32,
     pass_name: &str,
 ) {
     let max_group_count_x = rd.physical.properties.limits.max_compute_work_group_count[0] as u64;
@@ -20,6 +21,7 @@ pub fn clear_buffer<'a>(
             .compute_shader("util/clear_buffer.hlsl")
             .rw_buffer("rw_buffer", buffer)
             .push_constant::<u32>(&(uint_size as u32))
+            .push_constant::<u32>(&value)
             .group_count(div_round_up(uint_size, 128) as u32, 1, 1);
     } else {
         unimplemented!(
@@ -28,6 +30,15 @@ pub fn clear_buffer<'a>(
             max_group_count_x
         );
     }
+}
+
+pub fn clear_buffer<'a>(
+    rd: &RenderDevice,
+    rg: &'a mut RenderGraphBuilder<'_>,
+    buffer: RGHandle<Buffer>,
+    pass_name: &str,
+) {
+    clear_buffer_uint(rd, rg, buffer, 0, pass_name);
 }
 
 pub fn clear_texture<'a>(
