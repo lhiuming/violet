@@ -36,7 +36,7 @@ pub struct QueryPool {
 
 impl QueryPool {
     pub fn new(rd: &RenderDevice) -> Self {
-        let query_count = 512;
+        let query_count = 1024;
         let block_size = (query_count + 63) / 64; // using a 64-bit bitmask
         let query_count = block_size * 64;
 

@@ -106,7 +106,7 @@ impl Default for ColorTarget {
         Self {
             tex: RGHandle::new(usize::MAX),
             layer: 0,
-            load_op: ColorLoadOp::DontCare,
+            load_op: ColorLoadOp::Load,
         }
     }
 }
@@ -136,8 +136,8 @@ impl Default for DepthStencilTarget {
         Self {
             tex: RGHandle::null(),
             aspect: vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL,
-            load_op: DepthLoadOp::DontCare,
-            store_op: vk::AttachmentStoreOp::DONT_CARE,
+            load_op: DepthLoadOp::Load,
+            store_op: vk::AttachmentStoreOp::STORE,
         }
     }
 }

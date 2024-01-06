@@ -71,6 +71,7 @@ pub fn add_gbuffer_pass<'a, 'render>(
                 stencil: 0,
             }),
             store_op: vk::AttachmentStoreOp::STORE,
+            ..Default::default()
         })
         .render(move |cb, pipeline| {
             // set up raster state
