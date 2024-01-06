@@ -219,6 +219,7 @@ where
     // Init Camera
     static CAMERA_INIT_POS: Vec3 = Vec3::new(0.0, -4.0, 2.0);
     let mut camera = Camera::from_pos_angle(CAMERA_INIT_POS, Vec2::ZERO);
+    let move_speed = 20.0f32; // uint per second
 
     // Init sun
     let mut sun_dir_theta = -0.271f32;
@@ -286,8 +287,7 @@ where
             {
                 // Move (by WASD+EQ)
                 let (forward, right, up) = window.nav_dir();
-                let speed = 2.0; // meter per secs
-                let mov = speed * delta_seconds;
+                let mov = move_speed * delta_seconds;
                 camera.pos += (forward * mov) * camera.forward;
                 camera.pos += (right * mov) * camera.right;
                 camera.pos += (-up * mov) * camera.down;
@@ -347,14 +347,16 @@ where
             .transpose();
 
             // Perspective proj
+            let near_z = 0.05f32;
             let width_by_height =
                 (rd.swapchain.extent.width as f32) / (rd.swapchain.extent.height as f32);
-            let proj = perspective_projection(0.05, 102400.0, fov, width_by_height);
+            let proj = perspective_projection(near_z, 102400.0, fov, width_by_height);
 
             view_info = ViewInfo {
                 view_position: camera.pos,
                 view_transform: view,
                 projection: proj,
+                near_z,
                 moved,
             };
         }

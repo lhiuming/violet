@@ -361,6 +361,7 @@ pub struct RenderScene {
     // Stuff to be rendered
     pub material_parmas: Vec<MaterialParams>,
     pub mesh_params: Vec<MeshParams>,
+    pub mesh_bounds: Vec<(Vec3, Vec3)>,
     pub geometry_group_params: Vec<GeometryGroupParams>,
     pub instances: Vec<Instance>,
 
@@ -611,6 +612,7 @@ impl RenderScene {
             material_texture_views: Vec::new(),
             material_parmas: Vec::new(),
             mesh_params: Vec::new(),
+            mesh_bounds: Vec::new(),
             geometry_group_params: Vec::new(),
             instances: Vec::new(),
             material_param_buffer,
@@ -1146,6 +1148,10 @@ impl RenderScene {
                     material_index: global_material_index_offset + *material_index as u32,
                     pad: 0,
                 });
+                self.mesh_bounds.push((
+                    Vec3::from_array(mesh.bounds.0),
+                    Vec3::from_array(mesh.bounds.1),
+                ));
 
                 if !rd.support_raytracing {
                     continue;

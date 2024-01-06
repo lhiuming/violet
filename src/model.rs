@@ -104,6 +104,7 @@ pub struct TriangleMesh {
     pub normals: Option<Vec<[f32; 3]>>,
     pub texcoords: Option<Vec<[f32; 2]>>,
     pub tangents: Option<Vec<[f32; 4]>>,
+    pub bounds: ([f32; 3], [f32; 3]),
 }
 
 #[derive(Archive, Deserialize, Serialize)]
@@ -541,6 +542,9 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
                     warning!("Mesh primitive has vertex colors. Ignored.")
                 }
 
+                // get local bouding box
+                let bounds = primitive.bounding_box();
+
                 let material_index = primitive.material().index().unwrap() as u32;
                 materialed_geometries.push((
                     material_index,
@@ -550,6 +554,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
                         texcoords: model_texcoords,
                         normals: model_normals,
                         tangents: model_tangents,
+                        bounds: (bounds.min, bounds.max),
                     },
                 ));
             }

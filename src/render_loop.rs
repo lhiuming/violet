@@ -48,6 +48,7 @@ pub struct ViewInfo {
     pub view_position: Vec3,
     pub view_transform: Mat4,
     pub projection: Mat4,
+    pub near_z: f32,
     pub moved: bool,
 }
 
