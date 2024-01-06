@@ -172,6 +172,7 @@ pub struct PhysicalDeviceFeatures {
     // components
     pub vulkan12: vk::PhysicalDeviceVulkan12Features,
     pub vulkan13: vk::PhysicalDeviceVulkan13Features,
+    pub fragment_shader_interlock: vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT,
     pub ray_tracing_pipeline: vk::PhysicalDeviceRayTracingPipelineFeaturesKHR,
     pub acceleration_structure: vk::PhysicalDeviceAccelerationStructureFeaturesKHR,
     pub ray_query: vk::PhysicalDeviceRayQueryFeaturesKHR,
@@ -183,6 +184,8 @@ impl Default for PhysicalDeviceFeatures {
             features2: vk::PhysicalDeviceFeatures2::default(),
             vulkan12: vk::PhysicalDeviceVulkan12Features::default(),
             vulkan13: vk::PhysicalDeviceVulkan13Features::default(),
+            fragment_shader_interlock:
+                vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT::default(),
             ray_tracing_pipeline: vk::PhysicalDeviceRayTracingPipelineFeaturesKHR::default(),
             acceleration_structure: vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default(),
             ray_query: vk::PhysicalDeviceRayQueryFeaturesKHR::default(),
@@ -208,6 +211,7 @@ impl PhysicalDeviceFeatures {
             .features(features)
             .push_next(&mut self.vulkan12)
             .push_next(&mut self.vulkan13)
+            .push_next(&mut self.fragment_shader_interlock)
             .push_next(&mut self.ray_tracing_pipeline)
             .push_next(&mut self.acceleration_structure)
             .push_next(&mut self.ray_query)
@@ -221,6 +225,7 @@ impl PhysicalDeviceFeatures {
         self.features2.p_next = std::ptr::null_mut();
         self.vulkan12.p_next = std::ptr::null_mut();
         self.vulkan13.p_next = std::ptr::null_mut();
+        self.fragment_shader_interlock.p_next = std::ptr::null_mut();
         self.ray_tracing_pipeline.p_next = std::ptr::null_mut();
         self.acceleration_structure.p_next = std::ptr::null_mut();
         self.ray_query.p_next = std::ptr::null_mut();

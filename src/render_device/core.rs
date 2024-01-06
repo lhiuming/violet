@@ -44,6 +44,7 @@ pub struct RenderDevice {
     pub khr_accel_struct: Option<khr::AccelerationStructure>,
 
     // Feature flags
+    pub support_fragment_shader_interlock: bool,
     pub support_raytracing: bool,
 
     // Convinient resources
@@ -139,6 +140,10 @@ impl super::RenderDevice {
             supported_extentions.contains(unsafe { CStr::from_ptr(*name as *mut c_char) })
         }) && raytracing::check_features(&supported_features);
 
+        // Check fragment shader interlock (ROV) supports
+        let support_fragment_shader_interlock =
+            supported_extentions.contains(vk::ExtFragmentShaderInterlockFn::name());
+
         // Eanble required features
         let mut features = PhysicalDeviceFeatures::default();
         features.core_mut().sampler_anisotropy = vk::TRUE;
@@ -157,6 +162,11 @@ impl super::RenderDevice {
         features.vulkan12.host_query_reset = vk::TRUE;
         if support_raytracing {
             raytracing::enable_features(&mut features);
+        }
+        if support_fragment_shader_interlock {
+            features
+                .fragment_shader_interlock
+                .fragment_shader_pixel_interlock = vk::TRUE;
         }
 
         // Enumerate and pick queue families to create with the device
@@ -201,6 +211,9 @@ impl super::RenderDevice {
             let mut enabled_extension_names = vec![khr::Swapchain::name().as_ptr()];
             if support_raytracing {
                 enabled_extension_names.extend_from_slice(&raytracing::DEVICE_EXTENSIONS);
+            }
+            if support_fragment_shader_interlock {
+                enabled_extension_names.push(vk::ExtFragmentShaderInterlockFn::name().as_ptr());
             }
 
             // Finally, create the device
@@ -270,6 +283,7 @@ impl super::RenderDevice {
             khr_ray_tracing_pipeline,
             khr_accel_struct,
 
+            support_fragment_shader_interlock,
             support_raytracing,
 
             gfx_queue_family_index,
