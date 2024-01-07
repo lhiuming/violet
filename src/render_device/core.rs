@@ -141,8 +141,12 @@ impl super::RenderDevice {
         }) && raytracing::check_features(&supported_features);
 
         // Check fragment shader interlock (ROV) supports
-        let support_fragment_shader_interlock =
-            supported_extentions.contains(vk::ExtFragmentShaderInterlockFn::name());
+        let support_fragment_shader_interlock = supported_extentions
+            .contains(vk::ExtFragmentShaderInterlockFn::name())
+            && supported_features
+                .fragment_shader_interlock
+                .fragment_shader_pixel_interlock
+                == vk::TRUE;
 
         // Eanble required features
         let mut features = PhysicalDeviceFeatures::default();
