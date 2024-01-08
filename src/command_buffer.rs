@@ -119,6 +119,13 @@ impl CommandBuffer {
         }
     }
 
+    pub fn dispatch_indirect(&self, buffer: vk::Buffer, offset: u64) {
+        unsafe {
+            self.device
+                .cmd_dispatch_indirect(self.command_buffer, buffer, offset);
+        }
+    }
+
     pub fn trace_rays(
         &self,
         raygen_sbt: &vk::StridedDeviceAddressRegionKHR,

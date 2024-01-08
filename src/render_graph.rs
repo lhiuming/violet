@@ -157,9 +157,14 @@ struct GraphicsPassData {
     depth_stencil: Option<InternalDepthStencilTarget>,
 }
 
+pub enum DispatchArgs {
+    Direct(UVec3),
+    Indirect(RGHandle<Buffer>, u64),
+}
+
 struct ComputePassData {
     shader: Option<ShaderDefinition>,
-    group_count: UVec3,
+    dispatch_args: DispatchArgs,
 }
 
 struct RaytracingPassData {
@@ -219,6 +224,13 @@ impl RenderPassType {
     fn gfx_mut(&mut self) -> Option<&mut GraphicsPassData> {
         match self {
             RenderPassType::Graphics(gfx) => Some(gfx),
+            _ => None,
+        }
+    }
+
+    fn compute(&self) -> Option<&ComputePassData> {
+        match self {
+            RenderPassType::Compute(compute) => Some(compute),
             _ => None,
         }
     }
@@ -576,7 +588,7 @@ impl<'a, 'render> ComputePassBuilder<'a, 'render> {
     pub fn new(render_graph: &'a mut RenderGraphBuilder<'render>, name: &str) -> Self {
         let ty = RenderPassType::Compute(ComputePassData {
             shader: None,
-            group_count: UVec3::new(0, 0, 0),
+            dispatch_args: DispatchArgs::Direct(UVec3::ZERO),
         });
         let pass = RenderPass::new(name, ty);
         Self {
@@ -599,12 +611,22 @@ impl<'a, 'render> ComputePassBuilder<'a, 'render> {
     }
 
     pub fn group_count(&mut self, x: u32, y: u32, z: u32) -> &mut Self {
-        self.compute().group_count = UVec3::new(x, y, z);
+        self.compute().dispatch_args = DispatchArgs::Direct(UVec3::new(x, y, z));
         self
     }
 
     pub fn group_count_uvec2(&mut self, group_count: UVec2) -> &mut Self {
-        self.compute().group_count = group_count.extend(1);
+        self.compute().dispatch_args = DispatchArgs::Direct(group_count.extend(1));
+        self
+    }
+
+    pub fn dispatch_indirect(&mut self, buffer: RGHandle<Buffer>, offset: u64) -> &mut Self {
+        self.compute().dispatch_args = DispatchArgs::Indirect(buffer, offset);
+        self
+    }
+
+    pub fn dispatch_generic(&mut self, dispatch_args: DispatchArgs) -> &mut Self {
+        self.compute().dispatch_args = dispatch_args;
         self
     }
 }
@@ -1809,6 +1831,16 @@ impl RenderGraphBuilder<'_> {
             RenderPassType::Present(_) => vk::PipelineStageFlags::BOTTOM_OF_PIPE,
         };
 
+        // Barriers container
+        // General
+        let mut merged_src_stage_mask = vk::PipelineStageFlags::empty();
+        let mut memory_barriers = Vec::<vk::MemoryBarrier>::new();
+        let mut buffer_barriers = Vec::<vk::BufferMemoryBarrier>::new();
+        let mut image_barriers = Vec::<vk::ImageMemoryBarrier>::new();
+        // Indirect Command Read
+        let mut icr_src_stage_mask = vk::PipelineStageFlags::empty();
+        let mut icr_buffer_barriers = Vec::<vk::BufferMemoryBarrier>::new();
+
         let get_last_access = |image: vk::Image,
                                aspect: vk::ImageAspectFlags,
                                end_pass_index: u32|
@@ -1876,49 +1908,75 @@ impl RenderGraphBuilder<'_> {
 
         let pass = &self.passes[pass_index as usize];
 
-        let transition_to = |image: vk::Image,
-                             range: vk::ImageSubresourceRange,
-                             dst_access_mask: vk::AccessFlags,
-                             new_layout: vk::ImageLayout| {
+        let mut transition_to = |image: vk::Image,
+                                 range: vk::ImageSubresourceRange,
+                                 dst_access_mask: vk::AccessFlags,
+                                 new_layout: vk::ImageLayout| {
             if let Some((last_pass_index, src_access_mask, last_layout)) =
                 get_last_access(image, range.aspect_mask, pass_index)
             {
-                command_buffer.transition_image_layout(
-                    image,
-                    src_access_mask,
-                    dst_access_mask,
-                    map_stage_mask(&self.passes[last_pass_index as usize]),
-                    map_stage_mask(pass),
-                    last_layout,
-                    new_layout,
-                    range,
-                )
+                let write_accese_mask: vk::AccessFlags = vk::AccessFlags::SHADER_WRITE
+                    | vk::AccessFlags::COLOR_ATTACHMENT_WRITE
+                    | vk::AccessFlags::DEPTH_STENCIL_ATTACHMENT_WRITE
+                    | vk::AccessFlags::TRANSFER_WRITE
+                    | vk::AccessFlags::HOST_WRITE
+                    | vk::AccessFlags::MEMORY_WRITE;
+                let src_writes = src_access_mask.intersects(write_accese_mask);
+                let dst_writes = dst_access_mask.intersects(write_accese_mask);
+                let need_barrier = src_writes || dst_writes; // no dependency if both are read only
+                let need_transition = new_layout != last_layout;
+
+                let src_stage_mask = map_stage_mask(&self.passes[last_pass_index as usize]);
+
+                if need_transition {
+                    merged_src_stage_mask |= src_stage_mask;
+                    image_barriers.push(
+                        vk::ImageMemoryBarrier::builder()
+                            .old_layout(last_layout)
+                            .new_layout(new_layout)
+                            .src_access_mask(src_access_mask)
+                            .dst_access_mask(dst_access_mask)
+                            .subresource_range(range)
+                            .image(image)
+                            .build(),
+                    );
+                } else if need_barrier {
+                    merged_src_stage_mask |= src_stage_mask;
+                    memory_barriers.push(
+                        vk::MemoryBarrier::builder()
+                            .src_access_mask(src_access_mask)
+                            .dst_access_mask(dst_access_mask)
+                            .build(),
+                    );
+                }
             } else {
-                // TODO support temporal resource
-                command_buffer.transition_image_layout(
-                    image,
-                    vk::AccessFlags::empty(),
-                    dst_access_mask,
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    map_stage_mask(pass),
-                    vk::ImageLayout::UNDEFINED,
-                    new_layout,
-                    range,
-                )
+                // TODO better handling of temporal resource
+                merged_src_stage_mask |= vk::PipelineStageFlags::TOP_OF_PIPE; // stage mask can't be empty
+                image_barriers.push(
+                    vk::ImageMemoryBarrier::builder()
+                        .old_layout(vk::ImageLayout::UNDEFINED)
+                        .new_layout(new_layout)
+                        .src_access_mask(vk::AccessFlags::empty())
+                        .dst_access_mask(dst_access_mask)
+                        .subresource_range(range)
+                        .image(image)
+                        .build(),
+                );
             };
         };
 
-        let transition_view_to = |handle: RGHandle<TextureView>,
-                                  dst_access_mask: vk::AccessFlags,
-                                  layout: vk::ImageLayout| {
-            let view = self.get_texture_view(ctx, handle);
-            transition_to(
-                view.texture.image,
-                view.desc.make_subresource_range(true),
-                dst_access_mask,
-                layout,
-            );
-        };
+        let mut transition_view_to =
+            |handle: RGHandle<TextureView>,
+             dst_access_mask: vk::AccessFlags,
+             layout: vk::ImageLayout| {
+                let view = self.get_texture_view(ctx, handle);
+                transition_to(
+                    view.texture.image,
+                    view.desc.make_subresource_range(true),
+                    dst_access_mask,
+                    layout,
+                );
+            };
 
         for (_name, handle) in &pass.textures {
             transition_view_to(
@@ -2003,35 +2061,51 @@ impl RenderGraphBuilder<'_> {
                             return Some((pass_index, vk::AccessFlags::SHADER_READ));
                         }
                     }
+
+                    // Check indirect argments
+                    if let Some(comp) = pass.ty.compute() {
+                        if let DispatchArgs::Indirect(buffer, _offset) = comp.dispatch_args {
+                            let buffer = self.get_buffer(ctx, buffer);
+                            if buffer.handle == vk_buffer {
+                                return Some((pass_index, vk::AccessFlags::INDIRECT_COMMAND_READ));
+                            }
+                        }
+                    }
                 }
                 None
             };
 
-        let transition_to = |vk_buffer: vk::Buffer, dst_access_mask: vk::AccessFlags| {
+        let mut transition_to = |vk_buffer: vk::Buffer, dst_access_mask: vk::AccessFlags| {
             if let Some((last_pass_index, src_access_mask)) = get_last_access(vk_buffer, pass_index)
             {
-                if dst_access_mask != src_access_mask {
+                let write_accese_mask: vk::AccessFlags = vk::AccessFlags::SHADER_WRITE
+                    | vk::AccessFlags::TRANSFER_WRITE
+                    | vk::AccessFlags::HOST_WRITE
+                    | vk::AccessFlags::MEMORY_WRITE;
+                let src_writes = src_access_mask.intersects(write_accese_mask);
+                let dst_writes = dst_access_mask.intersects(write_accese_mask);
+                let need_barrier = src_writes || dst_writes; // no dependency if both are read only
+                if need_barrier {
+                    let src_stage_mask = map_stage_mask(&self.passes[last_pass_index as usize]);
                     let barrier = vk::BufferMemoryBarrier::builder()
                         .src_access_mask(src_access_mask)
                         .dst_access_mask(dst_access_mask)
-                        //.src_queue_family_index(0) // ?
-                        //.dst_queue_family_index(0) // ?
                         .buffer(vk_buffer)
                         .offset(0)
-                        .size(vk::WHOLE_SIZE);
+                        .size(vk::WHOLE_SIZE)
+                        .build();
 
-                    command_buffer.pipeline_barrier(
-                        map_stage_mask(&self.passes[last_pass_index as usize]),
-                        map_stage_mask(pass),
-                        vk::DependencyFlags::empty(), // TODO do it properly
-                        &[],
-                        std::slice::from_ref(&barrier),
-                        &[],
-                    );
+                    if dst_access_mask.intersects(vk::AccessFlags::INDIRECT_COMMAND_READ) {
+                        icr_src_stage_mask |= src_stage_mask;
+                        icr_buffer_barriers.push(barrier);
+                    } else {
+                        merged_src_stage_mask |= src_stage_mask;
+                        buffer_barriers.push(barrier);
+                    }
                 }
             } else {
                 // Nothing to sync
-                // TODO support temporal resource
+                // TODO may be need excplicit barrier to temporal resouces, for safety?
             };
         };
 
@@ -2061,6 +2135,40 @@ impl RenderGraphBuilder<'_> {
                 self.get_accel_struct(*handle).buffer.handle,
                 vk::AccessFlags::ACCELERATION_STRUCTURE_READ_KHR,
             );
+        }
+
+        if let Some(comp) = pass.ty.compute() {
+            if let DispatchArgs::Indirect(buffer, _offset) = comp.dispatch_args {
+                transition_to(
+                    self.get_buffer(ctx, buffer).handle,
+                    vk::AccessFlags::INDIRECT_COMMAND_READ,
+                );
+            }
+        }
+
+        // Finally, dispatch the merged barriers
+        // Sync Indirect Command reads
+        if !icr_src_stage_mask.is_empty() {
+            command_buffer.pipeline_barrier(
+                icr_src_stage_mask,
+                vk::PipelineStageFlags::DRAW_INDIRECT,
+                vk::DependencyFlags::empty(), // no used
+                &[],
+                &icr_buffer_barriers,
+                &[],
+            )
+        }
+        // Sync general reads
+        if !merged_src_stage_mask.is_empty() {
+            let dst_stage_mask = map_stage_mask(pass);
+            command_buffer.pipeline_barrier(
+                merged_src_stage_mask,
+                dst_stage_mask,
+                vk::DependencyFlags::empty(), // no used
+                &memory_barriers,
+                &buffer_barriers,
+                &image_barriers,
+            )
         }
     }
 
@@ -2283,9 +2391,13 @@ impl RenderGraphBuilder<'_> {
         }
 
         for pass_index in 0..self.passes.len() {
+            let pass = &mut self.passes[pass_index];
+
+            puffin::profile_scope!("render pass:", &pass.name);
+
             // take the FnOnce callback before unmutable reference
-            let pre_render = self.passes[pass_index].pre_render.take();
-            let render = self.passes[pass_index].render.take();
+            let pre_render = pass.pre_render.take();
+            let render = pass.render.take();
 
             let pass = &self.passes[pass_index];
 
@@ -2379,21 +2491,25 @@ impl RenderGraphBuilder<'_> {
                             "Error[RenderGraph]: render callback is not provided to graphics pass."
                         );
                     }
-                    RenderPassType::Compute(compute) => {
-                        let group_count = &compute.group_count;
+                    RenderPassType::Compute(compute) => match compute.dispatch_args {
+                        DispatchArgs::Direct(group_count) => {
+                            let max_group_count = UVec3::from_array(
+                                rd.physical.properties.limits.max_compute_work_group_count,
+                            );
+                            if (group_count.x > max_group_count.x)
+                                || (group_count.y > max_group_count.y)
+                                || (group_count.z > max_group_count.z)
+                            {
+                                print!("Error[RenderGraph]: compute group count exceed hardware limit {} > {}", group_count, max_group_count);
+                            }
 
-                        let max_group_count = UVec3::from_array(
-                            rd.physical.properties.limits.max_compute_work_group_count,
-                        );
-                        if (group_count.x > max_group_count.x)
-                            || (group_count.y > max_group_count.y)
-                            || (group_count.z > max_group_count.z)
-                        {
-                            print!("Error[RenderGraph]: compute group count exceed hardware limit {} > {}", group_count, max_group_count);
+                            command_buffer.dispatch(group_count.x, group_count.y, group_count.z);
                         }
-
-                        command_buffer.dispatch(group_count.x, group_count.y, group_count.z);
-                    }
+                        DispatchArgs::Indirect(arg_buffer, offset) => {
+                            let arg_buffer = self.get_buffer(&exec_context, arg_buffer);
+                            command_buffer.dispatch_indirect(arg_buffer.handle, offset);
+                        }
+                    },
                     RenderPassType::RayTracing(rt) => {
                         let has_hit = rt.chit_shader.is_some();
                         let sbt = exec_context.shader_binding_tables[pass_index]
