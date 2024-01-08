@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::CString;
 use std::hash::Hash;
 use std::marker::{Copy, PhantomData};
@@ -97,6 +97,7 @@ pub enum ColorLoadOp {
 #[derive(Clone, Copy)]
 pub struct ColorTarget {
     pub tex: RGHandle<Texture>,
+    pub format: Option<vk::Format>,
     pub layer: u32,
     pub load_op: ColorLoadOp,
 }
@@ -105,6 +106,7 @@ impl Default for ColorTarget {
     fn default() -> Self {
         Self {
             tex: RGHandle::new(usize::MAX),
+            format: None,
             layer: 0,
             load_op: ColorLoadOp::Load,
         }
@@ -516,7 +518,11 @@ impl<'a, 'render> GraphicsPassBuilder<'a, 'render> {
         self.gfx().color_targets.clear();
 
         for i in 0..rts.len() {
-            let format = self.render_graph.get_texture_desc(rts[i].tex).format;
+            let format = if let Some(format) = rts[i].format {
+                format
+            } else {
+                self.render_graph.get_texture_desc(rts[i].tex).format
+            };
             self.gfx().desc.color_attachments[i] = format;
 
             let view = self.render_graph.create_texture_view(
@@ -916,7 +922,9 @@ pub struct RenderGraphCache {
     vk_descriptor_pool: vk::DescriptorPool,
 
     // buffered VK objects
-    free_vk_descriptor_sets: Vec<vk::DescriptorSet>,
+    free_vk_descriptor_sets: VecDeque<vk::DescriptorSet>,
+    free_vk_descriptor_sets_batches: VecDeque<(u32, vk::Event)>, // count, usage-completed event
+    free_vk_descriptor_sets_for_next_batch: u32,
 
     // Temporal Resources
     temporal_textures: HashMap<usize, Texture>,
@@ -929,6 +937,9 @@ pub struct RenderGraphCache {
     buffer_pool: ResPool<BufferDesc, Buffer>,
     buffer_view_pool: ResPool<(Buffer, BufferViewDesc), BufferView>,
     sbt_pool: ResPool<u32, PassShaderBindingTable>,
+
+    // internal resource
+    free_events: Vec<vk::Event>,
 
     // Accumulated pass profilng info
     // TODO should just pass in
@@ -947,7 +958,9 @@ impl RenderGraphCache {
         );
         Self {
             vk_descriptor_pool,
-            free_vk_descriptor_sets: Vec::new(),
+            free_vk_descriptor_sets: VecDeque::new(),
+            free_vk_descriptor_sets_batches: VecDeque::new(),
+            free_vk_descriptor_sets_for_next_batch: 0,
             temporal_textures: HashMap::new(),
             temporal_buffers: HashMap::new(),
             next_temporal_id: 0,
@@ -956,6 +969,7 @@ impl RenderGraphCache {
             buffer_pool: ResPool::new(),
             buffer_view_pool: ResPool::new(),
             sbt_pool: ResPool::new(),
+            free_events: Vec::new(),
             pass_profiling: NamedProfiling::new(rd),
         }
     }
@@ -979,20 +993,107 @@ impl RenderGraphCache {
         }
     }
 
-    fn release_descriptor_set(&mut self, rd: &RenderDevice, descriptor_set: vk::DescriptorSet) {
-        self.free_vk_descriptor_sets.push(descriptor_set);
+    fn release_descriptor_set(&mut self, descriptor_set: vk::DescriptorSet) {
+        self.free_vk_descriptor_sets.push_back(descriptor_set);
+        self.free_vk_descriptor_sets_for_next_batch += 1;
+    }
 
-        // TODO free after command buffer is done (fence)
-        let buffer_limit = (RG_MAX_SET / 2) as usize;
-        let release_heuristic = buffer_limit / 2;
-        if self.free_vk_descriptor_sets.len() > buffer_limit {
-            let old_sets = &self.free_vk_descriptor_sets[0..release_heuristic];
+    fn pop_free_event(&mut self, rd: &RenderDevice) -> vk::Event {
+        if let Some(event) = self.free_events.pop() {
+            return event;
+        } else {
+            let create_info = vk::EventCreateInfo::builder().flags(vk::EventCreateFlags::empty());
             unsafe {
-                rd.device
-                    .free_descriptor_sets(self.vk_descriptor_pool, &old_sets)
-                    .expect("Failed to free descriptor set");
+                let event = rd
+                    .device
+                    .create_event(&create_info, None)
+                    .expect("Failed to create event");
+                return event;
             }
-            self.free_vk_descriptor_sets.drain(0..release_heuristic);
+        }
+    }
+
+    fn push_free_event(&mut self, event: vk::Event) {
+        self.free_events.push(event);
+    }
+
+    fn end_of_execution_hint(&mut self, rd: &RenderDevice, command_buffer: vk::CommandBuffer) {
+        // Validation layer complains if we only wait for the event; maybe need to use a fence to make it happy; currently just workaround by adding extra delay (2 frames)
+        const FORCE_LATENCY: usize = 2;
+
+        // Try to free descriptor sets that is completely not used
+        // TODO: move to begin of execution
+        // TODO: trying to pop just one oldest batch should be enough
+        let mut completed_count = 0;
+        while self.free_vk_descriptor_sets_batches.len() > FORCE_LATENCY {
+            let batch = self.free_vk_descriptor_sets_batches.front().unwrap();
+
+            // check status
+            let completion_event = batch.1;
+            let res = unsafe { rd.device.get_event_status(completion_event) };
+            let signaled = match res {
+                Ok(signaled) => signaled,
+                Err(err) => {
+                    println!("Error[RenderGraph]: Error in get_event_status: {:?}", err);
+                    false
+                }
+            };
+
+            if signaled {
+                // add to free list
+                completed_count += batch.0;
+                // recycle event
+                unsafe { rd.device.reset_event(completion_event) }.unwrap();
+                self.push_free_event(completion_event);
+                // remove from pending queue
+                self.free_vk_descriptor_sets_batches.pop_front();
+            } else {
+                break;
+            }
+        }
+        if completed_count > 0 {
+            // NOTE: VecDeque is a ringe buffer
+            let free_slices = self.free_vk_descriptor_sets.as_slices();
+            let completed_count = completed_count as usize;
+            assert!(completed_count <= free_slices.0.len() + free_slices.1.len());
+            // Free the first slice
+            unsafe {
+                let sets = &free_slices.0[0..completed_count.min(free_slices.0.len())];
+                rd.device
+                    .free_descriptor_sets(self.vk_descriptor_pool, sets)
+            }
+            .expect("Failed to free descriptor set");
+            // Some events may be in the second slice
+            if free_slices.0.len() < completed_count {
+                let sets = &free_slices.1[0..(completed_count - free_slices.0.len())];
+                unsafe {
+                    rd.device
+                        .free_descriptor_sets(self.vk_descriptor_pool, sets)
+                }
+                .expect("Failed to free descriptor set");
+            }
+            self.free_vk_descriptor_sets.drain(0..completed_count);
+        }
+
+        // Create a new pending batch
+        let new_count = self.free_vk_descriptor_sets_for_next_batch;
+        if new_count > 0 {
+            // Inset event
+            let event = self.pop_free_event(rd);
+            unsafe {
+                rd.device.cmd_set_event(
+                    command_buffer,
+                    event,
+                    vk::PipelineStageFlags::ALL_COMMANDS,
+                );
+            }
+
+            // Add to pending queue
+            self.free_vk_descriptor_sets_batches
+                .push_back((new_count, event));
+
+            // reset current counter
+            self.free_vk_descriptor_sets_for_next_batch = 0;
         }
     }
 }
@@ -2099,7 +2200,12 @@ impl RenderGraphBuilder<'_> {
                         icr_src_stage_mask |= src_stage_mask;
                         icr_buffer_barriers.push(barrier);
                     } else {
-                        merged_src_stage_mask |= src_stage_mask;
+                        merged_src_stage_mask |=
+                            if src_access_mask.intersects(vk::AccessFlags::INDIRECT_COMMAND_READ) {
+                                vk::PipelineStageFlags::DRAW_INDIRECT
+                            } else {
+                                src_stage_mask
+                            };
                         buffer_barriers.push(barrier);
                     }
                 }
@@ -2603,8 +2709,7 @@ impl RenderGraphBuilder<'_> {
             .drain(0..exec_context.descriptor_sets.len())
         {
             if set != vk::DescriptorSet::null() {
-                // TODO may be need some frame buffering, because it may be still using?
-                self.cache.release_descriptor_set(rd, set);
+                self.cache.release_descriptor_set(set);
             }
         }
         for sbt in exec_context
@@ -2623,5 +2728,8 @@ impl RenderGraphBuilder<'_> {
         );
 
         command_buffer.insert_label(&CString::new("RenderGraph End").unwrap(), None);
+
+        self.cache
+            .end_of_execution_hint(rd, command_buffer.command_buffer);
     }
 }
