@@ -406,9 +406,11 @@ where
                     });
 
                 // Puffin CPU Profiler
-                imgui::Window::new("Puffin")
-                    .default_open(false)
-                    .show(ctx, puffin_egui::profiler_ui);
+                if args.profiler {
+                    imgui::Window::new("Puffin")
+                        .default_open(false)
+                        .show(ctx, puffin_egui::profiler_ui);
+                }
 
                 // Internal GPU Profiler
                 imgui::Window::new("GPU")
@@ -437,7 +439,7 @@ where
                                 ui.toggle_value(&mut full_stat, "full_stat");
                                 ui.set_enabled(!full_stat);
                                 ui.add(
-                                    egui::Slider::new(&mut stat_filter_ms, 0.05..=0.5)
+                                    egui::Slider::new(&mut stat_filter_ms, 0.01..=0.5)
                                         .text("threshold"),
                                 )
                             });
