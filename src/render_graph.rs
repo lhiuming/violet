@@ -270,7 +270,7 @@ pub struct RenderPass<'render> {
     buffers: Vec<(&'static str, RGHandle<Buffer>)>,
     accel_structs: Vec<(&'static str, RGHandle<AccelerationStructure>)>,
     rw_textures: Vec<(&'static str, RGHandle<TextureView>)>,
-    rw_buffers: Vec<(&'static str, RGHandle<Buffer>)>,
+    rw_buffers: Vec<(&'static str, RGHandle<Buffer>, u64)>,
     rw_texel_buffers: Vec<(&'static str, RGHandle<BufferView>)>,
     push_constants: PushConstantsBuilder,
     set_layout_override: Option<(u32, vk::DescriptorSetLayout)>,
@@ -355,7 +355,17 @@ pub trait PassBuilderTrait<'render>: PrivatePassBuilderTrait<'render> {
     }
 
     fn rw_buffer(&mut self, name: &'static str, buffer: RGHandle<Buffer>) -> &mut Self {
-        self.inner().rw_buffers.push((name, buffer));
+        self.inner().rw_buffers.push((name, buffer, 0));
+        self
+    }
+
+    fn rw_buffer_with_offset(
+        &mut self,
+        name: &'static str,
+        buffer: RGHandle<Buffer>,
+        offset: u64,
+    ) -> &mut Self {
+        self.inner().rw_buffers.push((name, buffer, offset));
         self
     }
 
@@ -1850,11 +1860,11 @@ impl RenderGraphBuilder<'_> {
             }
             for (name, handle) in &pass.buffers {
                 let buffer = self.get_buffer(ctx, *handle);
-                builder.buffer(name, buffer.handle);
+                builder.buffer(name, buffer.handle, 0);
             }
-            for (name, handle) in &pass.rw_buffers {
+            for (name, handle, offset) in &pass.rw_buffers {
                 let buffer = self.get_buffer(ctx, *handle);
-                builder.buffer(name, buffer.handle);
+                builder.buffer(name, buffer.handle, *offset);
             }
             for (name, handle) in &pass.rw_texel_buffers {
                 let buffer_view = self.get_buffer_view(ctx, *handle);
@@ -2142,7 +2152,7 @@ impl RenderGraphBuilder<'_> {
                     let pass = &self.passes[pass_index as usize];
 
                     // Check all mutating
-                    for (_name, handle) in &pass.rw_buffers {
+                    for (_name, handle, _offset) in &pass.rw_buffers {
                         let buffer = self.get_buffer(ctx, *handle);
                         if buffer.handle == vk_buffer {
                             return Some((pass_index, vk::AccessFlags::SHADER_WRITE));
@@ -2222,7 +2232,7 @@ impl RenderGraphBuilder<'_> {
             );
         }
 
-        for (_name, handle) in &pass.rw_buffers {
+        for (_name, handle, _offset) in &pass.rw_buffers {
             transition_to(
                 self.get_buffer(ctx, *handle).handle,
                 vk::AccessFlags::SHADER_WRITE,

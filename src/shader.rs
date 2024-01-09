@@ -1375,12 +1375,12 @@ impl<'a> DescriptorSetWriteBuilder<'a> {
     }
 
     #[inline]
-    pub fn buffer(&mut self, name: &'a str, buffer: vk::Buffer) -> &mut Self {
+    pub fn buffer(&mut self, name: &'a str, buffer: vk::Buffer, offset: u64) -> &mut Self {
         self.buffer_infos.push((
             name,
             vk::DescriptorBufferInfo {
                 buffer,
-                offset: 0,
+                offset,
                 range: vk::WHOLE_SIZE,
             },
         ));
