@@ -219,7 +219,7 @@ where
     // Init Camera
     static CAMERA_INIT_POS: Vec3 = Vec3::new(0.0, -4.0, 2.0);
     let mut camera = Camera::from_pos_angle(CAMERA_INIT_POS, Vec2::ZERO);
-    let move_speed = 20.0f32; // uint per second
+    let mut move_speed = 1.0f32; // uint per second
 
     // Init sun
     let mut sun_dir_theta = -0.271f32;
@@ -487,16 +487,29 @@ where
                         }
                     });
 
+                let mini_frame: egui::Frame = egui::Frame::none()
+                    .inner_margin(egui::Margin::same(4.0))
+                    .rounding(egui::Rounding::from(4.0))
+                    .fill(egui::Color32::from_black_alpha(128));
+
+                // Viewport Controller UI
+                imgui::Window::new("View")
+                    .anchor(egui::Align2::RIGHT_TOP, egui::Vec2::ZERO)
+                    .title_bar(false)
+                    .frame(mini_frame)
+                    .show(ctx, |ui| {
+                        ui.add(
+                            egui::Slider::new(&mut move_speed, 0.001..=1000.0)
+                                .logarithmic(true)
+                                .text("cam. speed (unit/s)"),
+                        );
+                    });
+
                 // Mini Stat Indicators
                 imgui::Window::new("STAT")
                     .anchor(egui::Align2::RIGHT_BOTTOM, egui::Vec2::ZERO)
                     .title_bar(false)
-                    .frame(
-                        egui::Frame::none()
-                            .inner_margin(egui::Margin::same(4.0))
-                            .rounding(egui::Rounding::from(4.0))
-                            .fill(egui::Color32::from_black_alpha(64)),
-                    )
+                    .frame(mini_frame)
                     .show(ctx, |ui| {
                         let avg_ms = avg_delta_time_ms(&frame_durations);
                         ui.colored_label(egui::Color32::WHITE, format!("{:3.1}ms", avg_ms));
