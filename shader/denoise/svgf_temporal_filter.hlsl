@@ -4,10 +4,20 @@
 
 #include "svgf.inc.hlsl"
 
+#define ENABLE_TEMPORAL_FILTER 1
+
+#define DUAL_SOURCE_REPROJECTION_FOR_SPEC 1
+
+// Mirror-like surface has near-zero noise, so we can use a very small history
+// length to avoid ghosting, which presents even with dual-source reprojection
+// due to bilinar sampling.
+#define ADAPTIVE_BLEND_BY_ROUGHNESS 1
+
 Texture2D<float> depth_texture;
 GBUFFER_TEXTURE_TYPE gbuffer_texture;
 Texture2D<float3> diff_source_texture;
 Texture2D<float3> spec_source_texture;
+Texture2D<float> spec_ray_len_texture;
 
 Texture2D<float> prev_depth_texture;
 GBUFFER_TEXTURE_TYPE prev_gbuffer_texture;
@@ -82,6 +92,61 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     }
 
     const float2 buffer_size = pc.buffer_size;
+    const int2 buffer_size_int = int2(buffer_size);
+    const float2 screen_uv = (float2(dispatch_id) + 0.5f) / float2(buffer_size);
+
+    // TODO only load when needed?
+    GBuffer gbuffer = load_gbuffer(gbuffer_texture, dispatch_id);
+
+#if DUAL_SOURCE_REPROJECTION_FOR_SPEC
+    // Neighbourhood Clamping
+    // TODO LDS optimization? 
+    float3 momentum1_spec = 0.0;
+    float3 momentum2_spec = 0.0;
+    for (int x = -1; x <= 1; x++)
+    {
+        for (int y = -1; y <= 1; y++)
+        {
+            int2 pixcoord = dispatch_id + int2(x, y);
+            pixcoord = clamp(pixcoord, 0, buffer_size_int - 1);
+            float3 neighbor_spec = spec_source_texture[pixcoord];
+            momentum1_spec += neighbor_spec;
+            momentum2_spec += neighbor_spec * neighbor_spec;
+        }
+    }
+    momentum1_spec *= 1.0 / 9.0;
+    momentum2_spec *= 1.0 / 9.0;
+#endif
+
+    // Virtual Reproject
+    // TODO skip if:  motion_vector ~= virtual_motion_vector
+#if DUAL_SOURCE_REPROJECTION_FOR_SPEC 
+    float3 virtual_spec_history;
+    {
+	    float4 position_ws_h = mul(view_params().inv_view_proj, float4(screen_uv * 2.0f - 1.0f, depth, 1.0f));
+        float3 position = position_ws_h.xyz / position_ws_h.w;
+
+        float3 view_ray_dir = normalize(position - view_params().view_pos);
+        float ray_len = spec_ray_len_texture[dispatch_id];
+        float3 virtual_position = position + view_ray_dir * ray_len;
+
+        float4 hpos_reproj = mul(frame_params.prev_view_proj, float4(virtual_position, 1));
+        float2 ndc_reproj = hpos_reproj.xy / hpos_reproj.w - frame_params.jitter.zw;
+        float2 virtual_history_uv = (ndc_reproj + frame_params.jitter.xy) * 0.5 + 0.5f;
+
+        // Sample prev-frame data
+        bool valid = all(virtual_history_uv == saturate(virtual_history_uv)) && bool(pc.has_history);
+        if (valid)
+        {
+            virtual_spec_history = spec_history_texture.SampleLevel(sampler_linear_clamp, virtual_history_uv, 0);
+        }
+        else
+        {
+            // disocclusion
+            virtual_spec_history = float3(0.0, 0.0, 0.0);
+        }
+    }
+#endif
 
     // Reproject
     float2 motion_vector;
@@ -118,7 +183,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         int2 pix_coord_base = int2(pix_coord_center); // truncate ~= floor
 
         // NOTE: SVGF code sample uses (linear) depth instead of reprojected (linaer) depth 
-        GeometryTest test = GeometryTest::create(reproj_depth, load_gbuffer(gbuffer_texture, dispatch_id));
+        GeometryTest test = GeometryTest::create(reproj_depth, gbuffer);
 
         // 2x2 bilinear filter with geometry test
         float3 diff_sum = 0.0;
@@ -132,7 +197,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
             for (int y = 0; y < 2; ++y)
             {
                 int2 pix_coord = pix_coord_base + int2(x, y);
-                bool coord_valid = all(pix_coord == clamp(pix_coord, int2(0, 0), int2(buffer_size) - int2(1, 1)));
+                bool coord_valid = all(pix_coord == clamp(pix_coord, int2(0, 0), buffer_size_int - int2(1, 1)));
 
                 // TODO pack depth and normal (low precision, e.g. 16 + 16, should be enough)
                 float3 normal = GBufferNormal::load(prev_gbuffer_texture, pix_coord).normal;
@@ -174,22 +239,56 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         history_len = 0.0f;
     }
     history_len += HISTORY_LEN_UNIT;
-
+    
     float3 diff_source = diff_source_texture[dispatch_id];
     float3 spec_source = spec_source_texture[dispatch_id];
     float2 lumi_source = float2(luminance(diff_source), luminance(spec_source));
     float2 sec_moments_source = lumi_source * lumi_source;
 
     // Blend ("Integrate")
-    const float BLEND_FACTOR = 1.0 / 16.0f;
+    const float BLEND_FACTOR_DIFF = 1.0 / 20.0f;
+#if ADAPTIVE_BLEND_BY_ROUGHNESS
+    const float blurness = sqrt(saturate(gbuffer.perceptual_roughness * 6.0));
+    const float BLEND_FACTOR_SPEC = lerp(7.0/8.0, BLEND_FACTOR_DIFF, blurness);
+#else
+    const float BLEND_FACTOR_SPEC = BLEND_FACTOR_DIFF;
+#endif
     // linearly blend before gathering a long history (1/BLEND_FACTOR)
-    float alpha = max(BLEND_FACTOR, HISTORY_LEN_UNIT / history_len);
-    float3 diff_filtered = lerp(diff_history, diff_source, alpha);
-    float3 spec_filtered = lerp(spec_history, spec_source, alpha);
-    float2 sec_moments_filtered = lerp(sec_moments_history, sec_moments_source, alpha);
+    float2 alpha = max(float2(BLEND_FACTOR_DIFF, BLEND_FACTOR_SPEC), HISTORY_LEN_UNIT / history_len);
+    float3 diff_filtered = lerp(diff_history, diff_source, alpha.x);
+    float3 spec_filtered = lerp(spec_history, spec_source, alpha.y);
+    float2 sec_moments_filtered = lerp(sec_moments_history, sec_moments_source, alpha.xy);
 
+#if DUAL_SOURCE_REPROJECTION_FOR_SPEC
+    // Weighted blend [Stachowiak 2018]
+    {
+        float3 spec_mean = momentum1_spec;
+        float3 spec_dev = max(sqrt(abs(momentum2_spec - spec_mean * spec_mean)), 1e-6);
+
+        float dist_virtual = luminance(abs(virtual_spec_history - spec_mean) / spec_dev);
+        float weight_virtual = max(exp2(-10 * dist_virtual), 1e-6);
+
+        float dist_history = luminance(abs(spec_history - spec_mean) / spec_dev);
+        float weight_history = max(exp2(-10 * dist_history), 1e-6);
+
+        float3 spec_history_dual = 0;
+        spec_history_dual += weight_virtual * virtual_spec_history;
+        spec_history_dual += weight_history * spec_history;
+        float w_sum = weight_virtual + weight_history;
+        spec_history_dual /= w_sum;
+        spec_filtered = lerp(spec_history_dual, spec_source, alpha.y);
+    }
+#endif
+
+#if ENABLE_TEMPORAL_FILTER
     rw_diff_texture[dispatch_id] = diff_filtered;
     rw_spec_texture[dispatch_id] = spec_filtered;
     rw_moments_texture[dispatch_id] = sec_moments_filtered;
     rw_history_len_texture[dispatch_id] = history_len;
+#else
+    rw_diff_texture[dispatch_id] = diff_source;
+    rw_spec_texture[dispatch_id] = spec_source;
+    rw_moments_texture[dispatch_id] = sec_moments_source;
+    rw_history_len_texture[dispatch_id] = HISTORY_LEN_UNIT;
+#endif
 }

@@ -14,6 +14,7 @@ pub struct Input {
     pub prev_gbuffer: RGHandle<Texture>,
     pub diffuse: RGHandle<Texture>, // diffuse component of (indirect) lighting
     pub specular: RGHandle<Texture>, // specular component of (indirect) lighting
+    pub specular_ray_len: RGHandle<Texture>,
 }
 
 pub struct DebugViews {
@@ -111,6 +112,7 @@ impl Denoiser {
             .texture("gbuffer_texture", input.gbuffer)
             .texture("diff_source_texture", input.diffuse)
             .texture("spec_source_texture", input.specular)
+            .texture("spec_ray_len_texture", input.specular_ray_len)
             .texture("prev_depth_texture", input.prev_depth)
             .texture("prev_gbuffer_texture", input.prev_gbuffer)
             .texture("diff_history_texture", history.diffuse)

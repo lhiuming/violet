@@ -13,8 +13,10 @@
 #define INIT_RADIUS_FACTOR 0.05
 #define MIN_RADIUS 1.5
 
+// Tweak spatial reuse count based on roughness
+// mirror-like surface does not benefit from spatial reuse (reuse actually introduce noise in this case).
 #define ADAPTIVE_ITERATION_COUNT 1
-#define MIN_ITERATION min(1, MAX_ITERATION)
+#define ADAPTIVE_ITERATION_MIN min(0, MAX_ITERATION)
 
 #define ADAPTIVE_RADIUS 1
 
@@ -24,6 +26,7 @@ Texture2D<uint2> reservoir_texture;
 Texture2D<float4> hit_pos_texture;
 Texture2D<float3> hit_radiance_texture;
 RWTexture2D<float3> rw_lighting_texture;
+RWTexture2D<float> rw_ray_len_texture;
 
 [[vk::push_constant]]
 struct PushConstants
@@ -185,6 +188,8 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     float3 hit_pos = hit_pos_xyzw.xyz;
     float3 hit_radiance = hit_radiance_texture[dispatch_id.xy];
 
+    float ray_len = length(hit_pos - position_ws);
+
     #if IND_SPEC_ENABLE_SPATIAL_REUSE
 
     // Spatial Resampling //
@@ -193,10 +198,13 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     SpecTragetFunction center_target_function = new_spec_target_function(pixcoord_center, buffer_size, depth, gbuffer);
     float reservoir_target_function = hit_pos_xyzw.w;
 
+    float ray_len_sum = ray_len;
+    float ray_len_weight_sum = 1.0f;
+
     // Adaptive kernel
     #if ADAPTIVE_ITERATION_COUNT
     // spatial resample is less useful for shiny surface (instead introducing noise).
-    const uint num_iteration = uint(lerp(MIN_ITERATION, MAX_ITERATION, gbuffer.perceptual_roughness));
+    const uint num_iteration = uint(lerp(ADAPTIVE_ITERATION_MIN, MAX_ITERATION, gbuffer.perceptual_roughness));
     #else
     const uint num_iteration = MAX_ITERATION;
     #endif
@@ -308,7 +316,19 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         {
             reservoir.W = 0.0;
         }
+
+        // collect ray len for temporal reprojection
+        float l_weight = 1.0 / (num_iteration + 1); // TODO
+        //float l_weight = chance;
+        ray_len_sum += l_weight * length(hit_pos_n - position_ws_n); // or position_ws ?
+        ray_len_weight_sum += l_weight;
     }
+
+    #if 0
+    ray_len = ray_len_sum / ray_len_weight_sum;
+    #elif 1
+    ray_len = length(hit_pos - position_ws);
+    #endif
 
     #endif
 
@@ -424,4 +444,5 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     }
 
     rw_lighting_texture[dispatch_id.xy] = lighting;
+    rw_ray_len_texture[dispatch_id.xy] = ray_len;
 }

@@ -10,6 +10,9 @@
 
 #define IND_SPEC_ENABLE_TEMPORAL_REUSE 1
 
+// Mirror-like surface has near-zero noise, so we can use a smaller reservoir size
+#define ADAPTIVE_HISTORY_CONFIDENCE_BY_ROUGHNESS 1
+
 // Thie is necessary; using only lumi as target function will just add noise (naive VNDF sampling is better for most cases)
 #define IND_SPEC_TARGET_FUNCTION_HAS_BRDF 1
 
@@ -241,16 +244,19 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     GBuffer gbuffer = load_gbuffer(gbuffer_color, dispatch_id);
 
     // Bound the temporal information to avoid stale sample
-    if (1)
+    if (true)
     {
         // const uint M_MAX = 20; // [Benedikt 2020]
         // const uint M_MAX = 30; // [Ouyang 2021]
         // const uint M_MAX = 10; // [h3r2tic 2022]
         const uint M_MAX = 16;
 
-        // Adaptive hisotry confidence
-        // for shiny surface, history is less useful
-        uint M_max = uint(lerp(1, M_MAX, gbuffer.perceptual_roughness));
+#if ADAPTIVE_HISTORY_CONFIDENCE_BY_ROUGHNESS
+        // Drop the history if the surface is mirror-like (not much noise).
+        uint M_max = uint(float(M_MAX) * gbuffer.perceptual_roughness);
+#else
+        uint M_max = M_MAX;
+#endif
         reservoir.M = min(reservoir.M, M_max);
     }
 
@@ -272,7 +278,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     // Resampling with proper MIS weight: balanced heuristic approximated with target function
     // ref: [ReSTIR course 2023]
     #if IND_SPEC_PROPER_RESAMPLING_MIS_WEIGHT 
-    if (sample_prev_frame)
+    if (reservoir.M > 0)
     {
         // MIS weight for curr sample (new sample)
 
@@ -309,10 +315,22 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     uint rng_state = lcg_init(dispatch_id.xy, buffer_size, pc.frame_index);
 
     // update reserviour with the new sample
-    float w_sum = prev_w + new_w;
-    float chance = new_w / w_sum;
-    bool replace_sample = (lcg_rand(rng_state) < chance);
-    if (replace_sample)
+    const float w_sum = prev_w + new_w;
+#if 0
+    const float chance_new = new_w / w_sum;
+    const bool use_new_sample = lcg_rand(rng_state) < chance_new;
+    const bool use_prev_sample = !use_new_sample;
+#else
+    // This path prefer new sample when both prev_w and new_w are 0. 
+    // NOTE: typically equavalent to using `chance = new_w / w_sum`. But when 
+    // reflection hit point is dark (e.g. hit a metal surface, but radiance 
+    // cache is diffuse only), then we may prefer the up-to-date sample,
+    // because it has more useful `hit_pos` value.
+    const float chance_prev = prev_w / w_sum; 
+    const bool use_prev_sample = lcg_rand(rng_state) < chance_prev;
+    const bool use_new_sample = !use_prev_sample;
+#endif
+    if (use_new_sample)
     {
         // replace the sample
         reservoir_hit_pos = new_sample_hit_pos;
@@ -337,7 +355,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     rw_reservoir_texture[dispatch_id] = reservoir_encode_u32(reservoir);
     rw_hit_pos_texture[dispatch_id] = float4(reservoir_hit_pos, reservoir_target_function);
     // only write if necessary (reprojecting history sample instead of just takes the new sample)
-    if (!replace_sample)
+    if (use_prev_sample)
     {
         rw_hit_radiance_texture[dispatch_id] = reservoir_hit_radiance;
     }

@@ -48,6 +48,7 @@ enum DebugView {
     AOFiltered,
     IndDiff,
     IndSpec,
+    IndSpecRayLen,
     DenoiserHistLen,
     DenoiserVariance,
     HashGridCell,
@@ -160,6 +161,7 @@ impl RestirRenderer {
                 item(DebugView::AOFiltered);
                 item(DebugView::IndDiff);
                 item(DebugView::IndSpec);
+                item(DebugView::IndSpecRayLen);
                 item(DebugView::DenoiserHistLen);
                 item(DebugView::DenoiserVariance);
                 item(DebugView::HashGridCell);
@@ -516,9 +518,18 @@ impl RestirRenderer {
                 .replace(rg.convert_to_temporal(spatial_reservoir_buffer));
         }
 
+        let ind_spec_tex_desc = TextureDesc {
+            width: main_size.x,
+            height: main_size.y,
+            format: vk::Format::R32G32B32A32_SFLOAT,
+            usage: TextureUsage::new().storage().sampled().into(),
+            ..Default::default()
+        };
         let mut ind_spec_new_tex = |format: vk::Format| {
-            let usage = vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED;
-            rg.create_texutre(TextureDesc::new_2d(main_size.x, main_size.y, format, usage))
+            rg.create_texutre(TextureDesc {
+                format,
+                ..ind_spec_tex_desc
+            })
         };
 
         let ind_spec_hit_pos = ind_spec_new_tex(vk::Format::R32G32B32A32_SFLOAT);
@@ -630,6 +641,11 @@ impl RestirRenderer {
                 );
         }
 
+        let indirect_specular_ray_len = rg.create_texutre(TextureDesc {
+            format: vk::Format::R16_SFLOAT,
+            ..ind_spec_tex_desc
+        });
+
         // Pass: Indirect Specular Spatial Resampling
         rg.new_compute("Ind. Spec. Spaital Resample")
             .compute_shader("restir/ind_spec_spatial_resample.hlsl")
@@ -639,6 +655,7 @@ impl RestirRenderer {
             .texture("hit_pos_texture", ind_spec_hit_pos)
             .texture("hit_radiance_texture", ind_spec_hit_radiance)
             .rw_texture("rw_lighting_texture", indirect_specular)
+            .rw_texture("rw_ray_len_texture", indirect_specular_ray_len)
             .push_constant::<u32>(&frame_index)
             .group_count(
                 div_round_up(main_size.x, 8),
@@ -658,6 +675,7 @@ impl RestirRenderer {
                 prev_gbuffer: prev_gbuffer_color,
                 diffuse: indirect_diffuse,
                 specular: indirect_specular,
+                specular_ray_len: indirect_specular_ray_len,
             };
             let denoised = self.denoiser.add_passes(rg, default_res, input);
 
@@ -836,6 +854,7 @@ impl RestirRenderer {
                 DebugView::AOFiltered => filtered_ao_texture,
                 DebugView::IndDiff => denoised_indirect_diffuse,
                 DebugView::IndSpec => denoised_indirect_specular,
+                DebugView::IndSpecRayLen => indirect_specular_ray_len,
                 DebugView::DenoiserHistLen => denoiser_dbv.history_len,
                 DebugView::DenoiserVariance => denoiser_dbv.variance,
                 DebugView::HashGridCell => hash_grid_vis,
