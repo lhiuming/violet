@@ -3,13 +3,13 @@ use std::io::Write;
 
 use ash::extensions::{ext, khr};
 use ash::vk;
-
-use crate::render_device::raytracing;
-
-use super::swapchain::{self, Surface, Swapchain};
+use gpu_allocator::vulkan::{self};
 
 use super::debug_utils;
 use super::physical::{PhysicalDevice, PhysicalDeviceFeatures};
+use super::swapchain::{self, Surface, Swapchain};
+
+use crate::render_device::raytracing;
 
 pub struct DeviceConfig {
     pub app_handle: u64,
@@ -52,6 +52,11 @@ pub struct RenderDevice {
     pub gfx_queue: vk::Queue,
     pub surface: Surface,
     pub swapchain: Swapchain,
+
+    // Memory allocator
+    pub allocator: vulkan::Allocator,
+    pub allocations: Vec<vulkan::Allocation>,
+    pub allocations_free_slot: Vec<u16>,
 }
 
 impl super::RenderDevice {
@@ -275,6 +280,16 @@ impl super::RenderDevice {
             config.vsync,
         );
 
+        let allocator = vulkan::Allocator::new(&vulkan::AllocatorCreateDesc {
+            instance: instance.clone(),
+            device: device.clone(),
+            physical_device: physical.handle,
+            debug_settings: Default::default(),
+            buffer_device_address: features.vulkan12.buffer_device_address == vk::TRUE,
+            allocation_sizes: Default::default(),
+        })
+        .unwrap();
+
         Some(Self {
             entry,
             instance,
@@ -294,6 +309,10 @@ impl super::RenderDevice {
             gfx_queue,
             surface,
             swapchain,
+
+            allocator,
+            allocations: Vec::new(),
+            allocations_free_slot: Vec::new(),
         })
     }
 }

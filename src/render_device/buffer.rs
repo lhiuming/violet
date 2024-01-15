@@ -1,4 +1,8 @@
-use ash::vk;
+use ash::vk::{self};
+use gpu_allocator::{
+    self,
+    vulkan::{self, Allocation},
+};
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 pub struct BufferDesc {
@@ -52,9 +56,11 @@ impl BufferDesc {
 pub struct Buffer {
     pub desc: BufferDesc,
     pub handle: vk::Buffer,
-    pub memory: vk::DeviceMemory,
     pub data: *mut u8, // TODO make optional
     pub device_address: Option<vk::DeviceAddress>,
+
+    // Internal
+    alloc_index: u16,
 }
 
 pub type BufferViewDesc = vk::Format;
@@ -67,7 +73,7 @@ pub struct BufferView {
 }
 
 impl super::RenderDevice {
-    pub fn create_buffer(&self, desc: BufferDesc) -> Option<Buffer> {
+    pub fn create_buffer(&mut self, desc: BufferDesc) -> Option<Buffer> {
         // Create the vk buffer object
         // TODO drop buffer if later stage failed
         let buffer = {
@@ -87,12 +93,12 @@ impl super::RenderDevice {
             .usage
             .contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS);
 
+        let mem_req = unsafe { self.device.get_buffer_memory_requirements(buffer) };
+
         // Allocate memory for ths buffer
         // TODO drop device_memory if later stage failed
         // TODO use a allocator like VMA to do sub allocate
         let memory: vk::DeviceMemory = {
-            let mem_req = unsafe { self.device.get_buffer_memory_requirements(buffer) };
-
             // Pick memory type
             /*
             let mem_property_flags =
@@ -123,9 +129,44 @@ impl super::RenderDevice {
             }
         };
 
+        // Map raw memory_property to gpu_allocator::MemoryLocation
+        // TODO use better sematics
+        let mem_location = if desc.memory_property == vk::MemoryPropertyFlags::DEVICE_LOCAL {
+            gpu_allocator::MemoryLocation::GpuOnly
+        } else if desc
+            .memory_property
+            .contains(vk::MemoryPropertyFlags::HOST_CACHED)
+        {
+            gpu_allocator::MemoryLocation::GpuToCpu
+        } else if desc.memory_property.intersects(
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+        ) {
+            gpu_allocator::MemoryLocation::CpuToGpu
+        } else {
+            println!(
+                "RenderDevice: unhandled memory property: {:?}. use Unknown",
+                desc.memory_property
+            );
+            gpu_allocator::MemoryLocation::Unknown
+        };
+
+        // testing New allocator
+        let alloc = self
+            .allocator
+            .allocate(&vulkan::AllocationCreateDesc {
+                name: "unnamed_buffer",
+                requirements: mem_req,
+                location: mem_location,
+                linear: true, // buffer is always linear
+                allocation_scheme: vulkan::AllocationScheme::GpuAllocatorManaged, // not dedicated for this object
+            })
+            .ok()?;
+
         // Bind
-        let offset: vk::DeviceSize = 0;
-        match unsafe { self.device.bind_buffer_memory(buffer, memory, offset) } {
+        match unsafe {
+            self.device
+                .bind_buffer_memory(buffer, alloc.memory(), alloc.offset())
+        } {
             Ok(_) => {}
             Err(err) => {
                 println!("RenderDevice: (Vulkan) failed to bind buffer: {:?}", err);
@@ -145,32 +186,69 @@ impl super::RenderDevice {
 
         // Map (staging buffer) persistently
         // TODO unmap if later stage failed
+        /*
         let is_mappable = desc
             .memory_property
             .contains(vk::MemoryPropertyFlags::HOST_VISIBLE);
         let data = if is_mappable {
             let map_flags = vk::MemoryMapFlags::default(); // dummy parameter
-            unsafe { self.device.map_memory(memory, offset, desc.size, map_flags) }.unwrap()
-                as *mut u8
+            unsafe {
+                self.device
+                    .map_memory(alloc.memory(), alloc.offset(), desc.size, map_flags)
+            }
+            .unwrap() as *mut u8
+            alloc.mapped_ptr()
         } else {
             std::ptr::null_mut::<u8>()
+        };
+        */
+        let data = alloc
+            .mapped_ptr()
+            .map(|p| p.as_ptr() as *mut u8)
+            .unwrap_or(std::ptr::null_mut::<u8>());
+
+        let alloc_index = {
+            if let Some(index) = self.allocations_free_slot.pop() {
+                self.allocations[index as usize] = alloc;
+                index
+            } else {
+                let index = self.allocations.len();
+                self.allocations.push(alloc);
+                index as u16
+            }
         };
 
         Some(Buffer {
             desc,
             handle: buffer,
-            memory,
             data,
             device_address,
+            alloc_index,
         })
     }
 
-    pub fn destroy_buffer(&self, buffer: Buffer) {
+    pub fn destroy_buffer(&mut self, buffer: Buffer) {
+        let mut alloc = Allocation::default();
+        std::mem::swap(
+            &mut alloc,
+            &mut self.allocations[buffer.alloc_index as usize],
+        );
+
+        // Free
+        self.allocator
+            .free(alloc)
+            .expect("failed to free buffer allocation");
+
+        self.allocations_free_slot.push(buffer.alloc_index);
+
+        // Destroy object
         unsafe {
+            /*
             if buffer.data != std::ptr::null_mut::<u8>() {
-                self.device.unmap_memory(buffer.memory);
+                self.device.unmap_memory(alloc.memory());
             }
-            self.device.free_memory(buffer.memory, None);
+            self.device.free_memory(alloc.memory(), None);
+             */
             self.device.destroy_buffer(buffer.handle, None);
         }
     }

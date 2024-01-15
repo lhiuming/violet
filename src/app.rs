@@ -180,7 +180,7 @@ where
     }
 
     // Set up the scene
-    let mut render_scene = RenderScene::new(&rd);
+    let mut render_scene = RenderScene::new(&mut rd);
 
     if let Some(path) = &args.path {
         println!("Loading model: {}", path);
@@ -191,8 +191,8 @@ where
         let model = model::load(Path::new(&path), config);
         if let Ok(model) = model {
             println!("Uploading to GPU ...");
-            render_scene.add(&rd, &model);
-            render_scene.rebuild_top_level_accel_struct(&rd);
+            render_scene.add(&mut rd, &model);
+            render_scene.rebuild_top_level_accel_struct(&mut rd);
         } else {
             println!(
                 "Failed to load model ({}): {:?}",

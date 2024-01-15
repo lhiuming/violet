@@ -84,7 +84,7 @@ impl ImGUIPass {
 
     fn preapre_buffers(
         &mut self,
-        rd: &RenderDevice,
+        rd: &mut RenderDevice,
         stream_lined: &mut StreamLinedFrameResource,
         index_bytesize: u64,
         vertec_bytesize: u64,
@@ -134,7 +134,7 @@ impl ImGUIPass {
     pub fn add(
         &mut self,
         rg: &mut RenderGraphBuilder,
-        rd: &RenderDevice,
+        rd: &mut RenderDevice,
         stream_lined: &mut StreamLinedFrameResource,
         upload_context: &mut UploadContext,
         target: RGHandle<Texture>,

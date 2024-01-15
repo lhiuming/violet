@@ -11,6 +11,8 @@ nightly = []
 [dependencies]
 # Vulkan Wrapper
 ash = "0.37.2"
+# GPU Memory allocator
+gpu-allocator = { version = "0.25", default-features = false, features = ["vulkan"] }
 # Shader compilation runtime tools
 hassle-rs = "0.5.4"
 rspirv-reflect = "0.6.0"

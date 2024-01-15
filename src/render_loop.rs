@@ -175,7 +175,7 @@ pub struct RenderLoopDesciptorSets {
 }
 
 impl RenderLoopDesciptorSets {
-    pub fn new(rd: &RenderDevice, max_sets: u32) -> Self {
+    pub fn new(rd: &mut RenderDevice, max_sets: u32) -> Self {
         let descriptor_pool = rd.create_descriptor_pool(
             vk::DescriptorPoolCreateFlags::empty(),
             max_sets,
@@ -354,7 +354,7 @@ pub struct StreamLinedFrameResource {
 }
 
 impl StreamLinedFrameResource {
-    pub fn new(rd: &RenderDevice) -> Self {
+    pub fn new(rd: &mut RenderDevice) -> Self {
         let command_pool = rd.create_command_pool();
         let desciptor_sets = RenderLoopDesciptorSets::new(rd, MAX_FRAMES_ON_THE_FLY);
 
@@ -432,7 +432,7 @@ impl StreamLinedFrameResource {
         self.delayed_release[future_index as usize].push(res);
     }
 
-    fn release_resources(&mut self, rd: &RenderDevice) {
+    fn release_resources(&mut self, rd: &mut RenderDevice) {
         let resources = &mut self.delayed_release[self.render_index as usize];
         for resource in resources.drain(0..) {
             match resource {
@@ -444,7 +444,7 @@ impl StreamLinedFrameResource {
     }
 
     // Wait for command buffer finished and reset it for recording.
-    pub fn wait_and_reset_command_buffer(&mut self, rd: &RenderDevice) -> vk::CommandBuffer {
+    pub fn wait_and_reset_command_buffer(&mut self, rd: &mut RenderDevice) -> vk::CommandBuffer {
         puffin::profile_function!();
 
         // Fence to make sure previous submit command buffer is finished

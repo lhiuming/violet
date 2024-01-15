@@ -806,7 +806,7 @@ struct PassShaderBindingTable {
 }
 
 impl PassShaderBindingTable {
-    fn new(rd: &RenderDevice) -> Self {
+    fn new(rd: &mut RenderDevice) -> Self {
         // Device properties
         let handle_size = rd.shader_group_handle_size() as u64;
         let handle_alignment = rd.shader_group_handle_alignment() as u64;
@@ -2294,7 +2294,7 @@ impl RenderGraphBuilder<'_> {
 
     pub fn execute(
         &mut self,
-        rd: &RenderDevice,
+        rd: &mut RenderDevice,
         command_buffer: &CommandBuffer,
         shaders: &mut Shaders,
     ) {

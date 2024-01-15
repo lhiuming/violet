@@ -185,7 +185,7 @@ impl UploadContext {
     // Signaled the event to return the fence back to the pool
     pub fn borrow_staging_buffer(
         &mut self,
-        rd: &RenderDevice,
+        rd: &mut RenderDevice,
         buffer_size: u64,
     ) -> (Buffer, vk::Event) {
         // quantize the size
@@ -383,7 +383,7 @@ pub struct RenderScene {
 }
 
 impl RenderScene {
-    pub fn new(rd: &RenderDevice) -> RenderScene {
+    pub fn new(rd: &mut RenderDevice) -> RenderScene {
         // Buffer for whole scene
         let ib_size = 8 * 1024 * 1024;
         let vb_size = 128 * 1024 * 1024;
@@ -630,7 +630,7 @@ impl RenderScene {
     }
 
     fn upload_texture_data(
-        rd: &RenderDevice,
+        rd: &mut RenderDevice,
         upload_context: &mut UploadContext,
         texture: &Texture,
         image: &Image,
@@ -758,7 +758,7 @@ impl RenderScene {
         });
     }
 
-    fn populate_default_material_textures(&mut self, rd: &RenderDevice) {
+    fn populate_default_material_textures(&mut self, rd: &mut RenderDevice) {
         let upload_context = &mut self.upload_context;
 
         let white_image = Image {
@@ -848,7 +848,7 @@ impl RenderScene {
         }
     }
 
-    pub fn add(&mut self, rd: &RenderDevice, model: &Model) {
+    pub fn add(&mut self, rd: &mut RenderDevice, model: &Model) {
         let upload_context = &mut self.upload_context;
 
         let index_buffer = &mut self.index_buffer;
@@ -1353,7 +1353,7 @@ impl RenderScene {
         );
 
         // Build BLASes
-        if let Some(khr_accel_struct) = rd.khr_accel_struct.as_ref() {
+        if let Some(khr_accel_struct) = rd.khr_accel_struct.clone() {
             // Gather all build info
             let mut scratch_offset_curr = 0;
             let mut scratch_offsets = Vec::<u64>::new();
@@ -1474,7 +1474,7 @@ impl RenderScene {
         }
     }
 
-    pub fn rebuild_top_level_accel_struct(&mut self, rd: &RenderDevice) -> Option<()> {
+    pub fn rebuild_top_level_accel_struct(&mut self, rd: &mut RenderDevice) -> Option<()> {
         if !rd.support_raytracing {
             return None;
         }
@@ -1485,7 +1485,7 @@ impl RenderScene {
             self.mesh_bottom_level_accel_structs.len()
         );
 
-        let khr_accel_struct = rd.khr_accel_struct.as_ref()?;
+        let khr_accel_struct = rd.khr_accel_struct.clone()?;
 
         // Create instance buffer
         let num_blas_instances = self.instances.len();

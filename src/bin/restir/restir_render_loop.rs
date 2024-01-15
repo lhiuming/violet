@@ -29,7 +29,7 @@ pub struct DefaultResources {
 }
 
 impl DefaultResources {
-    pub fn new(rd: &RenderDevice) -> Self {
+    pub fn new(rd: &mut RenderDevice) -> Self {
         let dummy_buffer = rd
             .create_buffer(BufferDesc {
                 size: 1,
