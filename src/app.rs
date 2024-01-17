@@ -6,6 +6,7 @@ use std::time;
 
 use clap::Parser;
 use glam::{Mat4, UVec2, Vec2, Vec3, Vec4};
+use log::{error, info};
 
 use crate::{
     imgui, model,
@@ -124,14 +125,44 @@ impl Camera {
 
 pub struct Config {
     pub optional_shader_path: Option<String>,
+
+    /// Set an simple implementation of log::Log as the global logger
+    pub set_logger: bool,
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             optional_shader_path: None,
+            set_logger: true,
         }
     }
+}
+
+struct Logger {}
+
+impl log::Log for Logger {
+    fn enabled(&self, _: &log::Metadata) -> bool {
+        true
+    }
+
+    fn log(&self, record: &log::Record) {
+        let level = record.level();
+        if level > log::max_level() {
+            return;
+        }
+        let color = match level {
+            log::Level::Error => colored::Color::BrightRed,
+            log::Level::Warn => colored::Color::BrightYellow,
+            log::Level::Info => colored::Color::BrightGreen,
+            log::Level::Debug => colored::Color::BrightMagenta,
+            log::Level::Trace => colored::Color::BrightCyan,
+        };
+        use colored::Colorize;
+        println!("[{}] {}", level.as_str().color(color), record.args());
+    }
+
+    fn flush(&self) {}
 }
 
 pub fn run_with_renderloop<T>()
@@ -141,13 +172,26 @@ where
     run_with_config::<T>(Config::default());
 }
 
+static LOGGER: Logger = Logger {};
+
 pub fn run_with_config<T>(config: Config)
 where
     T: RenderLoop,
 {
+    // Set up logger at the begining
+    if config.set_logger {
+        log::set_logger(&LOGGER)
+            .map(|()| {
+                // TODO set log level by cli args or build profile
+                log::set_max_level(log::LevelFilter::Trace);
+            })
+            .expect("Logger init failed");
+    }
+
+    // Parse cli args
     let args = Args::parse();
 
-    println!("Hello, rusty world!");
+    info!("Hello, rusty world!");
 
     // Load RenderDoc
     let rdoc = if args.renderdoc {
@@ -183,18 +227,18 @@ where
     let mut render_scene = RenderScene::new(&rd);
 
     if let Some(path) = &args.path {
-        println!("Loading model: {}", path);
+        info!("Loading model: {}", path);
         let config = model::LoadConfig {
             force_reimport: args.reimport_assets,
             tex_compression: !args.disable_tex_compress,
         };
         let model = model::load(Path::new(&path), config);
         if let Ok(model) = model {
-            println!("Uploading to GPU ...");
+            info!("\tUploading to GPU ...");
             render_scene.add(&rd, &model);
             render_scene.rebuild_top_level_accel_struct(&rd);
         } else {
-            println!(
+            error!(
                 "Failed to load model ({}): {:?}",
                 path,
                 model.err().unwrap()
@@ -206,7 +250,10 @@ where
     let mut render_loop = match T::new(&mut rd) {
         Some(rl) => rl,
         None => {
-            panic!("Renderloop is not supported.");
+            panic!(
+                "Renderloop {} is not supported.",
+                std::any::type_name::<T>()
+            );
         }
     };
 
@@ -235,7 +282,7 @@ where
     };
 
     // Render loop
-    println!("Start RenderLoop: {:?}", type_name::<T>());
+    info!("Start RenderLoop: {:?}", type_name::<T>());
     while !window.should_close() {
         puffin::profile_scope!("MainLoop");
 
@@ -244,7 +291,7 @@ where
         // Reload shaders
         if window.clicked('r') {
             shaders.reload_all();
-            println!("App:: shader reloaded.")
+            info!("App:: shader reloaded.")
         }
 
         // Reset camera
@@ -532,7 +579,7 @@ where
 
         if window.clicked('p') {
             let avg_delta_time_ms = avg_delta_time_ms(&frame_durations);
-            println!("MainLoop: {:5.2}ms", avg_delta_time_ms);
+            info!("MainLoop: {:5.2}ms", avg_delta_time_ms);
 
             if let Some(stat) = render_loop.gpu_stat() {
                 stat.print();

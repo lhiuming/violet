@@ -1,7 +1,9 @@
 use std::collections::VecDeque;
 
-use crate::render_device::RenderDevice;
 use ash::vk;
+use log::info;
+
+use crate::render_device::RenderDevice;
 
 pub struct Query(pub u32);
 
@@ -378,11 +380,11 @@ impl NamedProfiling {
         let count = self.entries.len();
         let width = self.entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
         let width = (width + 3) / 4 * 4;
-        println!("GPU Profiling: ({} entries)", count);
+        info!("GPU Profiling: ({} entries)", count);
         //for entry in self.entries.iter() {
         for entry in self.entries(true) {
             let (avg_time_ns, avg_freq) = entry.avg(self.latest_ready_frame);
-            println!(
+            info!(
                 "\t{:>width$}: {:.4}ms ({:.2})",
                 entry.name,
                 avg_time_ns / 1000_000.0,
