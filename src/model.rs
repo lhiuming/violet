@@ -1,5 +1,5 @@
 use colored::Colorize;
-use glam::{Mat4, Vec4};
+use glam::{Mat4, Vec3, Vec4};
 use intel_tex_2::{bc4, bc5, bc7};
 use rkyv::{
     ser::Serializer,
@@ -25,6 +25,7 @@ macro_rules! warning {
 pub struct LoadConfig {
     pub force_reimport: bool,
     pub tex_compression: bool,
+    pub scale: f32,
 }
 
 impl Default for LoadConfig {
@@ -32,6 +33,7 @@ impl Default for LoadConfig {
         LoadConfig {
             force_reimport: false,
             tex_compression: true,
+            scale: 1.0,
         }
     }
 }
@@ -595,7 +597,8 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
         // glTF: Y up, right-handed
         // Here: Z up, right-handed
         // So we gonna rotate the model by 90 degrees around X axis
-        let root_xform = Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2);
+        let root_xform = Mat4::from_rotation_x(std::f32::consts::FRAC_PI_2)
+            * Mat4::from_scale(Vec3::splat(config.scale));
 
         for root in scene.nodes() {
             iterate_on_nodes(&root, root_xform, &mut process_node);

@@ -34,6 +34,11 @@ impl RenderDevice {
     }
 
     #[inline]
+    pub fn min_acceleration_structure_offset_alignment() -> u32 {
+        256
+    }
+
+    #[inline]
     pub fn shader_group_handle_size(&self) -> u32 {
         self.physical
             .ray_tracing_pipeline_properties

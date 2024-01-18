@@ -71,6 +71,10 @@ struct Args {
     #[arg(long)]
     reimport_assets: bool,
 
+    /// Scale the assets when (re-)import
+    #[arg(long, default_value = "1.0")]
+    import_scale: f32,
+
     /// Force to disable texture compression
     #[arg(long)]
     disable_tex_compress: bool,
@@ -231,10 +235,11 @@ where
         let config = model::LoadConfig {
             force_reimport: args.reimport_assets,
             tex_compression: !args.disable_tex_compress,
+            scale: args.import_scale,
         };
         let model = model::load(Path::new(&path), config);
         if let Ok(model) = model {
-            info!("\tUploading to GPU ...");
+            info!("Uploading to GPU ...");
             render_scene.add(&rd, &model);
             render_scene.rebuild_top_level_accel_struct(&rd);
         } else {

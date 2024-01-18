@@ -88,7 +88,9 @@ impl super::RenderDevice {
         let khr_accel_struct = self.khr_accel_struct.as_ref()?;
 
         assert!(buffer.desc.size >= (offset + size));
-        assert!(offset & 0xff == 0); // required by spec
+        // check alignment required by spec
+        // (VUID-VkAccelerationStructureCreateInfoKHR-offset-03734)
+        assert!(offset & 0xff == 0);
         let create_info: vk::AccelerationStructureCreateInfoKHRBuilder<'_> =
             vk::AccelerationStructureCreateInfoKHR::builder()
                 .buffer(buffer.handle)

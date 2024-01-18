@@ -3,6 +3,7 @@ use std::slice;
 
 use ash::vk;
 use glam::{Affine3A, Mat3, Vec3};
+use log::{info, trace};
 
 use crate::{
     model::{Image, ImageFormat, Model},
@@ -11,6 +12,9 @@ use crate::{
         TextureDesc, TextureView, TextureViewDesc,
     },
 };
+
+// Small BLASes combineds into single buffer (save allocation, and better locality)
+static BLAS_COMBINED_BUFFER_MAX_SIZE: u64 = 4 * 1024 * 1024;
 
 // Allocatable buffer. Alway aligned to 4 bytes.
 pub struct AllocBuffer {
@@ -435,7 +439,7 @@ impl RenderScene {
         let mesh_param_size = std::mem::size_of::<MeshParams>() as vk::DeviceSize;
         let mesh_param_buffer = rd
             .create_buffer(BufferDesc {
-                size: mesh_param_size * 2048,
+                size: mesh_param_size * 8 * 1024,
                 usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
                 memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
             })
@@ -446,7 +450,7 @@ impl RenderScene {
             std::mem::size_of::<GeometryGroupParams>() as vk::DeviceSize;
         let geometry_group_param_buffer = rd
             .create_buffer(BufferDesc {
-                size: geometry_group_param_size * 1024,
+                size: geometry_group_param_size * 8 * 1024,
                 usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
                 memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
             })
@@ -860,21 +864,12 @@ impl RenderScene {
         let global_mesh_index_offset = self.mesh_params.len();
         let global_geometry_group_index_offset = self.geometry_group_params.len();
 
-        // log
-        let total_vert_count = model
-            .geometry_groups
-            .iter()
-            .map(|group| {
-                group
-                    .iter()
-                    .map(|mesh| mesh.1.positions.len())
-                    .sum::<usize>()
-            })
-            .sum::<usize>();
-        println!("Total Vertex: {}", total_vert_count);
-
         // Upload textures
-        for image in &model.images {
+        let num_images = model.images.len();
+        info!("Upload {} textures...", num_images);
+        for (i, image) in model.images.iter().enumerate() {
+            trace!("Uploading texture {}/{}", i + 1, num_images);
+
             let format = match image.format {
                 ImageFormat::R8G8B8A8Unorm => vk::Format::R8G8B8A8_UNORM,
                 ImageFormat::R8G8B8A8Srgb => vk::Format::R8G8B8A8_SRGB,
@@ -904,6 +899,7 @@ impl RenderScene {
         }
 
         // Collect materials
+        info!("Upload {} materials...", model.materials.len());
         for material in &model.materials {
             // Create texture view for each material and add to scene
             // TODO collect and reduce duplicate in view?
@@ -1018,14 +1014,21 @@ impl RenderScene {
 
         let align_4 = |pos: usize| (pos + 3) & !3;
 
+        // Log number of mesh
+        let num_groups = model.geometry_groups.len();
+        let num_meshes = model.geometry_groups.iter().map(|g| g.len()).sum::<usize>();
+        info!("Upload {} meshes ({} groups)... ", num_meshes, num_groups);
+
         // Collect mesh data sizes
         let mut total_index_bytesize = 0usize;
         let mut total_vertex_bytesize = 0usize;
+        let mut total_vertex_count = 0usize;
         for group in &model.geometry_groups {
             for (_mat_index, mesh) in group {
                 let index_count = mesh.indicies.len();
                 total_index_bytesize += align_4(index_count * size_of::<u16>());
                 let vertex_count = mesh.positions.len();
+                total_vertex_count += vertex_count;
                 let vertex_size = size_of::<[f32; 3]>() // position
                 + (mesh.normals.is_some() as usize) * size_of::<[f32; 3]>() // normal
                 + (mesh.texcoords.is_some() as usize) * size_of::<[f32; 2]>() // texcoords
@@ -1034,6 +1037,13 @@ impl RenderScene {
                 total_vertex_bytesize += vertex_count * vertex_size;
             }
         }
+        info!(
+            "  Total {} indicies ({:.3} MiB), {} vertices ({:.3} MiB)",
+            total_index_bytesize / size_of::<u16>(),
+            total_index_bytesize as f32 / (1024.0 * 1024.0),
+            total_vertex_count,
+            total_vertex_bytesize as f32 / (1024.0 * 1024.0),
+        );
 
         // TODO auto growing the buffer?
         assert!(total_vertex_bytesize <= vertex_buffer.unused_space());
@@ -1354,10 +1364,26 @@ impl RenderScene {
 
         // Build BLASes
         if let Some(khr_accel_struct) = rd.khr_accel_struct.as_ref() {
+            info!("Build {} BLASes ...", blas_params.len());
+
+            struct BlasMemInfo {
+                // conservative size of the BLAS
+                blas_size: u64,
+                // offset into the combined scratch buffer
+                scratch_offset: u64,
+                // index in `mesh_blas_buffers`; small blas may be combined into same buffer
+                buffer_index: usize,
+                buffer_offset: u64,
+            }
+
+            let blas_offset_alignmask =
+                (RenderDevice::min_acceleration_structure_offset_alignment() - 1) as u64;
+
             // Gather all build info
             let mut scratch_offset_curr = 0;
-            let mut scratch_offsets = Vec::<u64>::new();
-            let mut blas_sizes = Vec::<u64>::new();
+            let mut blas_mem_info = Vec::<BlasMemInfo>::new();
+            let mut blas_buffer_sizes = vec![0u64; 1]; // first buffer for combine
+            let mut curr_combined_buffer_index: usize = 0;
             assert_eq!(
                 all_blas_geometries.len(),
                 all_blas_geometry_primitive_counts.len()
@@ -1390,10 +1416,46 @@ impl RenderScene {
                     let mask = (alignment - 1) as u64;
                     (scratch_offset_curr + mask) & !mask
                 };
-                scratch_offsets.push(scratch_offset);
-                scratch_offset_curr = scratch_offset + build_size_info.build_scratch_size;
 
-                blas_sizes.push(build_size_info.acceleration_structure_size);
+                let blas_size = build_size_info.acceleration_structure_size;
+
+                // Combined small BLASes into one buffer
+                let buffer_index: usize;
+                let buffer_offset: u64;
+                if blas_size <= BLAS_COMBINED_BUFFER_MAX_SIZE / 16 {
+                    let mut offset = blas_buffer_sizes[curr_combined_buffer_index];
+                    offset = (offset + blas_offset_alignmask) & !blas_offset_alignmask;
+
+                    // if curr combined buffer has enough space, sub alloc from it
+                    let empty_space = BLAS_COMBINED_BUFFER_MAX_SIZE - offset;
+                    if blas_size < empty_space {
+                        blas_buffer_sizes[curr_combined_buffer_index] = offset as u64 + blas_size;
+                    }
+                    // otherwise, start a new one
+                    else {
+                        offset = 0;
+                        curr_combined_buffer_index = blas_buffer_sizes.len();
+                        blas_buffer_sizes.push(blas_size);
+                    }
+                    buffer_offset = offset;
+                    buffer_index = curr_combined_buffer_index;
+                }
+                // otherwise, store in a dedicate buffer
+                else {
+                    buffer_offset = 0;
+                    buffer_index = blas_buffer_sizes.len();
+                    blas_buffer_sizes.push(blas_size);
+                }
+
+                blas_mem_info.push(BlasMemInfo {
+                    blas_size: build_size_info.acceleration_structure_size,
+                    scratch_offset,
+                    buffer_index,
+                    buffer_offset,
+                });
+
+                // update for next
+                scratch_offset_curr = scratch_offset + build_size_info.build_scratch_size;
             }
             let total_scratch_size = scratch_offset_curr;
 
@@ -1408,30 +1470,36 @@ impl RenderScene {
                 .unwrap();
             let scratch_device_address = scratch_buffer.device_address.unwrap();
 
+            // Create BLAS buffers
+            info!("  Create {} BLAS buffers...", blas_buffer_sizes.len());
+            let blas_buffers = blas_buffer_sizes
+                .iter()
+                .map(|&size| {
+                    rd.create_buffer(BufferDesc {
+                        size,
+                        usage: vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
+                            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                        memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
+                    })
+                    .unwrap()
+                })
+                .collect::<Vec<_>>();
+
             // Collect all BLAS builds
             let mut blas_build_infos = Vec::<vk::AccelerationStructureBuildGeometryInfoKHR>::new();
             let mut blas_build_range_info_slices =
                 Vec::<&[vk::AccelerationStructureBuildRangeInfoKHR]>::new();
             for i in 0..blas_params.len() {
                 let params = &blas_params[i];
-                let blas_size = blas_sizes[i];
-
-                // Create buffer
-                let buffer = rd
-                    .create_buffer(BufferDesc {
-                        size: blas_size,
-                        usage: vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
-                            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
-                        memory_property: vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                    })
-                    .unwrap();
+                let mem_info = &blas_mem_info[i];
 
                 // Create AS
+                let buffer = blas_buffers[mem_info.buffer_index];
                 let accel_struct = rd
                     .create_accel_struct(
                         buffer,
-                        0,
-                        blas_size,
+                        mem_info.buffer_offset,
+                        mem_info.blas_size,
                         vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL,
                     )
                     .unwrap();
@@ -1441,7 +1509,6 @@ impl RenderScene {
 
                 // Setup BLAS build info
                 let geometries = &all_blas_geometries[params.beg..params.end];
-                let scrath_offset = scratch_offsets[i];
                 let geo_info = vk::AccelerationStructureBuildGeometryInfoKHR::builder()
                     .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
                     .flags(vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE)
@@ -1449,7 +1516,7 @@ impl RenderScene {
                     .dst_acceleration_structure(accel_struct.handle)
                     .geometries(geometries)
                     .scratch_data(vk::DeviceOrHostAddressKHR {
-                        device_address: scratch_device_address + scrath_offset,
+                        device_address: scratch_device_address + mem_info.scratch_offset,
                     })
                     .build();
                 blas_build_infos.push(geo_info);
