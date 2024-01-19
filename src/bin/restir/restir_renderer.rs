@@ -1,9 +1,10 @@
 use ash::vk;
+use egui::Widget;
 use glam::UVec2;
 
 use violet::{
     command_buffer::StencilOps,
-    imgui::Ui,
+    imgui::{self, Ui},
     render_device::{
         texture::TextureUsage, Buffer, BufferDesc, RenderDevice, Texture, TextureDesc,
     },
@@ -44,6 +45,9 @@ impl TAAPass {
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum DebugView {
     None,
+    Depth,
+    Normal,
+    Roughness,
     AO,
     AOFiltered,
     IndDiff,
@@ -137,39 +141,50 @@ impl RestirRenderer {
         ui.heading("RESTIR RENDERER");
         ui.checkbox(&mut config.taa, "taa");
         ui.checkbox(&mut config.denoise, "denoise");
-        ui.add_enabled_ui(config.denoise, |ui| {
-            ui.checkbox(&mut self.denoiser.disocclusion_fix, "disocclusion fix");
-            ui.add(
-                egui::Slider::new(&mut self.denoiser.atrous_iterations, 0..=5)
-                    .text("atrous iterations"),
-            );
+        ui.indent(imgui::Id::new("denoise_child"), |ui| {
+            ui.add_enabled_ui(config.denoise, |ui| {
+                ui.checkbox(&mut self.denoiser.disocclusion_fix, "disocclusion fix");
+                imgui::Slider::new(&mut self.denoiser.atrous_iterations, 0..=5)
+                    .text("atrous iter.")
+                    .ui(ui);
+            });
         });
         ui.checkbox(&mut config.ind_diff_validate, "ind.diff.s.validate");
         ui.checkbox(&mut config.ind_spec_validate, "ind.spec.s.validate");
         ui.checkbox(&mut config.hash_grid_cache_decay, "hg.cache.decay");
         ui.add(egui::Slider::new(&mut config.ao_radius, 0.0..=5.0).text("ao radius"));
 
-        egui::ComboBox::from_label("debug view")
-            .selected_text(format!("{:?}", config.debug_view))
-            .show_ui(ui, |ui| {
-                let mut item = |view: DebugView| {
-                    ui.selectable_value(&mut config.debug_view, view, format!("{:?}", view));
-                    ui.set_min_width(128.0);
-                };
-                item(DebugView::None);
-                item(DebugView::AO);
-                item(DebugView::AOFiltered);
-                item(DebugView::IndDiff);
-                item(DebugView::IndSpec);
-                item(DebugView::IndSpecRayLen);
-                item(DebugView::DenoiserHistLen);
-                item(DebugView::DenoiserVariance);
-                item(DebugView::HashGridCell);
-                item(DebugView::HashGridRadiance);
-            });
+        // Debug options
+        imgui::CollapsingHeader::new("debug options").show(ui, |ui| {
+            if ui.button("Clear Hash Grid Cache").clicked() {
+                self.clear_hash_grid_cache = true;
+            }
+        });
 
-        if ui.button("Clear Hash Grid Cache").clicked() {
-            self.clear_hash_grid_cache = true;
+        // Debug view
+        let response = imgui::CollapsingHeader::new("debug view").show(ui, |ui| {
+            let mut item = |view: DebugView| {
+                let selected = config.debug_view == view;
+                let res = ui.selectable_label(selected, format!("{:?}", view));
+                if res.clicked() {
+                    config.debug_view = if selected { DebugView::None } else { view };
+                }
+            };
+            item(DebugView::Depth);
+            item(DebugView::Normal);
+            item(DebugView::Roughness);
+            item(DebugView::AO);
+            item(DebugView::AOFiltered);
+            item(DebugView::IndDiff);
+            item(DebugView::IndSpec);
+            item(DebugView::IndSpecRayLen);
+            item(DebugView::DenoiserHistLen);
+            item(DebugView::DenoiserVariance);
+            item(DebugView::HashGridCell);
+            item(DebugView::HashGridRadiance);
+        });
+        if !response.fully_open() {
+            config.debug_view = DebugView::None;
         }
     }
 
@@ -850,6 +865,7 @@ impl RestirRenderer {
         // Pass: Debug View
         if self.config.debug_view != DebugView::None {
             let color_texture = match self.config.debug_view {
+                DebugView::Depth => gbuffer.depth,
                 DebugView::AO => curr_ao_texture,
                 DebugView::AOFiltered => filtered_ao_texture,
                 DebugView::IndDiff => denoised_indirect_diffuse,
@@ -864,14 +880,21 @@ impl RestirRenderer {
             let uint_texture = match self.config.debug_view {
                 _ => rg.register_texture(default_res.dummy_uint_texture),
             };
+            let is_gbuffer: u32 = match self.config.debug_view {
+                DebugView::Normal => 1,
+                DebugView::Roughness => 2,
+                _ => 0,
+            };
             let is_uint = match self.config.debug_view {
                 _ => false,
             } as u32;
             rg.new_compute("Debug View")
                 .compute_shader("restir/debug_view.hlsl")
+                .texture("gbuffer_texture", gbuffer.color)
                 .texture("color_texture", color_texture)
                 .texture("uint_texture", uint_texture)
                 .rw_texture("rw_output_texture", post_taa_color)
+                .push_constant(&is_gbuffer)
                 .push_constant(&is_uint)
                 .group_count_uvec2(main_size.div_round_up(UVec2::new(8, 8)));
         }
