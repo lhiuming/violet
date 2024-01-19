@@ -24,10 +24,10 @@
 
 Firstly, you need to install [Rust](https://www.rust-lang.org/tools/install) and, if necessary, the Vulkan driver for your graphics card (e.g. [nvdia](https://developer.nvidia.com/vulkan-driver)).
 
-Then, you can build and run the `restir` app to view the "Sponza" model:
+Then, you can build and run the `violet-restir` app to view the "Sponza" model:
 
 ```
-cargo run --bin restir --release -- "./assets/Sponza/Sponza.gltf"
+cargo run --bin violet-restir --release -- "./assets/Sponza/Sponza.gltf"
 ```
 
 ## Acknowledgments
