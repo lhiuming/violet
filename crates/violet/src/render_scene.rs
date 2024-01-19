@@ -1344,11 +1344,19 @@ impl RenderScene {
             let geometry_group_index =
                 instance.geometry_group_index + global_geometry_group_index_offset as u32;
             let transform = Affine3A::from_mat4(instance.transform);
+            let transform_det = transform.matrix3.determinant();
+            // NOTE: multiply by determinant to avoid normal get exloded or shrinked too much
+            let normal_transform = transform
+                .matrix3
+                .inverse()
+                .transpose()
+                .mul_scalar(transform_det.abs().powf(1.0 / 3.0))
+                .into();
             self.instances.push(Instance {
                 geometry_group_index,
                 transform,
-                normal_transform: Mat3::from_mat4(instance.transform).inverse().transpose(),
-                transform_det: transform.matrix3.determinant(),
+                normal_transform,
+                transform_det,
             });
         }
 
@@ -1382,7 +1390,7 @@ impl RenderScene {
             // Gather all build info
             let mut scratch_offset_curr = 0;
             let mut blas_mem_info = Vec::<BlasMemInfo>::new();
-            let mut blas_buffer_sizes = vec![0u64; 1]; // first buffer for combine
+            let mut blas_buffer_sizes = Vec::new();
             let mut curr_combined_buffer_index: usize = 0;
             assert_eq!(
                 all_blas_geometries.len(),
@@ -1423,8 +1431,13 @@ impl RenderScene {
                 let buffer_index: usize;
                 let buffer_offset: u64;
                 if blas_size <= BLAS_COMBINED_BUFFER_MAX_SIZE / 16 {
-                    let mut offset = blas_buffer_sizes[curr_combined_buffer_index];
-                    offset = (offset + blas_offset_alignmask) & !blas_offset_alignmask;
+                    let mut offset: u64;
+                    if curr_combined_buffer_index < blas_buffer_sizes.len() {
+                        offset = blas_buffer_sizes[curr_combined_buffer_index];
+                        offset = (offset + blas_offset_alignmask) & !blas_offset_alignmask;
+                    } else {
+                        offset = BLAS_COMBINED_BUFFER_MAX_SIZE;
+                    };
 
                     // if curr combined buffer has enough space, sub alloc from it
                     let empty_space = BLAS_COMBINED_BUFFER_MAX_SIZE - offset;

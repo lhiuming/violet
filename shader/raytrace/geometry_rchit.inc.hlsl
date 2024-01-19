@@ -74,14 +74,6 @@ void main(inout GeometryRayPayload payload, in Attribute attr)
     float3 normal_ls = INTERPOLATE_MESH_ATTR(float3, mesh.normals_offset, indicies, attr.bary);
     float4 tangent_ls = INTERPOLATE_MESH_ATTR(float4, mesh.tangents_offset, indicies, attr.bary);
 
-    // transform mesh data
-    float4x3 normal_xform = WorldToObject4x3(); // transpose(inverse(ObjectToWorld()))
-    float3 normal = mul(normal_xform, normal_ls).xyz;
-    float3 tangent = mul(normal_xform, tangent_ls.xyz).xyz;
-
-    // mikktspace tangent
-    float3 bitangent = tangent_ls.w * cross(normal, tangent.xyz);
-
     // TODO inlining the material parameters?
     MaterialParams mat = material_params[mesh.material_index];
     float4 base_color = bindless_textures[mat.base_color_index()].SampleLevel(sampler_linear_wrap, uv, TEX_LOD_BIAS);
@@ -97,9 +89,17 @@ void main(inout GeometryRayPayload payload, in Attribute attr)
     metal_rough.g *= HACK_ROUGHNESS_MULTIPLIER;
     #endif
 
+    // mikktspace tangent
+    float3 bitangent_ls = tangent_ls.w * cross(normal_ls, tangent_ls.xyz);
+
+    // Retrive normal transfrom (possibly with scale) 
+    // WorldToObject4x3() == transpose(inverse(ObjectToWorld()))
+    float4x3 normal_xform = WorldToObject4x3(); 
+
     // normal mapping
     float3 normal_ts = normal_map.xyz * 2.0f - 1.0f;
-    float3 normal_ws = normalize(normal_ts.x * tangent.xyz + normal_ts.y * bitangent + normal_ts.z * normal);
+    float3 normal_map_ls = normal_ts.x * tangent_ls.xyz + normal_ts.y * bitangent_ls + normal_ts.z * normal_ls; // NOTE: only normalize once after transform
+    float3 normal_ws = normalize(mul(normal_xform, normal_map_ls).xyz);
 
     // World position
     float3 position_ws = mul(ObjectToWorld3x4(), float4(pos_ls, 1.0f));

@@ -513,6 +513,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
                         if let Some((texcoords, normals)) =
                             model_texcoords.as_ref().zip(model_normals.as_ref())
                         {
+                            trace!("Generating tangents for mesh primitive.");
                             let mut tangents = vec![[0.0; 4]; vertex_count];
                             let mut geometry = MikktspaceGeometry {
                                 num_triangle: model_indicies.len() / 3,
