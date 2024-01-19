@@ -9,7 +9,7 @@
 			"type": "cppvsdbg",
 			"request": "launch",
 			"preLaunchTask": "rust: cargo build release",
-			"program": "${workspaceFolder}/target/release/restir.exe",
+			"program": "${workspaceFolder}/target/release/violet-restir.exe",
 			"args": [
 				"./assets/Sponza/Sponza.gltf",
 				"--profiler",
@@ -27,12 +27,12 @@
 			"type": "cppvsdbg",
 			"request": "launch",
 			"preLaunchTask": "rust: cargo build nightly release",
-			"program": "${workspaceFolder}/target/release/restir.exe",
+			"program": "${workspaceFolder}/target/release/violet-restir.exe",
 			"args": [
 				//"./assets/Sponza/Sponza.gltf",
 				//"./assets/pica_pica_-_mini_diorama_01/scene.gltf",
-				//"./assets/SunTemple_glTF/SunTemple.gltf",
-				"./assets/flying_world_-_battle_of_the_trash_god/scene.gltf",
+				"./assets/SunTemple_glTF/SunTemple.gltf",
+				//"./assets/flying_world_-_battle_of_the_trash_god/scene.gltf",
 				"--import-scale",
 				"0.01",
 				"--profiler",
@@ -58,7 +58,7 @@
 			"type": "cppvsdbg",
 			"request": "launch",
 			"preLaunchTask": "rust: cargo build nightly",
-			"program": "${workspaceFolder}/target/debug/restir.exe",
+			"program": "${workspaceFolder}/target/debug/violet-restir.exe",
 			"args": [
 				//"./assets/Sponza/Sponza.gltf",
 				//"./assets/pica_pica_-_mini_diorama_01/scene.gltf",

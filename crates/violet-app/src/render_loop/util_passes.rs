@@ -1,6 +1,5 @@
-use glam::uvec2;
-
-use crate::{
+use violet::{
+    glam::uvec2,
     render_device::{Buffer, RenderDevice, Texture},
     render_graph::{PassBuilderTrait, RGHandle, RenderGraphBuilder},
 };

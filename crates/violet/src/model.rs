@@ -1,11 +1,3 @@
-use colored::Colorize;
-use glam::{Mat4, Vec3, Vec4};
-use intel_tex_2::{bc4, bc5, bc7};
-use rkyv::{
-    ser::Serializer,
-    with::{ArchiveWith, DeserializeWith, SerializeWith},
-    Archive, Archived, Deserialize, Fallible, Resolver, Serialize,
-};
 use std::{
     collections::{hash_map, HashMap},
     fs::{File, OpenOptions},
@@ -15,11 +7,14 @@ use std::{
     thread,
 };
 
-macro_rules! warning {
-    ($fmt:expr $(, $arg:expr )*) => {
-        println!("{}", format!(concat!("Warning: ", $fmt) $(, $arg)*).yellow())
-    };
-}
+use glam::{Mat4, Vec3, Vec4};
+use intel_tex_2::{bc4, bc5, bc7};
+use log::{info, trace, warn};
+use rkyv::{
+    ser::Serializer,
+    with::{ArchiveWith, DeserializeWith, SerializeWith},
+    Archive, Archived, Deserialize, Fallible, Resolver, Serialize,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct LoadConfig {
@@ -224,11 +219,9 @@ impl mikktspace::Geometry for MikktspaceGeometry<'_> {
             let a = Vec4::from_array(self.out_tangents[index]);
             let b = Vec4::from_array(tangent);
             if !Vec4::abs_diff_eq(a, b, 0.0000001) {
-                warning!(
+                warn!(
                     "Writing to same tangent index with different value ({} times): {} -> {}",
-                    self.debug_tangent_counts[index],
-                    a,
-                    b
+                    self.debug_tangent_counts[index], a, b
                 )
             }
         }
@@ -253,7 +246,7 @@ pub fn load(path: &Path, config: LoadConfig) -> Result<Model> {
             match err {
                 Error::NotExist(cache_path) => {
                     // Import if cache not exist
-                    println!(
+                    info!(
                         "Model cache ({}) not exist ... import the gltf.",
                         cache_path
                     );
@@ -324,7 +317,7 @@ impl Model {
         file.write_all(serializer.into_serializer().into_inner().as_ref())
             .expect("Failed to write to file");
 
-        println!("Saved model to cache: {}. size {}", path.display(), size);
+        info!("Saved model to cache: {}. size {}", path.display(), size);
     }
 
     fn new_from_file(path: &Path) -> Result<Model> {
@@ -334,7 +327,7 @@ impl Model {
         let model = unsafe { rkyv::from_bytes_unchecked::<Model>(&buf) }
             .expect("Failed to deserialize model from cache");
 
-        println!("Loaded model from cache: {}", path.display());
+        info!("Loaded model from cache: {}", path.display());
         Ok(model)
     }
 }
@@ -427,9 +420,9 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
             return Err(Error::GLTF(gltf_err));
         }
     };
-    println!("Loaded glTF file: {}", path.display());
+    info!("Loaded glTF file: {}", path.display());
     if document.extensions_required().count() > 0 {
-        println!(
+        info!(
             "Required extensions: {}",
             document
                 .extensions_required()
@@ -438,15 +431,15 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
         );
     }
     if document.extensions_used().count() > 0 {
-        println!(
+        info!(
             "Used extensions: {}",
             document.extensions_used().collect::<Vec<&str>>().join(", ")
         );
     }
 
     // Log
-    println!("Meshes: {}", document.meshes().len());
-    println!("Images: {}", document.images().len());
+    info!("Meshes: {}", document.meshes().len());
+    info!("Images: {}", document.images().len());
 
     // Load geometries (witn material index) in the file
     // Each glTF mesh is a "geometry group" (or just "mesh group"?) here, wich consists of multiple glTF primitives
@@ -458,11 +451,11 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
             for primitive in geometry_group.primitives() {
                 // Check
                 if primitive.mode() != gltf::mesh::Mode::Triangles {
-                    warning!("Mesh primitive is not triangulated. Ignored.");
+                    warn!("Mesh primitive is not triangulated. Ignored.");
                     continue;
                 }
                 if primitive.material().index().is_none() {
-                    warning!("Mesh primitive has no material. Ignored.");
+                    warn!("Mesh primitive has no material. Ignored.");
                     continue;
                 }
 
@@ -484,7 +477,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
                     }
                     assert!(model_indicies.len() % 3 == 0);
                 } else {
-                    warning!("Mesh primitive has no indices.");
+                    warn!("Mesh primitive has no indices.");
                     continue;
                 }
 
@@ -493,7 +486,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
                 if let Some(positions) = reader.read_positions() {
                     model_positions.append(&mut positions.collect());
                 } else {
-                    warning!("Mesh primitive has no positions.");
+                    warn!("Mesh primitive has no positions.");
                     continue;
                 }
 
@@ -533,7 +526,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
                             if mikktspace::generate_tangents(&mut geometry) {
                                 return Some(tangents);
                             } else {
-                                warning!("mikktspace Failed to generate tangents.");
+                                warn!("mikktspace Failed to generate tangents.");
                             }
                         }
                         None
@@ -541,7 +534,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
 
                 // Log unsupported
                 if reader.read_colors(0).is_some() {
-                    warning!("Mesh primitive has vertex colors. Ignored.")
+                    warn!("Mesh primitive has vertex colors. Ignored.")
                 }
 
                 // get local bouding box
@@ -610,10 +603,10 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
     // Log instance count
     for (index, count) in instance_count_per_group.iter().enumerate() {
         if *count > 1 {
-            println!("glTF Mesh {} has {} instances.", index, count);
+            trace!("glTF Mesh {} has {} instances.", index, count);
         }
         if *count == 0 {
-            println!("glTF Mesh {} has no instances.", index);
+            trace!("glTF Mesh {} has no instances.", index);
         }
     }
 
@@ -647,11 +640,11 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
 
         let base_color_map = if let Some(base_color) = pbr_texs.base_color_texture() {
             if base_color.tex_coord() != 0 {
-                warning!("GLTF Loader: Only texture coordinate 0 is supported");
+                warn!("GLTF Loader: Only texture coordinate 0 is supported");
             }
 
             let image_index = base_color.texture().source().index() as ImageIndex;
-            println!(
+            trace!(
                 "Material base color texture: {}, sampler {}",
                 image_index,
                 fmt_sampler(&base_color.texture().sampler())
@@ -661,18 +654,18 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
 
             Some(MaterialMap { image_index })
         } else {
-            println!("Material base color texture is empty.");
+            trace!("Material base color texture is empty.");
             None
         };
 
         let metallic_roughness_map =
             if let Some(metal_rough) = pbr_texs.metallic_roughness_texture() {
                 if metal_rough.tex_coord() != 0 {
-                    warning!("GLTF Loader: Only texture coordinate 0 is supported");
+                    warn!("GLTF Loader: Only texture coordinate 0 is supported");
                 }
 
                 let image_index = metal_rough.texture().source().index() as ImageIndex;
-                println!(
+                trace!(
                     "Material metal rough texture: {}, sampler {:?}",
                     image_index,
                     fmt_sampler(&metal_rough.texture().sampler()),
@@ -682,24 +675,24 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
 
                 Some(MaterialMap { image_index })
             } else {
-                println!("Material metal rough texture is empty.");
+                trace!("Material metal rough texture is empty.");
                 None
             };
 
         let normal_map = if let Some(normal) = material.normal_texture() {
             if normal.tex_coord() != 0 {
-                warning!("GLTF Loader: Only texture coordinate 0 is supported");
+                warn!("GLTF Loader: Only texture coordinate 0 is supported");
             }
 
             let image_index = normal.texture().source().index() as ImageIndex;
-            println!(
+            trace!(
                 "Material normal texture: {}, sampler {:?}",
                 image_index,
                 fmt_sampler(&normal.texture().sampler()),
             );
 
             if normal.scale() != 1.0f32 {
-                warning!(
+                warn!(
                     "\t normal texture required scale {}, is ignored.",
                     normal.scale()
                 );
@@ -709,7 +702,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
 
             Some(MaterialMap { image_index })
         } else {
-            println!("Material normal texture is empty.");
+            trace!("Material normal texture is empty.");
             None
         };
 
@@ -717,11 +710,11 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
             if let Some(transmission) = material.transmission() {
                 let transmission_map = if let Some(trans) = transmission.transmission_texture() {
                     if trans.tex_coord() != 0 {
-                        warning!("GLTF Loader: Only texture cooridate 0 is supported");
+                        warn!("GLTF Loader: Only texture cooridate 0 is supported");
                     }
 
                     let image_index = trans.texture().source().index() as ImageIndex;
-                    println!(
+                    trace!(
                         "Material transmission texture: {}, sampler {}",
                         image_index,
                         fmt_sampler(&trans.texture().sampler())
@@ -740,10 +733,10 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
 
         // Log ignored
         if material.emissive_texture().is_some() {
-            warning!("GLTF Loader: Emissive textures are not supported yet");
+            warn!("GLTF Loader: Emissive textures are not supported yet");
         }
         if material.occlusion_texture().is_some() {
-            warning!("GLTF Loader: Occlusion textures are not supported yet");
+            warn!("GLTF Loader: Occlusion textures are not supported yet");
         }
 
         model_materials.push(Material {
@@ -798,7 +791,7 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
         let image_index = image_index as ImageIndex;
 
         // Log
-        println!(
+        trace!(
             "Loading Image {} {}, {:?}, usage {:?}: {:?}",
             image.width,
             image.height,
@@ -808,10 +801,9 @@ pub fn import_gltf_uncached(path: &Path, config: LoadConfig) -> Result<Model> {
         );
 
         if imported_usage.bits().count_ones() > 1 {
-            warning!(
+            warn!(
                 "Image {} is used for multiple purposes ({:?}) !!!",
-                image_index,
-                imported_usage
+                image_index, imported_usage
             );
         }
 

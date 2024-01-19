@@ -5,16 +5,21 @@ use std::path::Path;
 use std::time;
 
 use clap::Parser;
-use glam::{Mat4, UVec2, Vec2, Vec3, Vec4};
 use log::{error, info};
+use puffin_egui;
+
+use violet::{
+    glam::{Mat4, UVec2, Vec2, Vec3, Vec4},
+    model,
+    render_device::{DeviceConfig, RenderDevice},
+    render_scene::RenderScene,
+    shader::Shaders,
+};
 
 use crate::{
-    imgui, model,
-    render_device::{DeviceConfig, RenderDevice},
+    imgui,
     render_loop::{RenderLoop, ViewInfo},
-    render_scene::RenderScene,
     renderdoc,
-    shader::Shaders,
     window::Window,
 };
 

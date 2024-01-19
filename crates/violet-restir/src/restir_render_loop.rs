@@ -1,21 +1,23 @@
-use ash::vk;
-use glam::{UVec2, Vec3};
-
 use violet::{
     command_buffer::CommandBuffer,
+    glam::{UVec2, Vec3},
     gpu_profiling::NamedProfiling,
-    imgui::{ImGUIOuput, Ui},
     render_device::{
         AccelerationStructure, Buffer, BufferDesc, RenderDevice, Texture, TextureDesc, TextureView,
         TextureViewDesc,
     },
     render_graph::*,
+    render_scene::{RenderScene, UploadContext, SCENE_DESCRIPTOR_SET_INDEX},
+    shader::{Shaders, ShadersConfig},
+    vk,
+};
+
+use violet_app::{
+    imgui::{self, ImGUIOuput, Ui},
     render_loop::{
         div_round_up, imgui_pass::ImGUIPass, FrameParams, JitterInfo, PrevView, RenderLoop,
         StreamLinedFrameResource, ViewInfo, FRAME_DESCRIPTOR_SET_INDEX,
     },
-    render_scene::{RenderScene, UploadContext, SCENE_DESCRIPTOR_SET_INDEX},
-    shader::{Shaders, ShadersConfig},
 };
 
 use crate::{reference_path_tracer::ReferencePathTracer, restir_renderer::RestirRenderer};
@@ -153,7 +155,7 @@ impl RenderLoop for RestirRenderLoop {
         ui.heading("POSTPROCESSING");
         ui.horizontal(|ui| {
             let label = ui.label("exposure");
-            let slider = egui::Slider::new(&mut config.exposure_stop, -3.0..=6.0).step_by(0.5);
+            let slider = imgui::Slider::new(&mut config.exposure_stop, -3.0..=6.0).step_by(0.5);
             ui.add(slider).labelled_by(label.id);
         });
     }

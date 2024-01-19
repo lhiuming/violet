@@ -1,0 +1,47 @@
+[package]
+name = "violet"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[features]
+nightly = []
+
+[dependencies]
+# Vulkan Wrapper
+ash = "0.37.2"
+# Shader compilation runtime tools
+hassle-rs = "0.5.4"
+rspirv-reflect = "0.6.0"
+# alternative shader reflection
+spirq = "0.6.4"
+# Mesh/Texture assets
+gltf = { version = "1.0", features = ["KHR_materials_transmission"] }
+image = { version = "0.24", default-features = false, features = ["jpeg", "png"] } # sync with the deps in gltf crate
+mikktspace = { version = "0.3.0", default-features = false, features = ["glam"] } 
+intel_tex_2 = "0.2.2"
+rkyv = "0.7"
+# Linear Algebra
+glam = "0.24"
+# Simple In-Game CPU profiling
+puffin = "0.17"
+# utilities
+bitflags = "2.4.1"
+log = "0.4"
+
+[dependencies.windows-sys]
+version = "0.28.0"
+features = [ 
+	# Things for window
+	"Win32_Foundation",
+	"Win32_System",
+	"Win32_System_LibraryLoader",
+	"Win32_System_Diagnostics_Debug",
+	"Win32_System_Memory_NonVolatile",
+	"Win32_Graphics_Gdi",
+	"Win32_UI_WindowsAndMessaging",
+	"Win32_UI_Input_KeyboardAndMouse",
+	"Win32_UI_Input_Ime",
+	"Win32_UI_HiDpi",
+]

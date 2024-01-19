@@ -1,9 +1,9 @@
-use ash::vk;
 use violet::{
     render_device::{Texture, TextureDesc},
     render_graph::{PassBuilderTrait, RGHandle, RGTemporal, RenderGraphBuilder},
-    render_loop::DivRoundUp,
+    vk,
 };
+use violet_app::render_loop::DivRoundUp;
 
 use crate::restir_render_loop::DefaultResources;
 

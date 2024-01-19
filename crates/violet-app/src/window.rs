@@ -1,7 +1,7 @@
 use std::os::windows::prelude::OsStrExt;
 use std::{ffi, mem, ptr};
 
-use glam::UVec2;
+use violet::glam::UVec2;
 
 use windows_sys::Win32::{
     Foundation::*, Graphics::Gdi::ClientToScreen, System::LibraryLoader::*, System::Memory::*,

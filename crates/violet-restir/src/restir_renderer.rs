@@ -1,18 +1,18 @@
-use ash::vk;
-use egui::Widget;
-use glam::UVec2;
-
 use violet::{
     command_buffer::StencilOps,
-    imgui::{self, Ui},
+    glam::UVec2,
     render_device::{
         texture::TextureUsage, Buffer, BufferDesc, RenderDevice, Texture, TextureDesc,
     },
     render_graph::*,
+    render_scene::RenderScene,
+    vk,
+};
+use violet_app::{
+    imgui::{self, Ui, Widget},
     render_loop::{
         div_round_up, gbuffer_pass::*, jenkins_hash, util_passes::clear_buffer, DivRoundUp,
     },
-    render_scene::RenderScene,
 };
 
 use crate::denoising::{self, Denoiser};
@@ -152,7 +152,7 @@ impl RestirRenderer {
         ui.checkbox(&mut config.ind_diff_validate, "ind.diff.s.validate");
         ui.checkbox(&mut config.ind_spec_validate, "ind.spec.s.validate");
         ui.checkbox(&mut config.hash_grid_cache_decay, "hg.cache.decay");
-        ui.add(egui::Slider::new(&mut config.ao_radius, 0.0..=5.0).text("ao radius"));
+        ui.add(imgui::Slider::new(&mut config.ao_radius, 0.0..=5.0).text("ao radius"));
 
         // Debug options
         imgui::CollapsingHeader::new("debug options").show(ui, |ui| {

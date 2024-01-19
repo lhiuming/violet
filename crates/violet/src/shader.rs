@@ -4,17 +4,11 @@ use std::mem::size_of;
 
 use ash::extensions::khr;
 use ash::vk;
+use log::{error, trace};
 use rspirv_reflect::{self};
 use spirq::{self};
 
 use crate::render_device::RenderDevice;
-
-use colored::Colorize;
-macro_rules! error{
-    ($fmt:expr $(, $arg:expr )*) => {
-        println!("{}", format!(concat!("Error: ", $fmt) $(, $arg)*).red())
-    };
-}
 
 const LOG_REFLECTION_INFO: bool = false;
 const LOG_DESCRIPTOR_INFO: bool = false;
@@ -286,7 +280,7 @@ fn create_pipeline_program(
     let reflect_module = match rspirv_reflect::Reflection::new_from_spirv(binary) {
         Ok(refl) => Some(refl),
         Err(refl_err) => {
-            println!("Error: Failed to reflect shader module: {:?}", refl_err);
+            error!("Failed to reflect shader module: {:?}", refl_err);
             None
         }
     }?;
@@ -306,16 +300,17 @@ fn create_pipeline_program(
 
     // Debug: print the reflect content
     if LOG_REFLECTION_INFO {
-        println!(
+        trace!(
             "Reflection(shader: {}, entry_point: {})",
-            shader_def.virtual_path, shader_def.entry_point
+            shader_def.virtual_path,
+            shader_def.entry_point
         );
-        println!(
+        trace!(
             "\tdesciptor_sets: {:?}",
             reflect_module.get_descriptor_sets()
         );
         if let Some(pc) = reflect_module.get_push_constant_range().unwrap_or_default() {
-            println!("\tpush_consants: offset {}, size{}", pc.offset, pc.size);
+            trace!("\tpush_consants: offset {}, size{}", pc.offset, pc.size);
         }
     }
 
@@ -707,7 +702,7 @@ impl ShaderLoader {
             Err((result, _result_hr)) => {
                 let error_blob = result.get_error_buffer().ok()?;
                 let error_string = self.library.get_blob_as_string(&error_blob);
-                println!("Error: Failed to compile shader: {}", error_string);
+                error!("Failed to compile shader: {}", error_string);
                 None
             }
             Ok(result) => {
@@ -812,7 +807,7 @@ fn create_merged_descriptor_set_layouts(
                 if hack.set_layout_override.contains_key(&set_index) {
                     set_layouts[set_index as usize] = hack.set_layout_override[&set_index];
                     if LOG_DESCRIPTOR_INFO {
-                        println!("Overriding set layout for set {}", set_index);
+                        trace!("Overriding set layout for set {}", set_index);
                     }
                     return;
                 }
@@ -828,7 +823,7 @@ fn create_merged_descriptor_set_layouts(
                         set_layouts[set_index] = set_layout;
                     }
                     Err(e) => {
-                        println!(
+                        error!(
                             "Failed to create descriptor set layout: {:?}, from bindings {:?}",
                             e, bindings
                         );

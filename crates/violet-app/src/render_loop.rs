@@ -1,13 +1,15 @@
 use std::{mem::size_of, slice};
 
-use ash::vk;
-use glam::{Mat4, UVec2, Vec2, Vec3, Vec4, Vec4Swizzles};
-
-use crate::{
+use violet::{
+    glam::{Mat4, UVec2, Vec2, Vec3, Vec4, Vec4Swizzles},
     gpu_profiling::NamedProfiling,
-    imgui,
     render_device::{Buffer, BufferDesc, RenderDevice},
+    render_scene::RenderScene,
+    shader::Shaders,
+    vk,
 };
+
+use crate::imgui;
 
 /*
  * Modules
@@ -16,10 +18,7 @@ pub mod gbuffer_pass;
 pub mod imgui_pass;
 pub mod util_passes;
 
-/*
- * Basic Traits
- */
-
+/// Implement this to customize the rendering loop of an application.
 pub trait RenderLoop: Sized {
     fn new(rd: &mut RenderDevice) -> Option<Self>;
 
@@ -32,8 +31,8 @@ pub trait RenderLoop: Sized {
     fn render(
         &mut self,
         rd: &mut RenderDevice,
-        shaders: &mut crate::shader::Shaders,
-        scene: &crate::render_scene::RenderScene,
+        shaders: &mut Shaders,
+        scene: &RenderScene,
         view_info: &ViewInfo,
         imgui: Option<&imgui::ImGUIOuput>,
     );

@@ -1,55 +1,10 @@
-[package]
-name = "violet"
-version = "0.1.0"
-edition = "2021"
+[workspace]
+members = [
+	# Binaries
+	"crates/violet-restir",
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[features]
-nightly = []
-
-[dependencies]
-# Vulkan Wrapper
-ash = "0.37.2"
-# Shader compilation runtime tools
-hassle-rs = "0.5.4"
-rspirv-reflect = "0.6.0"
-# alternative shader reflection
-spirq = "0.6.4"
-# Mesh/Texture assets
-gltf = { version = "1.0", features = ["KHR_materials_transmission"] }
-image = { version = "0.24", default-features = false, features = ["jpeg", "png"] } # sync with the deps in gltf crate
-mikktspace = "0.3.0"
-intel_tex_2 = "0.2.2"
-rkyv = "0.7"
-# Linear Algebra
-glam = "0.24"
-# Debugging
-renderdoc-sys = "0.7"
-# ImGUI 
-egui = "0.23"
-# CLI args parsing 
-clap = { version = "4.4.7", features = ["derive"] }
-# Simple In-Game CPU profiling
-puffin = "0.17"
-puffin_egui = "0.23"
-# utilities
-bitflags = "2.4.1"
-colored = "2"
-log = "0.4"
-
-[dependencies.windows-sys]
-version = "0.28.0"
-features = [ 
-	# Things for window
-	"Win32_Foundation",
-	"Win32_System",
-	"Win32_System_LibraryLoader",
-	"Win32_System_Diagnostics_Debug",
-	"Win32_System_Memory_NonVolatile",
-	"Win32_Graphics_Gdi",
-	"Win32_UI_WindowsAndMessaging",
-	"Win32_UI_Input_KeyboardAndMouse",
-	"Win32_UI_Input_Ime",
-	"Win32_UI_HiDpi",
+	# Libraries
+	"crates/violet-app",
+	"crates/violet",
 ]
+resolver = "2"

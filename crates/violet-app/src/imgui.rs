@@ -2,7 +2,7 @@
 Integration of egui.
 */
 
-use glam::UVec2;
+use violet::glam::UVec2;
 
 // TODO kind of wild :(
 pub use egui::*;
