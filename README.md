@@ -13,12 +13,12 @@
 - Render graph (scratch)
 
 ![Sponza rendered with restir](https://github.com/lhiuming/violet/assets/2281376/527df52f-1130-43c2-a38f-8a2f1467d43a)
-(*Sponza* rendererd with `restir`)
+(*Sponza* rendererd with `violet-restir`)
 
 ## Dig into the Codebase
 
-- [restir_renderer.rs](https://github.com/lhiuming/violet/blob/main/src/bin/restir/restir_renderer.rs): render passes for ReSTIR-based indirect lighting.
-- [shaders](https://github.com/lhiuming/violet/tree/main/shader)
+- [restir_renderer.rs](crates/violet-restir/src/restir_renderer.rs): render passes for ReSTIR-based indirect lighting.
+- [shaders](shader)
 
 ## Building and Running
 
