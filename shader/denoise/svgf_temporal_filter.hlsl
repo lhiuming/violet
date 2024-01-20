@@ -120,6 +120,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 
     // Virtual Reproject
     // TODO skip if:  motion_vector ~= virtual_motion_vector
+    // TODO current virtual reprojection only work with planar surface; try taking curvature into account
 #if DUAL_SOURCE_REPROJECTION_FOR_SPEC 
     float3 virtual_spec_history;
     {
@@ -248,7 +249,8 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     // Blend ("Integrate")
     const float BLEND_FACTOR_DIFF = 1.0 / 20.0f;
 #if ADAPTIVE_BLEND_BY_ROUGHNESS
-    const float blurness = sqrt(saturate(gbuffer.perceptual_roughness * 6.0));
+    // TODO very heuristic
+    float blurness = sqrt(saturate(gbuffer.perceptual_roughness * 6.0));
     const float BLEND_FACTOR_SPEC = lerp(7.0/8.0, BLEND_FACTOR_DIFF, blurness);
 #else
     const float BLEND_FACTOR_SPEC = BLEND_FACTOR_DIFF;
@@ -262,20 +264,24 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 #if DUAL_SOURCE_REPROJECTION_FOR_SPEC
     // Weighted blend [Stachowiak 2018]
     {
+        #if 1
+        // Clamp with spatial variance
         float3 spec_mean = momentum1_spec;
-        float3 spec_dev = max(sqrt(abs(momentum2_spec - spec_mean * spec_mean)), 1e-6);
+        float3 spec_dev = max(sqrt(abs(momentum2_spec - spec_mean * spec_mean)), 1e-19);
+        #else
+        // TODO Clamp with temporal variance ?
+        #endif
 
         float dist_virtual = luminance(abs(virtual_spec_history - spec_mean) / spec_dev);
-        float weight_virtual = max(exp2(-10 * dist_virtual), 1e-6);
+        float weight_virtual = exp2(-10 * dist_virtual);
 
         float dist_history = luminance(abs(spec_history - spec_mean) / spec_dev);
-        float weight_history = max(exp2(-10 * dist_history), 1e-6);
+        float weight_history = exp2(-10 * dist_history);
 
-        float3 spec_history_dual = 0;
-        spec_history_dual += weight_virtual * virtual_spec_history;
-        spec_history_dual += weight_history * spec_history;
+        float3 spec_history_dual = 
+            weight_virtual * virtual_spec_history + weight_history * spec_history;
         float w_sum = weight_virtual + weight_history;
-        spec_history_dual /= w_sum;
+        spec_history_dual /= max(w_sum, 1e-37);
         spec_filtered = lerp(spec_history_dual, spec_source, alpha.y);
     }
 #endif
