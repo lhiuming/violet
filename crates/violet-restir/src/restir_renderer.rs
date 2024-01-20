@@ -55,6 +55,8 @@ enum DebugView {
     IndSpecRayLen,
     DenoiserHistLen,
     DenoiserVariance,
+    DenoiserSpecFast,
+    DenoiserDiffFast,
     HashGridCell,
     HashGridRadiance,
 }
@@ -144,6 +146,7 @@ impl RestirRenderer {
         ui.indent(imgui::Id::new("denoise_child"), |ui| {
             ui.add_enabled_ui(config.denoise, |ui| {
                 ui.checkbox(&mut self.denoiser.disocclusion_fix, "disocclusion fix");
+                ui.checkbox(&mut self.denoiser.fast_history_clamp, "fast history clamp");
                 imgui::Slider::new(&mut self.denoiser.atrous_iterations, 0..=5)
                     .text("atrous iter.")
                     .ui(ui);
@@ -180,6 +183,8 @@ impl RestirRenderer {
             item(DebugView::IndSpecRayLen);
             item(DebugView::DenoiserHistLen);
             item(DebugView::DenoiserVariance);
+            item(DebugView::DenoiserDiffFast);
+            item(DebugView::DenoiserSpecFast);
             item(DebugView::HashGridCell);
             item(DebugView::HashGridRadiance);
         });
@@ -699,9 +704,12 @@ impl RestirRenderer {
             denoiser_dbv = denoised.debug_views;
         } else {
             self.denoiser.reset();
+            let dummy = rg.register_texture(default_res.dummy_texture);
             denoiser_dbv = denoising::DebugViews {
                 history_len: rg.register_texture(default_res.dummy_uint_texture),
-                variance: rg.register_texture(default_res.dummy_texture),
+                variance: dummy,
+                spec_fast: dummy,
+                diff_fast: dummy,
             };
 
             denoised_indirect_diffuse = indirect_diffuse;
@@ -873,6 +881,8 @@ impl RestirRenderer {
                 DebugView::IndSpecRayLen => indirect_specular_ray_len,
                 DebugView::DenoiserHistLen => denoiser_dbv.history_len,
                 DebugView::DenoiserVariance => denoiser_dbv.variance,
+                DebugView::DenoiserDiffFast => denoiser_dbv.diff_fast,
+                DebugView::DenoiserSpecFast => denoiser_dbv.spec_fast,
                 DebugView::HashGridCell => hash_grid_vis,
                 DebugView::HashGridRadiance => hash_grid_vis,
                 _ => rg.register_texture(default_res.dummy_texture),

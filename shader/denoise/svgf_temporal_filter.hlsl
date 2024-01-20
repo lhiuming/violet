@@ -26,17 +26,24 @@ Texture2D<float3> spec_history_texture;
 Texture2D<float2> moments_history_texture;
 Texture2D<float> history_len_texture;
 
+Texture2D<float3> diff_fast_history_texture;
+Texture2D<float3> spec_fast_history_texture;
+
 // TODO pack diffuse and spec to a uint2 texture
 RWTexture2D<float3> rw_diff_texture; 
 RWTexture2D<float3> rw_spec_texture;
 RWTexture2D<float2> rw_moments_texture; // // 2nd moment of: x: diffuse, y: specular
 RWTexture2D<float> rw_history_len_texture;
 
+RWTexture2D<float3> rw_diff_fast_history_texture;
+RWTexture2D<float3> rw_spec_fast_history_texture;
+
 [[vk::push_constant]]
 struct PC 
 {
     float2 buffer_size;
     uint has_history;
+    uint fast_history;
 } pc;
 
 float2x2 bilinear_weights(float2 f)
@@ -78,6 +85,13 @@ struct GeometryTest
             && ( dot(n_diff, n_diff) < normal_tol_sq );
     }
 };
+
+// Dual-source reprojection weight
+float dsr_weight(float3 color, float3 mean, float3 deviation)
+{
+    float dist = luminance(abs(color - mean) / deviation);
+    return exp2(-10 * dist);
+}
 
 [numthreads(8, 8, 1)]
 void main(uint2 dispatch_id: SV_DispatchThreadID) 
@@ -123,6 +137,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     // TODO current virtual reprojection only work with planar surface; try taking curvature into account
 #if DUAL_SOURCE_REPROJECTION_FOR_SPEC 
     float3 virtual_spec_history;
+    float3 virtual_spec_fast_history;
     {
 	    float4 position_ws_h = mul(view_params().inv_view_proj, float4(screen_uv * 2.0f - 1.0f, depth, 1.0f));
         float3 position = position_ws_h.xyz / position_ws_h.w;
@@ -140,11 +155,13 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         if (valid)
         {
             virtual_spec_history = spec_history_texture.SampleLevel(sampler_linear_clamp, virtual_history_uv, 0);
+            virtual_spec_fast_history = spec_fast_history_texture.SampleLevel(sampler_linear_clamp, virtual_history_uv, 0);
         }
         else
         {
             // disocclusion
             virtual_spec_history = float3(0.0, 0.0, 0.0);
+            virtual_spec_fast_history = float3(0.0, 0.0, 0.0);
         }
     }
 #endif
@@ -176,6 +193,8 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     float3 spec_history;
     float2 sec_moments_history;
     float history_len;
+    float3 diff_fast_history;
+    float3 spec_fast_history;
     bool valid = all(history_uv == saturate(history_uv)) && bool(pc.has_history);
     if (valid)
     {
@@ -191,6 +210,8 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         float3 spec_sum = 0.0;
         float2 moments_sum = 0.0;
         float history_len_sum = 0.0;
+        float3 diff_fast_sum = 0.0;
+        float3 spec_fast_sum = 0.0;
         float weight_sum = 0.0;
         float2x2 weights = bilinear_weights(pix_coord_frac);
         for (int x = 0; x < 2; ++x)
@@ -212,6 +233,11 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
                     spec_sum += weight * spec_history_texture[pix_coord];
                     moments_sum += weight * moments_history_texture[pix_coord];
                     history_len_sum += weight * history_len_texture[pix_coord];
+                    if (bool(pc.fast_history))
+                    {
+                        diff_fast_sum += weight * diff_fast_history_texture[pix_coord];
+                        spec_fast_sum += weight * spec_fast_history_texture[pix_coord];
+                    }
                 }
             }
         }
@@ -220,10 +246,13 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         valid = weight_sum > 0.00390625; // (1/16)^2
         if (valid)
         {
-            diff_history = diff_sum / weight_sum;
-            spec_history = spec_sum / weight_sum;
-            sec_moments_history = moments_sum / weight_sum;
-            history_len = history_len_sum / weight_sum;
+            float w_sum_inv = rcp(weight_sum);
+            diff_history = diff_sum * w_sum_inv;
+            spec_history = spec_sum * w_sum_inv;
+            sec_moments_history = moments_sum * w_sum_inv;
+            history_len = history_len_sum * w_sum_inv;
+            diff_fast_history = diff_fast_sum * w_sum_inv;
+            spec_fast_history = spec_fast_sum * w_sum_inv;
         }
         else
         {
@@ -238,6 +267,8 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         spec_history = float3(0.0, 0.0, 0.0);
         sec_moments_history = float2(0.0, 0.0);
         history_len = 0.0f;
+        diff_fast_history = float3(0.0, 0.0, 0.0);
+        spec_fast_history = float3(0.0, 0.0, 0.0);
     }
     history_len += HISTORY_LEN_UNIT;
     
@@ -248,18 +279,25 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 
     // Blend ("Integrate")
     const float BLEND_FACTOR_DIFF = 1.0 / 20.0f;
+    const float BLEND_FACTOR_FAST = 1.0 / 3.0f;
 #if ADAPTIVE_BLEND_BY_ROUGHNESS
     // TODO very heuristic
     float blurness = sqrt(saturate(gbuffer.perceptual_roughness * 6.0));
     const float BLEND_FACTOR_SPEC = lerp(7.0/8.0, BLEND_FACTOR_DIFF, blurness);
+    const float BLEND_FACTOR_SPEC_FAST = lerp(1.0, BLEND_FACTOR_FAST, blurness);
 #else
     const float BLEND_FACTOR_SPEC = BLEND_FACTOR_DIFF;
+    const float BLEND_FACTOR_SPEC_FAST = BLEND_FACTOR_FAST;
 #endif
     // linearly blend before gathering a long history (1/BLEND_FACTOR)
     float2 alpha = max(float2(BLEND_FACTOR_DIFF, BLEND_FACTOR_SPEC), HISTORY_LEN_UNIT / history_len);
     float3 diff_filtered = lerp(diff_history, diff_source, alpha.x);
     float3 spec_filtered = lerp(spec_history, spec_source, alpha.y);
     float2 sec_moments_filtered = lerp(sec_moments_history, sec_moments_source, alpha.xy);
+
+    float2 alpha_fast = max(float2(BLEND_FACTOR_FAST, BLEND_FACTOR_SPEC_FAST), HISTORY_LEN_UNIT / (history_len));
+    float3 diff_filtered_fast = lerp(diff_fast_history, diff_source, alpha_fast.x);
+    float3 spec_filtered_fast = lerp(spec_fast_history, spec_source, alpha_fast.y);
 
 #if DUAL_SOURCE_REPROJECTION_FOR_SPEC
     // Weighted blend [Stachowiak 2018]
@@ -272,17 +310,24 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         // TODO Clamp with temporal variance ?
         #endif
 
-        float dist_virtual = luminance(abs(virtual_spec_history - spec_mean) / spec_dev);
-        float weight_virtual = exp2(-10 * dist_virtual);
-
-        float dist_history = luminance(abs(spec_history - spec_mean) / spec_dev);
-        float weight_history = exp2(-10 * dist_history);
-
+        float weight_virtual = dsr_weight(virtual_spec_history, spec_mean, spec_dev);
+        float weight_history = dsr_weight(spec_history, spec_mean, spec_dev);
         float3 spec_history_dual = 
             weight_virtual * virtual_spec_history + weight_history * spec_history;
         float w_sum = weight_virtual + weight_history;
         spec_history_dual /= max(w_sum, 1e-37);
         spec_filtered = lerp(spec_history_dual, spec_source, alpha.y);
+
+        if (bool(pc.fast_history))
+        {
+            float weight_virtual = dsr_weight(virtual_spec_fast_history, spec_mean, spec_dev);
+            float weight_history = dsr_weight(spec_fast_history, spec_mean, spec_dev);
+            float3 spec_fast_history_dual = 
+                weight_virtual * virtual_spec_fast_history + weight_history * spec_fast_history;
+            float w_sum = weight_virtual + weight_history;
+            spec_fast_history_dual /= max(w_sum, 1e-37);
+            spec_filtered_fast = lerp(spec_fast_history_dual, spec_source, alpha_fast.y);
+        }
     }
 #endif
 
@@ -291,10 +336,27 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     rw_spec_texture[dispatch_id] = spec_filtered;
     rw_moments_texture[dispatch_id] = sec_moments_filtered;
     rw_history_len_texture[dispatch_id] = history_len;
+    if (bool(pc.fast_history))
+    {
+        #if 1
+        rw_diff_fast_history_texture[dispatch_id] = diff_filtered_fast;
+        rw_spec_fast_history_texture[dispatch_id] = spec_filtered_fast;
+        #else
+        rw_diff_fast_history_texture[dispatch_id] = diff_source;
+        rw_spec_fast_history_texture[dispatch_id] = spec_source;
+        #endif
+    }
 #else
     rw_diff_texture[dispatch_id] = diff_source;
     rw_spec_texture[dispatch_id] = spec_source;
     rw_moments_texture[dispatch_id] = sec_moments_source;
     rw_history_len_texture[dispatch_id] = HISTORY_LEN_UNIT;
+    #if ALLOW_FAST_HISTORY
+    if (bool(pc.fast_history))
+    {
+        rw_diff_fast_history_texture[dispatch_id] = diff_source;
+        rw_spec_fast_history_texture[dispatch_id] = spec_source;
+    }
+    #endif
 #endif
 }
