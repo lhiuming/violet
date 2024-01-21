@@ -10,12 +10,23 @@
 
 #include "reservoir.hlsl"
 
+#define IND_DIFF_ENABLE_TEMPORAL_REUSE 1
+
 Texture2D<float> prev_gbuffer_depth;
 Texture2D<float> gbuffer_depth;
-StructuredBuffer<RestirSample> new_sample_buffer;
-StructuredBuffer<Reservoir> prev_reservoir_buffer;
-RWStructuredBuffer<Reservoir> rw_temporal_reservoir_buffer;
-RWTexture2D<float4> rw_debug_texture;
+// New samples
+Texture2D<uint2> new_hit_pos_normal_texture;
+Texture2D<float3> new_hit_radiance_texture;
+// Previous reservoir (with selected sample)
+Texture2D<uint> prev_reservoir_texture;
+Texture2D<uint2> prev_hit_pos_normal_texture;
+Texture2D<float3> prev_hit_radiance_texture;
+// Merged reservoir (with selected sample)
+RWTexture2D<uint> rw_reservoir_texture; // TODO try to use uint
+RWTexture2D<uint2> rw_hit_pos_normal_texture;
+RWTexture2D<float3> rw_hit_radiance_texture;
+
+//RWTexture2D<float4> rw_debug_texture;
 
 struct PushConstants
 {
@@ -33,10 +44,19 @@ float radiance_reduce(float3 radiance)
     //return max3(radiance);
 }
 
-[numthreads(8, 4, 1)]
+// Put reservior and sample together
+struct WorkingReservoir
+{
+    uint M;
+    float W;
+    float3 hit_radiance;
+    uint2 hit_pos_normal_encoded;
+};
+
+[numthreads(8, 8, 1)]
 void main(uint2 dispatch_id: SV_DispatchThreadID)
 {
-    float depth = gbuffer_depth[dispatch_id.xy];
+    const float depth = gbuffer_depth[dispatch_id.xy];
 
     uint2 buffer_size;
     gbuffer_depth.GetDimensions(buffer_size.x, buffer_size.y);
@@ -44,10 +64,8 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     // early out if no geometry
     if (has_no_geometry_via_depth(depth))
     {
-        // Set null reservoir to avoid stale sample during temporal accumulation
-        uint buffer_index = buffer_size.x * dispatch_id.y + dispatch_id.x;
-        rw_temporal_reservoir_buffer[buffer_index] = null_reservoir();
-        return;
+        // Set null reservoir to avoid stale/undefined sample get reused in spatial pass.
+        rw_reservoir_texture[dispatch_id] = 0;
     }
 
     //
@@ -76,7 +94,11 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         }
     }
 
-    Reservoir reservoir;
+    #if !IND_DIFF_ENABLE_TEMPORAL_REUSE
+    sample_prev_frame = false;
+    #endif
+
+    WorkingReservoir reservoir;
     if (sample_prev_frame)
     {
         // Read reservoir from prev frame
@@ -94,8 +116,22 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
             prev_pos = clamp(prev_pos, uint2(0, 0), buffer_size - uint2(1, 1));
         }
 
-        uint buffer_index = buffer_size.x * prev_pos.y + prev_pos.x;
-        reservoir = prev_reservoir_buffer[buffer_index];
+        uint prev_rsv_encoded = prev_reservoir_texture[prev_pos];
+        ReservoirSimple rsv_simple = ReservoirSimple::decode_32b(prev_rsv_encoded);
+        reservoir.M = rsv_simple.M;
+        reservoir.W = rsv_simple.W;
+        reservoir.hit_radiance = prev_hit_radiance_texture[prev_pos];
+        // TODO can read it later
+        reservoir.hit_pos_normal_encoded = prev_hit_pos_normal_texture[prev_pos];
+
+        // Discard invalid pixels (sky box, etc.)
+        // TODO use depth-compare result, with multi-tap depth test
+        if (reservoir.M == 0)
+        {
+            // guard against Inf and NaN
+            reservoir.hit_radiance = 0.0f;
+            reservoir.hit_pos_normal_encoded = 0;
+        }
 
         // Bound the temporal information to avoid stale sample
         if (1)
@@ -109,8 +145,11 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     }
     else
     {
-        // New reservoir
-        reservoir = null_reservoir();
+        // no reservoir
+        reservoir.M = 0;
+        reservoir.W = 0.0;
+        reservoir.hit_radiance = 0.0;
+        reservoir.hit_pos_normal_encoded = 0;
     }
 
     //
@@ -120,23 +159,22 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     // NOTE: not new sample in sample validation frame
     if (bool(pc.has_new_sample))
     {
-        // TODO maybe put into textures for faster read/write
-        RestirSample new_sample = new_sample_buffer[buffer_size.x * dispatch_id.y + dispatch_id.x];
+        float reservoir_target_pdf = radiance_reduce(reservoir.hit_radiance);
+        float prev_w = reservoir.W * reservoir_target_pdf * float(reservoir.M);
 
-        float reservoir_target_pdf = radiance_reduce(reservoir.z.hit_radiance);
-        float w_sum = reservoir.W * reservoir_target_pdf * float(reservoir.M);
-
-        float new_target_pdf = radiance_reduce(new_sample.hit_radiance);
+        float3 new_hit_radiance = new_hit_radiance_texture[dispatch_id.xy];
+        float new_target_pdf = radiance_reduce(new_hit_radiance);
         float new_w = new_target_pdf * TWO_PI; // source_pdf = 1 / TWO_PI;
 
         uint rng_state = lcg_init(dispatch_id.xy, buffer_size, pc.frame_index);
 
         // update reservoir with new sample
-        w_sum += new_w;
+        float w_sum = prev_w + new_w;
         float chance = new_w / w_sum;
         if (lcg_rand(rng_state) < chance)
         {
-            reservoir.z = new_sample;
+            reservoir.hit_pos_normal_encoded = new_hit_pos_normal_texture[dispatch_id.xy];
+            reservoir.hit_radiance = new_hit_radiance;
             reservoir_target_pdf = new_target_pdf;
         }
         reservoir.M += 1;
@@ -148,14 +186,15 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
         }
         else
         {
-            // if reservoir_target_pdf is 0, it may not come from new_target_pdf (chance will be 0 or NaN in that case), therefore previously target_pdf (and w_sum) must be 0. Then new_target_pdf must be 0 too (otherwise chance is 1). Yeah this is a bit tricky :)
+            // NOTE: if reservoir_target_pdf is 0, it may not come from new_target_pdf (chance will be 0 or NaN in that case), therefore previously target_pdf (and w_sum) must be 0. Then new_target_pdf must be 0 too (otherwise chance is 1).
             reservoir.W = 1.0f / float(reservoir.M);
         }
     }
 
-    // store updated reservoir
-    uint buffer_index = buffer_size.x * dispatch_id.y + dispatch_id.x;
-    rw_temporal_reservoir_buffer[buffer_index] = reservoir;
+    ReservoirSimple rsv_simple = { reservoir.M, reservoir.W };
+    rw_reservoir_texture[dispatch_id] = rsv_simple.encode_32b();
+    rw_hit_pos_normal_texture[dispatch_id] = reservoir.hit_pos_normal_encoded;
+    rw_hit_radiance_texture[dispatch_id] = reservoir.hit_radiance;
 
 #if 0
     GBuffer gbuffer = decode_gbuffer(gbuffer_color[dispatch_id.xy]);

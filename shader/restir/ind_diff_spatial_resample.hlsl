@@ -21,7 +21,7 @@
 #define ADAPTIVE_RADIUS 1
 
 // Using cosine-weighted PDF (instead of uniformly distrubuted) PDF reduce noise alot
-#define UNIFORM_PDF 0
+#define USE_COSINE_WEIGHTED_PDF 1
 
 // Use plane distance instead of depth in the geometrical test
 #define PLANE_DISTANCE_TEST 1
@@ -29,10 +29,18 @@
 GBUFFER_TEXTURE_TYPE gbuffer_color;
 Texture2D<float> gbuffer_depth;
 Texture2D<float> ao_texture;
-StructuredBuffer<Reservoir> temporal_reservoir_buffer;
-RWStructuredBuffer<Reservoir> rw_spatial_reservoir_buffer;
+// Temporal reservoir (with selected sample)
+Texture2D<uint> temp_reservoir_texture;
+Texture2D<uint2> temp_hit_pos_normal_texture;
+Texture2D<float3> temp_hit_radiance_texture;
+// Merged reservoir (with selected sample)
+RWTexture2D<uint> rw_reservoir_texture; // TODO try to use uint
+RWTexture2D<uint2> rw_hit_pos_normal_texture;
+RWTexture2D<float3> rw_hit_radiance_texture;
+// Lighting result
 RWTexture2D<float3> rw_lighting_texture;
-RWTexture2D<float4> rw_debug_texture;
+
+//RWTexture2D<float4> rw_debug_texture;
 
 [[vk::push_constant]]
 struct PushConstants
@@ -48,13 +56,50 @@ float radiance_reduce(float3 radiance)
     //return component_max(radiance);
 }
 
-#if UNIFORM_PDF
-#define TARGET_PDF_FOR_SAMPLE(z) radiance_reduce(z.hit_radiance)
-#else
-#define TARGET_PDF_FOR_SAMPLE(z) (saturate(dot(gbuffer.normal, normalize(z.hit_pos - position_ws))) * radiance_reduce(z.hit_radiance))
-#endif
+// Put reservior and sample together
+struct WorkingReservoir
+{
+    uint M;
+    float W;
+    float3 hit_radiance;
+    float3 hit_pos;
+    float3 hit_normal;
 
-[numthreads(8, 4, 1)]
+    float target_pdf;
+
+    static WorkingReservoir load(uint2 pix_coord, float3 pix_position_ws, float3 pix_normal)
+    {
+        WorkingReservoir reservoir;
+
+        // Read reservoir
+        uint rsv_simple_enc = temp_reservoir_texture[pix_coord];
+        ReservoirSimple rsv_simple = ReservoirSimple::decode_32b(rsv_simple_enc);
+        reservoir.M = rsv_simple.M;
+        reservoir.W = rsv_simple.W;
+
+        uint2 pos_normal_env = temp_hit_pos_normal_texture[pix_coord];
+        HitPosNormal hit = HitPosNormal::decode(pos_normal_env);
+        reservoir.hit_pos = hit.pos;
+        reservoir.hit_normal = hit.normal;
+
+        float3 hit_radiance = temp_hit_radiance_texture[pix_coord];
+        reservoir.hit_radiance = hit_radiance;
+
+        // Recover target_pdf
+#if USE_COSINE_WEIGHTED_PDF
+        float3 hit_offset = hit.pos - pix_position_ws;
+        float nol = saturate(dot(pix_normal, normalize(hit_offset)));
+        float target_pdf = nol * radiance_reduce(hit_radiance);
+#else
+        float target_pdf = radiance_reduce(hit_radiance);
+#endif
+        reservoir.target_pdf = target_pdf;
+
+        return reservoir;
+    }
+};
+
+[numthreads(8, 8, 1)]
 void main(uint2 dispatch_id: SV_DispatchThreadID)
 {
     float depth = gbuffer_depth[dispatch_id.xy];
@@ -62,6 +107,9 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     // early out if not geometry
     if (has_no_geometry_via_depth(depth))
     {
+        // reservoir is cleared in sky pixel
+        // NOTE: currently temporal pass (next frame) rely on this
+        rw_reservoir_texture[dispatch_id] = 0;
         rw_lighting_texture[dispatch_id] = 0.0;
         return;
     }
@@ -76,14 +124,9 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     GBufferNormal gbuffer = GBufferNormal::load(gbuffer_color, dispatch_id.xy);
     float ao = ao_texture[dispatch_id.xy];
 
-    Reservoir reservoir;
-    float w_sum;
-    {
-        uint index = dispatch_id.y * buffer_size.x + dispatch_id.x;
-        reservoir = temporal_reservoir_buffer[index];
-        float target_pdf = TARGET_PDF_FOR_SAMPLE(reservoir.z);
-        w_sum = reservoir.W * target_pdf * float(reservoir.M);
-    }
+    // Load current reservoir and hit sample
+    WorkingReservoir reservoir = WorkingReservoir::load(dispatch_id, position_ws, gbuffer.normal);
+    float w_sum = reservoir.W * reservoir.target_pdf * float(reservoir.M);
 
     float radius = min(buffer_size.x, buffer_size.y) * INIT_RADIUS_FACTOR;
 #if AO_GUIDED_RADIUS
@@ -175,8 +218,8 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
             continue;
         }
 
-        uint index_n = pixcood_n.x + pixcood_n.y * buffer_size.x;
-        Reservoir reservoir_n = temporal_reservoir_buffer[index_n];
+        // Load reservoir from neighborhood
+        WorkingReservoir neighbor = WorkingReservoir::load(pixcood_n, position_ws, gbuffer.normal);
 
         // Jacobian determinant for spatial reuse
         float reuse_jacobian = 1.0f;
@@ -192,20 +235,18 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
             #if !PLANE_DISTANCE_TEST
             float3 position_ws_n = cs_depth_to_position(pixcood_n, buffer_size, depth_n);
             #endif
-            float3 sample_hit_pos_ws = reservoir_n.z.hit_pos;
-            float3 sample_hit_normal_ws = reservoir_n.z.hit_normal;
 
             // [Ouyang 2021, eq 11]
             // x_1^q-x_2^q
-            float3 offset_qq = position_ws_n - sample_hit_pos_ws;
+            float3 offset_qq = position_ws_n - neighbor.hit_pos;
             // x_1^r-x_2^q
-            float3 offset_rq = position_ws - sample_hit_pos_ws;
+            float3 offset_rq = position_ws - neighbor.hit_pos;
             float L2_qq = dot(offset_qq, offset_qq);
             float L2_rq = dot(offset_rq, offset_rq);
             // cos(phi_2^r)
-            float cos_rq = dot(sample_hit_normal_ws, offset_rq * rsqrt(L2_rq));
+            float cos_rq = dot(neighbor.hit_normal, offset_rq * rsqrt(L2_rq));
             // cos(phi_2^q)
-            float cos_qq = dot(sample_hit_normal_ws, offset_qq * rsqrt(L2_qq));
+            float cos_qq = dot(neighbor.hit_normal, offset_qq * rsqrt(L2_qq));
             reuse_jacobian = (cos_rq / cos_qq) * (L2_qq / L2_rq);
 
             // Clamp to avoid fireflies.
@@ -225,7 +266,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 
         // NOTE: should be a typo in the ReSTIR GI paper [Ouyang 2021, algo 4]: It
         // should be `target_pdf * jacobian` instead of `target_pdf / jacobian`
-        float target_pdf_neighbor = TARGET_PDF_FOR_SAMPLE(reservoir_n.z) * reuse_jacobian;
+        float target_pdf_neighbor = neighbor.target_pdf * reuse_jacobian;
 
         // TODO visibility test, and continue
         // At least NoL test is cheap enough?
@@ -241,18 +282,21 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
                 // How can M ever exceed 500? (M is clamped to 30+1 in temporal, and up
                 // to 10 merged reservoir after spatial)
                 // uint M_MAX = 500; // [Ouyang 2021]
-                uint M_MAX = 256;
-                reservoir_n.M = min(reservoir_n.M, M_MAX);
+                uint M_MAX = 255;
+                neighbor.M = min(neighbor.M, M_MAX);
             }
 
-            float w_sum_neighbor = reservoir_n.W * target_pdf_neighbor * float(reservoir_n.M);
+            float w_sum_neighbor = neighbor.W * target_pdf_neighbor * float(neighbor.M);
             w_sum += w_sum_neighbor;
             float chance = w_sum_neighbor / w_sum;
             if (lcg_rand(rng_state) < chance)
             {
-                reservoir.z = reservoir_n.z;
+                reservoir.hit_normal = neighbor.hit_normal;
+                reservoir.hit_pos = neighbor.hit_pos;
+                reservoir.hit_radiance = neighbor.hit_radiance;
+                reservoir.target_pdf = neighbor.target_pdf; 
             }
-            reservoir.M += reservoir_n.M;
+            reservoir.M += neighbor.M;
         }
     }
 
@@ -261,7 +305,8 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 
     // update the W
     {
-        float target_pdf = TARGET_PDF_FOR_SAMPLE(reservoir.z);
+        // use target_pdf without jacobian, such that we can recover W in next frame
+        float target_pdf = reservoir.target_pdf; // TARGET_PDF_FOR_SAMPLE(reservoir.z);
         if (target_pdf > 0)
         {
             reservoir.W = w_sum / (target_pdf * float(reservoir.M));
@@ -274,17 +319,20 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 
     // Store for next frame temporal reuse
     {
-        uint index = dispatch_id.y * buffer_size.x + dispatch_id.x;
-        rw_spatial_reservoir_buffer[index] = reservoir;
+        ReservoirSimple rsv_simple = { reservoir.M, reservoir.W };
+        rw_reservoir_texture[dispatch_id] = rsv_simple.encode_32b();
+        HitPosNormal hit_pos_normal = { reservoir.hit_pos, reservoir.hit_normal };
+        rw_hit_pos_normal_texture[dispatch_id] = hit_pos_normal.encode();
+        rw_hit_radiance_texture[dispatch_id] = reservoir.hit_radiance;
     }
 
     // Evaluate the RIS esimator
     float3 lighting;
     {
-        float3 selected_dir = normalize(reservoir.z.hit_pos - position_ws);
+        float3 selected_dir = normalize(reservoir.hit_pos - position_ws);
         float NoL = saturate(dot(gbuffer.normal, selected_dir));
         float brdf = ONE_OVER_PI;
-        lighting = reservoir.z.hit_radiance * (brdf * NoL * reservoir.W);
+        lighting = reservoir.hit_radiance * (brdf * NoL * reservoir.W);
     }
 
     rw_lighting_texture[dispatch_id] = lighting;

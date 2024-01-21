@@ -10,12 +10,17 @@
 
 #define DO_VALIDATION 1
 
-RWStructuredBuffer<Reservoir> rw_prev_reservoir_buffer;
-// RWTexture2D<float4> rw_debug_texture;
+// Depth buffer matching with the reservoir
+Texture2D<float> depth_texture;
+// Reservoir (with selected sample) to be validated
+RWTexture2D<uint> rw_reservoir_texture;
+RWTexture2D<uint2> rw_hit_pos_normal_texture;
+RWTexture2D<float3> rw_hit_radiance_texture;
 
 struct PushConstants
 {
-    // uint frame_index;
+    // If validating reservoir from last frame
+    //uint prev_frame;
 };
 [[vk::push_constant]]
 PushConstants pc;
@@ -27,44 +32,49 @@ void main()
     return;
 #endif
 
-    uint2 dispatch_id = DispatchRaysIndex().xy;
+    const uint2 dispatch_id = DispatchRaysIndex().xy;
 
     uint2 buffer_size;
-    prev_depth_texture.GetDimensions(buffer_size.x, buffer_size.y);
-
-    // Read sample (from reservoir) to validate
-    // TODO samples can be shared among reservoirs; maybe use a separate buffer for samples, and validate it without duplication
-    Reservoir reservoir = rw_prev_reservoir_buffer[buffer_size.x * dispatch_id.y + dispatch_id.x];
-
-    // early out if no sample to validate reservoir (sky pixel, etc.)
-    if (reservoir.M == 0)
+    depth_texture.GetDimensions(buffer_size.x, buffer_size.y);
+    
+    const float depth = depth_texture[dispatch_id.xy];    
+    if (has_no_geometry_via_depth(depth))
     {
-        // uint buffer_index = buffer_size.x * dispatch_id.y + dispatch_id.x;
-        // rw_prev_reservoir_buffer[buffer_index] = null_reservoir();
         return;
     }
 
-    float3 sample_origin_ws = reservoir.z.pixel_pos;
-    float3 sample_dir_ws = normalize(reservoir.z.hit_pos - sample_origin_ws);
+    // Read sample to validate
+    uint2 hit_pos_normal_enc = rw_hit_pos_normal_texture[dispatch_id];
+    HitPosNormal hit = HitPosNormal::decode(hit_pos_normal_enc);
+    float3 hit_radiance = rw_hit_radiance_texture[dispatch_id];
+
+    float3 sample_origin_ws;
+    //if (bool(pc.prev_frame))
+    if (true)
+    {
+        sample_origin_ws = cs_prev_depth_to_position(dispatch_id, buffer_size, depth);
+    }
+    float3 sample_dir_ws = normalize(hit.pos - sample_origin_ws);
 
     // Trace for up-to-date radiance
-    RadianceTraceResult hit = trace_radiance(sample_origin_ws, sample_dir_ws, true);
+    RadianceTraceResult trace_result = trace_radiance(sample_origin_ws, sample_dir_ws, true);
 
     // Just replace the sample if too different
     // TODO should blend in natually
-    float3 prev_radiance = reservoir.z.hit_radiance;
-    float max_radiance = component_max(prev_radiance);
-    bool changed = any(abs(prev_radiance - hit.radiance) > max_radiance * 0.5f);
+    float3 prev_radiance = hit_radiance;
+    float max_radiance = component_max(hit_radiance);
+    bool changed = any(abs(prev_radiance - trace_result.radiance) > max_radiance * 0.5f);
     if (changed)
     {
-        reservoir.M = 1;
-        reservoir.W = 1.0 / TWO_PI;
+        ReservoirSimple reservior;
+        reservior.M = 1;
+        reservior.W = 1.0 / TWO_PI;
+        rw_reservoir_texture[dispatch_id] = reservior.encode_32b();
     }
 
-    // Update hit
-    reservoir.z.hit_pos = hit.position_ws;
-    reservoir.z.hit_normal = hit.normal_ws;
-    reservoir.z.hit_radiance = hit.radiance;
-
-    rw_prev_reservoir_buffer[buffer_size.x * dispatch_id.y + dispatch_id.x] = reservoir;
+    // Update hit sample
+    hit.pos = trace_result.position_ws;
+    hit.normal = trace_result.normal_ws;
+    rw_hit_pos_normal_texture[dispatch_id] = hit.encode();
+    rw_hit_radiance_texture[dispatch_id] = trace_result.radiance;
 }

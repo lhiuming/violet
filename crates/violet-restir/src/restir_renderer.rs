@@ -84,6 +84,12 @@ impl Default for RestirConfig {
     }
 }
 
+struct IndirectDiffuseTextures<TextureHandle> {
+    reservoir: TextureHandle,
+    hit_pos_normal: TextureHandle,
+    hit_radiance: TextureHandle,
+}
+
 struct IndirectSpecularTextures {
     reservoir: RGTemporal<Texture>,
     hit_pos: RGTemporal<Texture>,
@@ -103,7 +109,7 @@ pub struct RestirRenderer {
     taa: TAAPass,
     denoiser: Denoiser,
 
-    prev_diffuse_reservoir_buffer: Option<RGTemporal<Buffer>>,
+    prev_diffuse_reservoir_buffer: Option<IndirectDiffuseTextures<RGTemporal<Texture>>>,
     prev_indirect_diffuse_texture: Option<RGTemporal<Texture>>,
 
     prev_indirect_specular: Option<IndirectSpecularTextures>,
@@ -208,8 +214,6 @@ impl RestirRenderer {
         let skycube = input.sky_cube;
         let scene_tlas = input.scene_tlas;
 
-        let main_size_flat = main_size.x * main_size.y;
-
         // Create GBuffer
         let gbuffer = create_gbuffer_textures(rg, main_size);
 
@@ -277,18 +281,6 @@ impl RestirRenderer {
         let prev_indirect_diffuse_texture = match self.prev_indirect_diffuse_texture.take() {
             Some(tex) => rg.convert_to_transient(tex),
             None => rg.register_texture(default_res.dummy_texture),
-        };
-
-        // indirect diffuse reservior buffer from last frame
-        let has_prev_diffuse_reservoir = self.prev_diffuse_reservoir_buffer.is_some();
-        let prev_diffuse_reservoir_buffer = match self.prev_diffuse_reservoir_buffer {
-            Some(buffer) => rg.convert_to_transient(buffer),
-            None => rg.register_buffer(default_res.dummy_buffer),
-        };
-
-        let is_indirect_diffuse_validation_frame = {
-            let has_buffers = has_prev_depth && has_prev_diffuse_reservoir;
-            has_buffers && ((frame_index % 6) == 0) && self.config.ind_diff_validate
         };
 
         // HashGridCache Radiance Update Passes
@@ -376,13 +368,46 @@ impl RestirRenderer {
             hg_cache.query_counter = new_query_counter;
         }
 
+        // indirect diffuse reservior buffer from last frame
+        let has_prev_diffuse_reservoir = self.prev_diffuse_reservoir_buffer.is_some();
+        let ind_diff_prev = match self.prev_diffuse_reservoir_buffer.take() {
+            Some(temp) => IndirectDiffuseTextures {
+                reservoir: rg.convert_to_transient(temp.reservoir),
+                hit_pos_normal: rg.convert_to_transient(temp.hit_pos_normal),
+                hit_radiance: rg.convert_to_transient(temp.hit_radiance),
+            },
+            None => IndirectDiffuseTextures {
+                reservoir: rg.register_texture(default_res.dummy_uint_texture),
+                hit_pos_normal: rg.register_texture(default_res.dummy_uint_texture),
+                hit_radiance: rg.register_texture(default_res.dummy_texture),
+            },
+        };
+
+        let is_indirect_diffuse_validation_frame = {
+            let has_buffers = has_prev_depth && has_prev_diffuse_reservoir;
+            has_buffers && ((frame_index & 0x3) == 0) && self.config.ind_diff_validate
+        };
+
+        let ind_diff_has_new_sample = (!is_indirect_diffuse_validation_frame) as u32;
+
         // Pass: Indirect Diffuse ReSTIR Sample Generation
-        let indirect_diffuse_has_new_sample;
-        let indirect_diffuse_new_sample_buffer;
+        let ind_diff_new_hit_pos_normal;
+        let ind_diff_new_hit_radiance;
         if !is_indirect_diffuse_validation_frame {
-            indirect_diffuse_has_new_sample = 1u32;
-            indirect_diffuse_new_sample_buffer =
-                rg.create_buffer(BufferDesc::compute(main_size_flat as u64 * 5 * 4 * 4));
+            let hit_tex_desc = TextureDesc {
+                width: main_size.x,
+                height: main_size.y,
+                usage: TextureUsage::new().storage().sampled().into(),
+                ..Default::default()
+            };
+            ind_diff_new_hit_pos_normal = rg.create_texutre(TextureDesc {
+                format: vk::Format::R32G32_UINT,
+                ..hit_tex_desc
+            });
+            ind_diff_new_hit_radiance = rg.create_texutre(TextureDesc {
+                format: vk::Format::B10G11R11_UFLOAT_PACK32,
+                ..hit_tex_desc
+            });
 
             let has_prev_frame = (has_prev_depth && has_prev_indirect_diffuse) as u32;
 
@@ -397,21 +422,21 @@ impl RestirRenderer {
                     prev_indirect_diffuse_texture,
                 )
                 .texture("prev_depth_texture", prev_depth)
-                .texture("gbuffer_depth", gbuffer.depth)
-                .texture("gbuffer_color", gbuffer.color)
-                .buffer("rw_new_sample_buffer", indirect_diffuse_new_sample_buffer)
                 .buffer("hash_grid_storage_buffer", hg_cache.storage)
                 .rw_buffer("rw_hash_grid_query_buffer", hg_cache.query)
                 .rw_buffer("rw_hash_grid_query_counter_buffer", hg_cache.query_counter)
-                //.rw_texture("rw_debug_texture", debug_texture.1)
+                .texture("gbuffer_depth", gbuffer.depth)
+                .texture("gbuffer_color", gbuffer.color)
+                .rw_texture("rw_hit_pos_normal_texture", ind_diff_new_hit_pos_normal)
+                .rw_texture("rw_hit_radiance_texture", ind_diff_new_hit_radiance)
                 .push_constant(&input.frame_index)
                 .push_constant(&has_prev_frame)
                 .dimension(main_size.x, main_size.y, 1);
         }
         // Pass: Indirect Diffuse Sample Validation
         else {
-            indirect_diffuse_has_new_sample = 0u32;
-            indirect_diffuse_new_sample_buffer = rg.register_buffer(default_res.dummy_buffer);
+            ind_diff_new_hit_pos_normal = rg.register_texture(default_res.dummy_uint_texture);
+            ind_diff_new_hit_radiance = rg.register_texture(default_res.dummy_texture);
 
             rg.new_raytracing("Ind. Diff. Sample Validate")
                 .raygen_shader("restir/ind_diff_sample_validate.hlsl")
@@ -424,16 +449,16 @@ impl RestirRenderer {
                     prev_indirect_diffuse_texture,
                 )
                 .texture("prev_depth_texture", prev_depth)
-                .rw_buffer("rw_prev_reservoir_buffer", prev_diffuse_reservoir_buffer)
                 .buffer("hash_grid_storage_buffer", hg_cache.storage)
                 .rw_buffer("rw_hash_grid_query_buffer", hg_cache.query)
                 .rw_buffer("rw_hash_grid_query_counter_buffer", hg_cache.query_counter)
-                //.rw_texture("rw_debug_texture", debug_texture.1)
+                .texture("depth_texture", prev_depth)
+                .rw_texture("rw_reservoir_texture", ind_diff_prev.reservoir)
+                .rw_texture("rw_hit_pos_normal_texture", ind_diff_prev.hit_pos_normal)
+                .rw_texture("rw_hit_radiance_texture", ind_diff_prev.hit_radiance)
+                //.push_constant(&(true as u32))
                 .dimension(main_size.x, main_size.y, 1);
         }
-
-        let indirect_diffuse_temporal_reservoir_buffer =
-            rg.create_buffer(BufferDesc::compute(main_size_flat as u64 * 24 * 4));
 
         let has_prev_ao = self.ao_history.is_some() as u32;
         let prev_ao_texture = match self.ao_history.take() {
@@ -450,16 +475,16 @@ impl RestirRenderer {
         // Pass: AO Gen and Temporal Filtering
         rg.new_compute("RayTraced AO Gen.")
             .compute_shader("restir/raytraced_ao_gen.hlsl")
-            .buffer("new_sample_buffer", indirect_diffuse_new_sample_buffer)
+            .texture("hit_pos_normal_texture", ind_diff_new_hit_pos_normal)
             .texture("depth_buffer", gbuffer.depth)
             .texture("prev_ao_texture", prev_ao_texture)
             .rw_texture("rw_ao_texture", curr_ao_texture)
-            .push_constant::<u32>(&indirect_diffuse_has_new_sample)
+            .push_constant::<u32>(&ind_diff_has_new_sample)
             .push_constant::<u32>(&has_prev_ao)
             .push_constant::<f32>(&self.config.ao_radius)
             .group_count(
                 div_round_up(main_size.x, 8),
-                div_round_up(main_size.y, 4),
+                div_round_up(main_size.y, 8),
                 1,
             );
 
@@ -485,58 +510,101 @@ impl RestirRenderer {
         self.ao_history
             .replace(rg.convert_to_temporal(curr_ao_texture));
 
+        let ind_diff_tex_desc = TextureDesc {
+            width: main_size.x,
+            height: main_size.y,
+            usage: TextureUsage::new().storage().sampled().into(),
+            ..Default::default()
+        };
+
+        // Indirect Diffuse reservoir texture after temporal resampling
+        let ind_diff_temp = IndirectDiffuseTextures {
+            reservoir: rg.create_texutre(TextureDesc {
+                format: vk::Format::R32_UINT,
+                ..ind_diff_tex_desc
+            }),
+            hit_pos_normal: rg.create_texutre(TextureDesc {
+                format: vk::Format::R32G32_UINT,
+                ..ind_diff_tex_desc
+            }),
+            hit_radiance: rg.create_texutre(TextureDesc {
+                format: vk::Format::B10G11R11_UFLOAT_PACK32,
+                ..ind_diff_tex_desc
+            }),
+        };
+
         // Pass: Indirect Diffuse Temporal Resampling
         rg.new_compute("Ind. Diff. Temporal Resample")
             .compute_shader("restir/ind_diff_temporal_resample.hlsl")
             .texture("prev_gbuffer_depth", prev_depth)
             .texture("gbuffer_depth", gbuffer.depth)
-            .buffer("new_sample_buffer", indirect_diffuse_new_sample_buffer)
-            .buffer("prev_reservoir_buffer", prev_diffuse_reservoir_buffer)
-            .buffer(
-                "rw_temporal_reservoir_buffer",
-                indirect_diffuse_temporal_reservoir_buffer,
-            )
+            // new samples
+            .texture("new_hit_pos_normal_texture", ind_diff_new_hit_pos_normal)
+            .texture("new_hit_radiance_texture", ind_diff_new_hit_radiance)
+            // prev reservoir
+            .texture("prev_reservoir_texture", ind_diff_prev.reservoir)
+            .texture("prev_hit_pos_normal_texture", ind_diff_prev.hit_pos_normal)
+            .texture("prev_hit_radiance_texture", ind_diff_prev.hit_radiance)
+            // temporally resampled output
+            .rw_texture("rw_reservoir_texture", ind_diff_temp.reservoir)
+            .rw_texture("rw_hit_pos_normal_texture", ind_diff_temp.hit_pos_normal)
+            .rw_texture("rw_hit_radiance_texture", ind_diff_temp.hit_radiance)
             .push_constant(&input.frame_index)
             .push_constant(&(has_prev_diffuse_reservoir as u32))
-            .push_constant(&indirect_diffuse_has_new_sample)
-            .group_count_uvec2(main_size.div_round_up(UVec2::new(8, 4)));
+            .push_constant(&ind_diff_has_new_sample)
+            .group_count(main_size.x.div_round_up(8), main_size.y.div_round_up(8), 1);
 
-        let indirect_diffuse = rg.create_texutre(TextureDesc::new_2d(
-            main_size.x,
-            main_size.y,
-            vk::Format::B10G11R11_UFLOAT_PACK32,
-            vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
-        ));
+        // Raw indirect diffuse lighting buffer, written by spatial resampling pass
+        let indirect_diffuse = rg.create_texutre(TextureDesc {
+            format: vk::Format::B10G11R11_UFLOAT_PACK32,
+            ..ind_diff_tex_desc
+        });
+
+        // Indirect Diffuse reservoir textures after spatial resampling
+        let ind_diff_spatial = IndirectDiffuseTextures {
+            reservoir: rg.create_texutre(TextureDesc {
+                format: vk::Format::R32_UINT,
+                ..ind_diff_tex_desc
+            }),
+            hit_pos_normal: rg.create_texutre(TextureDesc {
+                format: vk::Format::R32G32_UINT,
+                ..ind_diff_tex_desc
+            }),
+            hit_radiance: rg.create_texutre(TextureDesc {
+                format: vk::Format::B10G11R11_UFLOAT_PACK32,
+                ..ind_diff_tex_desc
+            }),
+        };
 
         // Pass: Indirect Diffuse Spatial Resampling
-        {
-            let reservoir_buffer_desc =
-                rg.get_buffer_desc(indirect_diffuse_temporal_reservoir_buffer);
-            let spatial_reservoir_buffer = rg.create_buffer(*reservoir_buffer_desc);
+        rg.new_compute("Ind. Diff. Spatial Resample")
+            .compute_shader("restir/ind_diff_spatial_resample.hlsl")
+            .texture("gbuffer_depth", gbuffer.depth)
+            .texture("gbuffer_color", gbuffer.color)
+            .texture("ao_texture", filtered_ao_texture)
+            // temporally resampled reservoir
+            .texture("temp_reservoir_texture", ind_diff_temp.reservoir)
+            .texture("temp_hit_pos_normal_texture", ind_diff_temp.hit_pos_normal)
+            .texture("temp_hit_radiance_texture", ind_diff_temp.hit_radiance)
+            // spatially resampled output
+            .rw_texture("rw_reservoir_texture", ind_diff_spatial.reservoir)
+            .rw_texture("rw_hit_pos_normal_texture", ind_diff_spatial.hit_pos_normal)
+            .rw_texture("rw_hit_radiance_texture", ind_diff_spatial.hit_radiance)
+            .rw_texture("rw_lighting_texture", indirect_diffuse)
+            //.rw_texture("rw_debug_texture", debug_texture.1)
+            .push_constant(&frame_index)
+            .group_count(
+                div_round_up(main_size.x, 8),
+                div_round_up(main_size.y, 8),
+                1,
+            );
 
-            rg.new_compute("Ind. Diff. Spatial Resample")
-                .compute_shader("restir/ind_diff_spatial_resample.hlsl")
-                .texture("gbuffer_depth", gbuffer.depth)
-                .texture("gbuffer_color", gbuffer.color)
-                .texture("ao_texture", filtered_ao_texture)
-                .buffer(
-                    "temporal_reservoir_buffer",
-                    indirect_diffuse_temporal_reservoir_buffer,
-                )
-                .rw_buffer("rw_spatial_reservoir_buffer", spatial_reservoir_buffer)
-                .rw_texture("rw_lighting_texture", indirect_diffuse)
-                //.rw_texture("rw_debug_texture", debug_texture.1)
-                .push_constant(&frame_index)
-                .group_count(
-                    div_round_up(main_size.x, 8),
-                    div_round_up(main_size.y, 4),
-                    1,
-                );
-
-            // NOTE: spatial reservoir is feedback to temporal reservoir (next frame)
-            self.prev_diffuse_reservoir_buffer
-                .replace(rg.convert_to_temporal(spatial_reservoir_buffer));
-        }
+        // NOTE: spatial reservoir is feedback to temporal reservoir (next frame)
+        self.prev_diffuse_reservoir_buffer = Some(IndirectDiffuseTextures {
+            reservoir: rg.convert_to_temporal(ind_diff_spatial.reservoir),
+            hit_pos_normal: rg.convert_to_temporal(ind_diff_spatial.hit_pos_normal),
+            hit_radiance: rg.convert_to_temporal(ind_diff_spatial.hit_radiance),
+        });
 
         let ind_spec_tex_desc = TextureDesc {
             width: main_size.x,
@@ -553,7 +621,6 @@ impl RestirRenderer {
         };
 
         let ind_spec_hit_pos = ind_spec_new_tex(vk::Format::R32G32B32A32_SFLOAT);
-        let ind_spec_hit_normal = ind_spec_new_tex(vk::Format::R32_UINT);
         let ind_spec_hit_radiance = ind_spec_new_tex(vk::Format::B10G11R11_UFLOAT_PACK32);
 
         let ind_spec_temporal_reservoir = ind_spec_new_tex(vk::Format::R32G32_UINT);
@@ -577,8 +644,8 @@ impl RestirRenderer {
                 .texture("gbuffer_depth", gbuffer.depth)
                 .texture("gbuffer_color", gbuffer.color)
                 //.rw_texture("rw_origin_pos_texture", ind_spec_origin_pos)
+                //.rw_texture("rw_hit_normal_texture", ind_spec_hit_normal)
                 .rw_texture("rw_hit_pos_texture", ind_spec_hit_pos)
-                .rw_texture("rw_hit_normal_texture", ind_spec_hit_normal)
                 .rw_texture("rw_hit_radiance_texture", ind_spec_hit_radiance)
                 .buffer("hash_grid_storage_buffer", hg_cache.storage)
                 .rw_buffer("rw_hash_grid_query_buffer", hg_cache.query)
@@ -706,7 +773,7 @@ impl RestirRenderer {
             self.denoiser.reset();
             let dummy = rg.register_texture(default_res.dummy_texture);
             denoiser_dbv = denoising::DebugViews {
-                history_len: rg.register_texture(default_res.dummy_uint_texture),
+                history_len: dummy,
                 variance: dummy,
                 spec_fast: dummy,
                 diff_fast: dummy,

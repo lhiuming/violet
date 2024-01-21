@@ -52,6 +52,23 @@ struct ReservoirSimple
 {
     uint M;
     float W;
+
+    /// Encode W using 24bit unsigned float point, M as 8bit unsigned integer.
+    /// Should be useful for indirect diffuse.
+    uint encode_32b()
+    {
+        uint u = min(M, 0xFF);
+        u |= ((asuint(W) << 1) & 0xFFFFFF00);
+        return u;
+    }
+
+    static ReservoirSimple decode_32b(uint u)
+    {
+        ReservoirSimple r;
+        r.M = u & 0xFF;
+        r.W = asfloat((u >> 1) & 0x7FFFFFE0);
+        return r;
+    }
 };
 
 uint2 reservoir_encode_u32(ReservoirSimple r)
@@ -69,3 +86,31 @@ ReservoirSimple reservoir_decode_u32(uint2 u)
     r.W = asfloat(u.y);
     return r;
 }
+
+// Encode hit_pos (XYZ in fp16) and hit_normal (octahedral in 16bit) into a uint2
+struct HitPosNormal
+{
+    float3 pos;
+    float3 normal;
+
+    uint2 encode()
+    {
+        uint2 enc;
+        enc.x = f32tof16(pos.x) | (f32tof16(pos.y) << 16);
+        uint oct_u16 = normal_encode_oct_u16(normal);
+        enc.y = f32tof16(pos.z) | (oct_u16 << 16);
+        return enc;
+    }
+
+    static HitPosNormal decode(uint2 enc)
+    {
+        HitPosNormal ret;
+        ret.pos = float3(
+            f16tof32(enc.x & 0xFFFF),
+            f16tof32(enc.x >> 16),
+            f16tof32(enc.y & 0xFFFF));
+        uint oct_u16 = enc.y >> 16;
+        ret.normal = normal_decode_oct_u16(oct_u16);
+        return ret;
+    }
+};

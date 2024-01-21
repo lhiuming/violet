@@ -37,6 +37,8 @@ struct ViewParams {
 	float3 view_ray_top_left;
 	float3 view_ray_right_shift;
 	float3 view_ray_down_shift;
+
+    float4x4 prev_inv_view_proj;
 };
 
 ViewParams view_params() {
@@ -47,6 +49,7 @@ ViewParams view_params() {
     ret.view_ray_top_left = frame_params.view_ray_top_left.xyz;
     ret.view_ray_right_shift = frame_params.view_ray_right_shift.xyz;
     ret.view_ray_down_shift = frame_params.view_ray_down_shift.xyz;
+    ret.prev_inv_view_proj = frame_params.prev_inv_view_proj;
     return ret;
 }
 
@@ -54,6 +57,13 @@ ViewParams view_params() {
 float3 cs_depth_to_position(uint2 pix_coord, uint2 buffer_size, float depth_buffer_value) {
     float2 screen_uv = (float2(pix_coord) + 0.5f) / float2(buffer_size);
 	float4 position_ws_h = mul(view_params().inv_view_proj, float4(screen_uv * 2.0f - 1.0f, depth_buffer_value, 1.0f));
+	return position_ws_h.xyz / position_ws_h.w;
+}
+
+// world position reconstruction from depth buffer in last frame
+float3 cs_prev_depth_to_position(uint2 pix_coord, uint2 buffer_size, float depth_buffer_value) {
+    float2 screen_uv = (float2(pix_coord) + 0.5f) / float2(buffer_size);
+	float4 position_ws_h = mul(view_params().prev_inv_view_proj, float4(screen_uv * 2.0f - 1.0f, depth_buffer_value, 1.0f));
 	return position_ws_h.xyz / position_ws_h.w;
 }
 

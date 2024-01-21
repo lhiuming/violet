@@ -48,4 +48,18 @@ float3 normal_decode_oct_u32(uint enc)
     return normal_decode_oct(normal_enc);
 }
 
+uint normal_encode_oct_u16(float3 n)
+{
+    float2 normal_enc = normal_encode_oct(n);
+    uint2 normal_unorm = uint2(normal_enc * 255.0f);
+    return normal_unorm.x | normal_unorm.y << 8;
+}
+ 
+float3 normal_decode_oct_u16(uint enc)
+{
+    uint2 normal_unorm = uint2(enc & 0xFF, (enc >> 8) & 0xFF);
+    float2 normal_enc = normal_unorm / 255.0f;
+    return normal_decode_oct(normal_enc);
+}
+
 #endif

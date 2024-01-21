@@ -1,5 +1,4 @@
 #include "../brdf.hlsl"
-#include "../enc.inc.hlsl"
 #include "../frame_bindings.hlsl"
 #include "../gbuffer.hlsl"
 #include "../rand.hlsl"
@@ -14,9 +13,7 @@ GBUFFER_TEXTURE_TYPE gbuffer_color;
 Texture2D<float> gbuffer_depth;
 
 // New sample propertie textures
-//RWTexture2D<float3> rw_origin_pos_texture;
 RWTexture2D<float4> rw_hit_pos_texture;
-RWTexture2D<uint> rw_hit_normal_texture;
 RWTexture2D<float3> rw_hit_radiance_texture;
 
 RWTexture2D<float4> rw_debug_texture;
@@ -126,8 +123,6 @@ void main()
     // Raytrace
     RadianceTraceResult trace_result = trace_radiance(position_ws, sample_dir, pc.has_prev_frame);
 
-    //rw_origin_pos_texture[dispatch_id.xy] = position_ws;
     rw_hit_pos_texture[dispatch_id.xy] = float4(trace_result.position_ws, 1.0f);
-    rw_hit_normal_texture[dispatch_id.xy] = normal_encode_oct_u32(trace_result.normal_ws);
     rw_hit_radiance_texture[dispatch_id.xy] = trace_result.radiance;
 }

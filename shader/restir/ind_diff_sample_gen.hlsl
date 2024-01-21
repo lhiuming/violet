@@ -10,8 +10,9 @@
 
 GBUFFER_TEXTURE_TYPE gbuffer_color;
 Texture2D<float> gbuffer_depth;
-RWStructuredBuffer<RestirSample> rw_new_sample_buffer;
-RWTexture2D<float4> rw_debug_texture;
+
+RWTexture2D<uint2> rw_hit_pos_normal_texture;
+RWTexture2D<float3> rw_hit_radiance_texture;
 
 struct PushConstants
 {
@@ -33,8 +34,8 @@ void main()
     // early out if no geometry
     if (has_no_geometry_via_depth(depth))
     {
-        uint buffer_index = buffer_size.x * dispatch_id.y + dispatch_id.x;
-        rw_new_sample_buffer[buffer_index] = (RestirSample)0;
+        rw_hit_pos_normal_texture[dispatch_id.xy] = uint2(0, 0);
+        rw_hit_radiance_texture[dispatch_id.xy] = float3(0, 0, 0);
         return;
     }
 
@@ -60,12 +61,7 @@ void main()
     // Raytrace
     RadianceTraceResult trace_result = trace_radiance(position_ws, sample_dir, pc.has_prev_frame);
 
-    const RestirSample new_sample = make_restir_sample(
-        position_ws,
-        trace_result.position_ws,
-        trace_result.normal_ws,
-        trace_result.radiance);
-
-    uint buffer_index = buffer_size.x * dispatch_id.y + dispatch_id.x;
-    rw_new_sample_buffer[buffer_index] = new_sample;
+    HitPosNormal pos_normal = { trace_result.position_ws, trace_result.normal_ws };
+    rw_hit_pos_normal_texture[dispatch_id.xy] = pos_normal.encode();
+    rw_hit_radiance_texture[dispatch_id.xy] = trace_result.radiance;
 }

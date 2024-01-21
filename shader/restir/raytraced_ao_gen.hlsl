@@ -2,7 +2,7 @@
 #include "../util.hlsl"
 #include "reservoir.hlsl"
 
-StructuredBuffer<RestirSample> new_sample_buffer;
+Texture2D<uint2> hit_pos_normal_texture;
 Texture2D<float> depth_buffer;
 Texture2D<float4> prev_ao_texture;
 RWTexture2D<float4> rw_ao_texture;
@@ -15,7 +15,7 @@ struct PushConstants
     float radius_ws;
 } pc;
 
-[numthreads(8, 4, 1)]
+[numthreads(8, 8, 1)]
 void main(uint2 dispatch_id: SV_DispatchThreadID)
 {
     uint2 buffer_size;
@@ -58,13 +58,11 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     // Calculate AO
     if (bool(pc.has_new_sample))
     {
-        RestirSample z;
-        {
-            uint index = dispatch_id.x + dispatch_id.y * buffer_size.x;
-            z = new_sample_buffer[index];
-        }
+        uint2 hit_encoded = hit_pos_normal_texture[dispatch_id.xy];
+        HitPosNormal hit = HitPosNormal::decode(hit_encoded);
+
         float3 position_ws = cs_depth_to_position(dispatch_id, buffer_size, depth);
-        float3 sample_offset = z.hit_pos - position_ws;
+        float3 sample_offset = hit.pos - position_ws;
         float sample_distance = length(sample_offset);
         float ao = select(sample_distance < pc.radius_ws, 0.0, 1.0);
 
