@@ -2,7 +2,8 @@ use violet::{
     command_buffer::StencilOps,
     glam::UVec2,
     render_device::{
-        texture::TextureUsage, Buffer, BufferDesc, RenderDevice, Texture, TextureDesc,
+        texture::TextureUsage, AccelerationStructure, Buffer, BufferDesc, RenderDevice, Texture,
+        TextureDesc, TextureView,
     },
     render_graph::*,
     render_scene::RenderScene,
@@ -27,20 +28,6 @@ static HG_CACHE_MAX_NUM_QUERIES: u64 = 128 * 1024;
 static HG_CACHE_CELL_SIZE: u64 = 4 * 5;
 // HashGridQuery in shader
 static HG_CACHE_QUERY_SIZE: u64 = 4 * 6;
-
-struct TAAPass {
-    prev_color: Option<RGTemporal<Texture>>,
-    prev_depth: Option<RGTemporal<Texture>>,
-}
-
-impl TAAPass {
-    fn new() -> Self {
-        Self {
-            prev_color: None,
-            prev_depth: None,
-        }
-    }
-}
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 enum DebugView {
@@ -103,17 +90,54 @@ struct HashGridCacheResrouces<BufferHandle> {
     query_counter: BufferHandle,
 }
 
+/// Common resource for radiance tracing passes using the "raytrace.inc.hlsl".
+struct RestirRaytraceResources {
+    scene_tlas: RGHandle<AccelerationStructure>,
+    skycube: RGHandle<TextureView>,
+    prev_indirect_diffuse: RGHandle<Texture>,
+    prev_depth: RGHandle<Texture>,
+}
+
+trait RadianceTracePassBuilder<'a>
+where
+    Self: PassBuilderTrait<'a>,
+{
+    /// Use by general raytracing passes (tlas, last frame screen-space radiance)
+    fn restir_raytrace_resrouces(&mut self, res: &RestirRaytraceResources) -> &mut Self {
+        self //
+            .accel_struct("scene_tlas", res.scene_tlas)
+            .texture_view("skycube", res.skycube)
+            .texture("prev_indirect_diffuse_texture", res.prev_indirect_diffuse)
+            .texture("prev_depth_texture", res.prev_depth)
+    }
+
+    /// Use by general raytracing passes (last frame work-space radiance)
+    fn hg_cache_resources(
+        &mut self,
+        hg_cache: &HashGridCacheResrouces<RGHandle<Buffer>>,
+    ) -> &mut Self {
+        self //
+            .buffer("hash_grid_storage_buffer", hg_cache.storage)
+            .rw_buffer("rw_hash_grid_query_buffer", hg_cache.query)
+            .rw_buffer("rw_hash_grid_query_counter_buffer", hg_cache.query_counter)
+    }
+}
+
+impl<'a, 'render> RadianceTracePassBuilder<'render> for RaytracingPassBuilder<'a, 'render> {}
+
 // Render the scene using ReSTIR lighting
 pub struct RestirRenderer {
     config: RestirConfig,
-    taa: TAAPass,
     denoiser: Denoiser,
+
+    prev_depth: Option<RGTemporal<Texture>>,
+    prev_color: Option<RGTemporal<Texture>>,
+    prev_gbuffer: Option<RGTemporal<Texture>>,
 
     prev_diffuse_reservoir_buffer: Option<IndirectDiffuseTextures<RGTemporal<Texture>>>,
     prev_indirect_diffuse_texture: Option<RGTemporal<Texture>>,
 
     prev_indirect_specular: Option<IndirectSpecularTextures>,
-    prev_gbuffer_color: Option<RGTemporal<Texture>>,
 
     ao_history: Option<RGTemporal<Texture>>,
 
@@ -125,14 +149,16 @@ impl RestirRenderer {
     pub fn new() -> Self {
         Self {
             config: Default::default(),
-            taa: TAAPass::new(),
             denoiser: Denoiser::new(),
+
+            prev_depth: None,
+            prev_gbuffer: None,
+            prev_color: None,
 
             prev_diffuse_reservoir_buffer: None,
             prev_indirect_diffuse_texture: None,
 
             prev_indirect_specular: None,
-            prev_gbuffer_color: None,
 
             ao_history: None,
             hash_grid_cache_history: None,
@@ -270,17 +296,32 @@ impl RestirRenderer {
         }
 
         // depth buffer from last frame
-        let has_prev_depth = self.taa.prev_depth.is_some();
-        let prev_depth = match self.taa.prev_depth.take() {
+        let has_prev_depth = self.prev_depth.is_some();
+        let prev_depth = match self.prev_depth.take() {
             Some(tex) => rg.convert_to_transient(tex),
             None => rg.register_texture(default_res.dummy_texture),
         };
 
+        // gbuffer from last frame (for specular temporal resampling)
+        let has_prev_gbuffer = self.prev_gbuffer.is_some();
+        let prev_gbuffer = match self.prev_gbuffer.take() {
+            Some(tex) => rg.convert_to_transient(tex),
+            None => rg.register_texture(default_res.dummy_uint_texture_array),
+        };
+
         // indirect diffuse from last frame
         let has_prev_indirect_diffuse = self.prev_indirect_diffuse_texture.is_some();
-        let prev_indirect_diffuse_texture = match self.prev_indirect_diffuse_texture.take() {
+        let prev_indirect_diffuse = match self.prev_indirect_diffuse_texture.take() {
             Some(tex) => rg.convert_to_transient(tex),
             None => rg.register_texture(default_res.dummy_texture),
+        };
+
+        // Prepare common resources used by radiance tracing passes
+        let restir_raytrace_res = RestirRaytraceResources {
+            prev_depth,
+            scene_tlas,
+            skycube,
+            prev_indirect_diffuse,
         };
 
         // HashGridCache Radiance Update Passes
@@ -337,13 +378,7 @@ impl RestirRenderer {
                 .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
                 .closest_hit_shader("raytrace/geometry_ind.rchit.hlsl")
                 // raytrace.inc.hlsl
-                .accel_struct("scene_tlas", scene_tlas)
-                .texture_view("skycube", skycube)
-                .texture(
-                    "prev_indirect_diffuse_texture",
-                    prev_indirect_diffuse_texture,
-                )
-                .texture("prev_depth_texture", prev_depth)
+                .restir_raytrace_resrouces(&restir_raytrace_res)
                 .rw_buffer("rw_hash_grid_query_buffer", new_query)
                 .rw_buffer("rw_hash_grid_query_counter_buffer", new_query_counter)
                 // hash_grid_radiance_update.hlsl
@@ -415,16 +450,10 @@ impl RestirRenderer {
                 .raygen_shader("restir/ind_diff_sample_gen.hlsl")
                 .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
                 .closest_hit_shader("raytrace/geometry_ind.rchit.hlsl")
-                .accel_struct("scene_tlas", scene_tlas)
-                .texture_view("skycube", skycube)
-                .texture(
-                    "prev_indirect_diffuse_texture",
-                    prev_indirect_diffuse_texture,
-                )
-                .texture("prev_depth_texture", prev_depth)
-                .buffer("hash_grid_storage_buffer", hg_cache.storage)
-                .rw_buffer("rw_hash_grid_query_buffer", hg_cache.query)
-                .rw_buffer("rw_hash_grid_query_counter_buffer", hg_cache.query_counter)
+                // raytrace.inc.hlsl
+                .restir_raytrace_resrouces(&restir_raytrace_res)
+                .hg_cache_resources(&hg_cache)
+                // ind_diff_sample_gen.hlsl
                 .texture("gbuffer_depth", gbuffer.depth)
                 .texture("gbuffer_color", gbuffer.color)
                 .rw_texture("rw_hit_pos_normal_texture", ind_diff_new_hit_pos_normal)
@@ -442,16 +471,10 @@ impl RestirRenderer {
                 .raygen_shader("restir/ind_diff_sample_validate.hlsl")
                 .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
                 .closest_hit_shader("raytrace/geometry_ind.rchit.hlsl")
-                .accel_struct("scene_tlas", scene_tlas)
-                .texture_view("skycube", skycube)
-                .texture(
-                    "prev_indirect_diffuse_texture",
-                    prev_indirect_diffuse_texture,
-                )
-                .texture("prev_depth_texture", prev_depth)
-                .buffer("hash_grid_storage_buffer", hg_cache.storage)
-                .rw_buffer("rw_hash_grid_query_buffer", hg_cache.query)
-                .rw_buffer("rw_hash_grid_query_counter_buffer", hg_cache.query_counter)
+                // raytrace.inc.hlsl
+                .restir_raytrace_resrouces(&restir_raytrace_res)
+                .hg_cache_resources(&hg_cache)
+                // ind_diff_sample_validate.hlsl
                 .texture("depth_texture", prev_depth)
                 .rw_texture("rw_reservoir_texture", ind_diff_prev.reservoir)
                 .rw_texture("rw_hit_pos_normal_texture", ind_diff_prev.hit_pos_normal)
@@ -634,22 +657,16 @@ impl RestirRenderer {
                 .raygen_shader("restir/ind_spec_sample_gen.hlsl")
                 .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
                 .closest_hit_shader("raytrace/geometry_ind.rchit.hlsl")
-                .accel_struct("scene_tlas", scene_tlas)
-                .texture_view("skycube", skycube)
-                .texture(
-                    "prev_indirect_diffuse_texture",
-                    prev_indirect_diffuse_texture,
-                )
-                .texture("prev_depth_texture", prev_depth)
+                // raytrace.inc.hlsl
+                .restir_raytrace_resrouces(&restir_raytrace_res)
+                .hg_cache_resources(&hg_cache)
+                // ind_spec_sample_gen.hlsl
                 .texture("gbuffer_depth", gbuffer.depth)
                 .texture("gbuffer_color", gbuffer.color)
                 //.rw_texture("rw_origin_pos_texture", ind_spec_origin_pos)
                 //.rw_texture("rw_hit_normal_texture", ind_spec_hit_normal)
                 .rw_texture("rw_hit_pos_texture", ind_spec_hit_pos)
                 .rw_texture("rw_hit_radiance_texture", ind_spec_hit_radiance)
-                .buffer("hash_grid_storage_buffer", hg_cache.storage)
-                .rw_buffer("rw_hash_grid_query_buffer", hg_cache.query)
-                .rw_buffer("rw_hash_grid_query_counter_buffer", hg_cache.query_counter)
                 .push_constant::<u32>(&frame_index)
                 .push_constant::<u32>(&has_prev_frame)
                 .dimension(main_size.x, main_size.y, 1);
@@ -680,37 +697,24 @@ impl RestirRenderer {
                 .raygen_shader("restir/ind_spec_sample_validate.hlsl")
                 .miss_shaders(&["raytrace/geometry.rmiss.hlsl", "raytrace/shadow.rmiss.hlsl"])
                 .closest_hit_shader("raytrace/geometry_ind.rchit.hlsl")
-                .accel_struct("scene_tlas", scene_tlas)
-                .texture_view("skycube", skycube)
-                .texture(
-                    "prev_indirect_diffuse_texture",
-                    prev_indirect_diffuse_texture,
-                )
-                .texture("prev_depth_texture", prev_depth)
+                // raytrace.inc.hlsl
+                .restir_raytrace_resrouces(&restir_raytrace_res)
+                .hg_cache_resources(&hg_cache)
+                // ind_spec_sample_validate.hlsl
                 .rw_texture("rw_prev_reservoir_texture", prev_ind_spec_reservoir)
                 .rw_texture("rw_prev_hit_pos_texture", prev_ind_spec_hit_pos)
                 .rw_texture("rw_prev_hit_radiance_texture", prev_ind_spec_hit_radiance)
-                .buffer("hash_grid_storage_buffer", hg_cache.storage)
-                .rw_buffer("rw_hash_grid_query_buffer", hg_cache.query)
-                .rw_buffer("rw_hash_grid_query_counter_buffer", hg_cache.query_counter)
                 .dimension(main_size.x, main_size.y, 1);
         }
 
-        let has_prev_gbuffer_color = self.prev_gbuffer_color.is_some();
-        let prev_gbuffer_color = match self.prev_gbuffer_color.take() {
-            Some(tex) => rg.convert_to_transient(tex),
-            None => rg.register_texture(default_res.dummy_uint_texture_array),
-        };
-
         // Pass: Indirect Specular Temporal Resampling
         {
-            let has_prev_frame =
-                (has_prev_depth && has_prev_ind_spec && has_prev_gbuffer_color) as u32;
+            let has_prev_frame = (has_prev_depth && has_prev_ind_spec && has_prev_gbuffer) as u32;
 
             rg.new_compute("Ind. Spec. Temporal Resample")
                 .compute_shader("restir/ind_spec_temporal_resample.hlsl")
                 .texture("prev_gbuffer_depth", prev_depth)
-                .texture("prev_gbuffer_color", prev_gbuffer_color)
+                .texture("prev_gbuffer_color", prev_gbuffer)
                 .texture("gbuffer_depth", gbuffer.depth)
                 .texture("gbuffer_color", gbuffer.color)
                 .texture("prev_reservoir_texture", prev_ind_spec_reservoir)
@@ -754,12 +758,12 @@ impl RestirRenderer {
         let denoised_indirect_diffuse;
         let denoised_indirect_specular;
         let denoiser_dbv;
-        if self.config.denoise && (has_prev_depth && has_prev_gbuffer_color) {
+        if self.config.denoise && (has_prev_depth && has_prev_gbuffer) {
             let input = denoising::Input {
                 depth: gbuffer.depth,
                 gbuffer: gbuffer.color,
                 prev_depth: prev_depth,
-                prev_gbuffer: prev_gbuffer_color,
+                prev_gbuffer: prev_gbuffer,
                 diffuse: indirect_diffuse,
                 specular: indirect_specular,
                 specular_ray_len: indirect_specular_ray_len,
@@ -792,7 +796,7 @@ impl RestirRenderer {
                 hit_radiance: rg.convert_to_temporal(ind_spec_hit_radiance),
             });
 
-        self.prev_gbuffer_color
+        self.prev_gbuffer
             .replace(rg.convert_to_temporal(gbuffer.color));
 
         // Pass: Raytraced Shadow
@@ -878,8 +882,8 @@ impl RestirRenderer {
                 );
         }
 
-        let has_prev_color = self.taa.prev_color.is_some() as u32;
-        let prev_color = match self.taa.prev_color.take() {
+        let has_prev_color = self.prev_color.is_some() as u32;
+        let prev_color = match self.prev_color.take() {
             Some(tex) => rg.convert_to_transient(tex),
             None => rg.register_texture(default_res.dummy_texture),
         };
@@ -986,11 +990,9 @@ impl RestirRenderer {
             });
 
         // Cache scene buffer for next frame (TAA, temporal restir, etc.)
-        self.taa
-            .prev_color
+        self.prev_color
             .replace(rg.convert_to_temporal(post_taa_color));
-        self.taa
-            .prev_depth
+        self.prev_depth
             .replace(rg.convert_to_temporal(gbuffer.depth));
 
         post_taa_color

@@ -159,7 +159,10 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
 
                 // TODO compare in world space? Currently this cause a lot light leaking in micro geometry details (where typically AO should works on).
                 float DEPTH_TOLERANCE = 0.0001f; 
-                if (abs(reproj_depth - prev_depth_value) < DEPTH_TOLERANCE) {
+                bool geometry_test = (abs(reproj_depth - prev_depth_value) < DEPTH_TOLERANCE);
+
+                if (geometry_test)
+                {
                     radiance += diffuse_rho * prev_indirect_diffuse_texture[prev_pixcoord].rgb;
                     sample_world_radiance_cache = false;
                 }
