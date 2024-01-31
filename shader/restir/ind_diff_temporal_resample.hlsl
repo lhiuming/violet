@@ -139,6 +139,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
             // const uint M_MAX = 20; // [Benedikt 2020]
             // const uint M_MAX = 30; // [Ouyang 2021]
             // const uint M_MAX = 10; // [h3r2tic 2022]
+            // const uint M_MAX = 12; // [Bouma 2023]
             const uint M_MAX = 16;
             reservoir.M = min(reservoir.M, M_MAX);
         }

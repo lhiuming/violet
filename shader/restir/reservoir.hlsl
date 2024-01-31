@@ -54,7 +54,7 @@ struct ReservoirSimple
     float W;
 
     /// Encode W using 24bit unsigned float point, M as 8bit unsigned integer.
-    /// Should be useful for indirect diffuse.
+    /// Should be enough for indirect diffuse.
     uint encode_32b()
     {
         uint u = min(M, 0xFF);
