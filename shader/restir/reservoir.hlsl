@@ -1,5 +1,6 @@
 #pragma once
 #include "../enc.inc.hlsl"
+#include "../util.hlsl"
 
 struct RestirSample
 {
@@ -114,3 +115,10 @@ struct HitPosNormal
         return ret;
     }
 };
+
+float diffuse_radiance_reduce(float3 radiance)
+{
+    return luminance(radiance);
+    //return dot(radiance, 1.0.rrr);
+    //return component_max(radiance);
+}

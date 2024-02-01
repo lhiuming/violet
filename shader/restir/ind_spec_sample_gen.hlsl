@@ -21,7 +21,7 @@ RWTexture2D<float4> rw_debug_texture;
 [[vk::push_constant]]
 struct PushConstants
 {
-    uint frame_index;
+    uint frame_rand;
     uint has_prev_frame;
 } pc;
 
@@ -51,7 +51,7 @@ void main()
     float3 position_ws = position_ws_h.xyz / position_ws_h.w;
 
     // Specualr may need some better noise
-    uint rng_state = lcg_init(dispatch_id.xy, buffer_size, pc.frame_index);
+    uint rng_state = lcg_init_with_seed(dispatch_id.xy, pc.frame_rand);
 
     // Generate sample direction
     // TODO blue noise

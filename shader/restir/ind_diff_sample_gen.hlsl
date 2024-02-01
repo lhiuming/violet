@@ -16,7 +16,7 @@ RWTexture2D<float3> rw_hit_radiance_texture;
 
 struct PushConstants
 {
-    uint frame_index;
+    uint frame_rand;
     uint has_prev_frame;
 };
 [[vk::push_constant]]
@@ -48,7 +48,7 @@ void main()
     float4 position_ws_h = mul(view_params().inv_view_proj, float4(screen_pos * 2.0f - 1.0f, depth + depth_error, 1.0f));
     float3 position_ws = position_ws_h.xyz / position_ws_h.w;
 
-    uint rng_state = lcg_init(dispatch_id.xy, buffer_size, pc.frame_index);
+    uint rng_state = lcg_init_with_seed(dispatch_id.xy, pc.frame_rand);
 
     // Generate Sample Point with uniform hemisphere sampling
     // TODO blue noise

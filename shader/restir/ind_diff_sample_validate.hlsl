@@ -10,8 +10,8 @@
 
 #define DO_VALIDATION 1
 
-// Exagerate the radiance difference when scaling down prev M,  to increase responsiveness
-#define RADIANCE_DIFF_MULTIPLIER 4.0
+// Exagerate the radiance difference when scaling down prev M, to increase responsiveness
+#define RADIANCE_DIFF_MULTIPLIER 1.0
 
 // Depth buffer matching with the reservoir
 Texture2D<float> depth_texture;
@@ -19,14 +19,6 @@ Texture2D<float> depth_texture;
 RWTexture2D<uint> rw_reservoir_texture;
 RWTexture2D<uint2> rw_hit_pos_normal_texture;
 RWTexture2D<float3> rw_hit_radiance_texture;
-
-/*
-struct PushConstants
-{
-};
-[[vk::push_constant]]
-PushConstants pc;
-*/
 
 [shader("raygeneration")]
 void main()
@@ -66,15 +58,15 @@ void main()
     float lumi_diff = luminance(abs(radiance_diff));
     bool changed = lumi_diff > (lumi_prev / 256.0); // a 1/256 change is mearly noticable
     float prev_ray_len = length(hit.pos - sample_origin_ws);
-    bool pos_changed = component_max(abs(hit.pos - trace_result.position_ws)) > (prev_ray_len / 128.0);
-    //if (changed || pos_changed)
+    bool pos_changed = component_max(abs(hit.pos - trace_result.position_ws)) > max(prev_ray_len / 128.0, 0.01); // 1cm
+    // scale down previous M by relative radiance diff
+    float m_scale = saturate(1.0 - RADIANCE_DIFF_MULTIPLIER * lumi_diff / lumi_prev);
+    m_scale = select(pos_changed, 0.0f, m_scale);
+    if ( (lumi_prev > 0) && (m_scale <= (1.0 - 0.5/32.0f)) ) // lumi_prev > 0 -> m_scale is valid
     {
         // Update reservoir
         ReservoirSimple reservior = ReservoirSimple::decode_32b(rw_reservoir_texture[dispatch_id]);
-        // scale down previous M by relative radiance diff
-        float m_scale = saturate(1.0 - RADIANCE_DIFF_MULTIPLIER * lumi_diff / lumi_prev);
-        float M_f32 = select((lumi_prev > 0) && !pos_changed, reservior.M * m_scale , 0.0f);
-        reservior.M = uint(floor(M_f32));
+        reservior.M = uint(floor(reservior.M * m_scale));
         rw_reservoir_texture[dispatch_id] = reservior.encode_32b();
     }
 

@@ -52,7 +52,7 @@ void main() {
     uint2 buffer_size;
     rw_accumulated.GetDimensions(buffer_size.x, buffer_size.y);
 
-    uint rng_state = lcg_init(dispatch_id.xy, buffer_size, pc.frame_index);
+    uint rng_state = lcg_init_with_seed(dispatch_id.xy, jenkins_hash(pc.frame_index));
 
     // Primary ray direction
     float2 pix_coord = float2(dispatch_id) + 0.5f;
@@ -123,9 +123,9 @@ void main() {
 	    const float hit_metallic = hit.get_metallic();
 	    const float3 specular_color = get_specular_f0(hit_base_color, hit_metallic);
 	    const float3 diffuse_color = get_diffuse_rho(hit_base_color, hit_metallic);
+        const float hit_percept_roughness = hit.get_perceptual_roughness();
         #if SPECULAR_SUPRESSION
         // always keep the sharp reflection at first bounce
-        float hit_percept_roughness = hit.get_perceptual_roughness();
         float perceptual_roughness = select(bounce > 0, max(hit_percept_roughness, 0.045f), hit_percept_roughness);
         const float roughness = perceptual_roughness * perceptual_roughness;
         #else

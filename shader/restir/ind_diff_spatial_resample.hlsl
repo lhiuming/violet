@@ -45,16 +45,8 @@ RWTexture2D<float3> rw_lighting_texture;
 [[vk::push_constant]]
 struct PushConstants
 {
-    uint frame_index;
+    uint frame_rand;
 } pc;
-
-// TODO: using luminance() might cause bias toward green samples ...
-float radiance_reduce(float3 radiance)
-{
-    return luminance(radiance);
-    //return dot(radiance, 1.0.rrr);
-    //return component_max(radiance);
-}
 
 // Put reservior and sample together
 struct WorkingReservoir
@@ -89,9 +81,9 @@ struct WorkingReservoir
 #if USE_COSINE_WEIGHTED_PDF
         float3 hit_offset = hit.pos - pix_position_ws;
         float nol = saturate(dot(pix_normal, normalize(hit_offset)));
-        float target_pdf = nol * radiance_reduce(hit_radiance);
+        float target_pdf = nol * diffuse_radiance_reduce(hit_radiance);
 #else
-        float target_pdf = radiance_reduce(hit_radiance);
+        float target_pdf = diffuse_radiance_reduce(hit_radiance);
 #endif
         reservoir.target_pdf = target_pdf;
 
@@ -132,7 +124,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 #if AO_GUIDED_RADIUS
     radius = max(radius * pow(ao, AO_GUIDED_RADIUS_POW), MIN_RADIUS);
 #endif
-    uint rng_state = lcg_init(dispatch_id, buffer_size, pc.frame_index);
+    uint rng_state = lcg_init_with_seed(dispatch_id, pc.frame_rand);
     float rand_angle = lcg_rand(rng_state) * TWO_PI;
     //uint num_iteration = select(reservoir.M < 16, MAX_ITERATION, MIN_ITERATION);
     uint num_iteration = MAX_ITERATION;

@@ -72,14 +72,13 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
 
     GeometryRayPayload payload;
     TraceRay(scene_tlas,
-            RAY_FLAG_FORCE_OPAQUE // skip anyhit
-            ,
+            RAY_FLAG_FORCE_OPAQUE, // skip anyhit
             0xff, // uint InstanceInclusionMask,
             0, // uint RayContributionToHitGroupIndex,
             0, // uint MultiplierForGeometryContributionToHitGroupIndex,
             0, // uint MissShaderIndex,
-            ray, // RayDesc Ray,
-            payload // inout payload_t Payload
+            ray,
+            payload
         );
 
     // Compute Radiance for the sample point
@@ -88,7 +87,7 @@ RadianceTraceResult trace_radiance(float3 ray_origin, float3 ray_dir, uint has_p
     float3 position_ws = 0.0f;
     float3 normal_ws = 0.0f;
     if (payload.get_missed()) {
-        radiance = skycube.SampleLevel(sampler_linear_clamp, ray.Direction, 0.0f).rgb;
+        radiance = skycube.SampleLevel(sampler_linear_clamp, ray.Direction, 0).rgb;
         // Construct a hit point at skybox if miss
         position_ws = ray.Origin + ray.Direction * ray.TMax;
         normal_ws = -ray.Direction;

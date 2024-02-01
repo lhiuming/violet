@@ -31,7 +31,7 @@ RWTexture2D<float> rw_ray_len_texture;
 [[vk::push_constant]]
 struct PushConstants
 {
-    uint frame_index;
+    uint frame_rand;
 } pc;
 
 // simplified from:
@@ -211,7 +211,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
 
     // Search neighborhood
     float radius = min(buffer_size.x, buffer_size.y) * INIT_RADIUS_FACTOR;
-    uint rng_state = lcg_init(dispatch_id, buffer_size, pc.frame_index);
+    uint rng_state = lcg_init_with_seed(dispatch_id, pc.frame_rand);
     //float rand_angle = lcg_rand(rng_state) * TWO_PI;
     for (uint i = 0; i < num_iteration; i++)
     {

@@ -125,6 +125,21 @@ where
 
 impl<'a, 'render> RadianceTracePassBuilder<'render> for RaytracingPassBuilder<'a, 'render> {}
 
+struct FrameRand {
+    state: u32,
+}
+
+impl FrameRand {
+    fn new(init: u32) -> Self {
+        Self { state: init }
+    }
+
+    fn next(&mut self) -> u32 {
+        self.state = jenkins_hash(self.state);
+        self.state
+    }
+}
+
 // Render the scene using ReSTIR lighting
 pub struct RestirRenderer {
     config: RestirConfig,
@@ -240,6 +255,9 @@ impl RestirRenderer {
         let skycube = input.sky_cube;
         let scene_tlas = input.scene_tlas;
 
+        // Use different hash in each pass to avoid correlation
+        let mut frame_rand = FrameRand::new(frame_index);
+
         // Create GBuffer
         let gbuffer = create_gbuffer_textures(rg, main_size);
 
@@ -329,8 +347,6 @@ impl RestirRenderer {
             let query_selection = rg.create_buffer(BufferDesc::compute(HG_CACHE_NUM_CELLS * 4));
             clear_buffer(rd, rg, query_selection, "Clear Query Selection Buffer");
 
-            let frame_hash = jenkins_hash(input.frame_index.wrapping_mul(13));
-
             // Pass: HashGridCache Query Select
             rg.new_compute("HashGridCache Query Select")
                 .compute_shader("restir/hash_grid_query_select.hlsl")
@@ -338,7 +354,7 @@ impl RestirRenderer {
                 .buffer("hash_grid_query_counter_buffer", hg_cache.query_counter)
                 .rw_buffer("rw_hash_grid_storage_buffer", hg_cache.storage)
                 .rw_buffer("rw_hash_grid_query_selection_buffer", query_selection)
-                .push_constant(&frame_hash)
+                .push_constant(&frame_rand.next())
                 .group_count(div_round_up(HG_CACHE_MAX_NUM_QUERIES, 32) as u32, 1, 1);
 
             // TODO size should be min(HG_CACHE_NUM_CELLS, HG_CACHE_MAX_NUM_QUERIES)
@@ -370,8 +386,6 @@ impl RestirRenderer {
                 "Clear New HashGridCache Query Counter",
             );
 
-            let frame_hash = jenkins_hash(frame_hash.wrapping_mul(71));
-
             // Pass: HashGridCache Raygen
             rg.new_raytracing("HashGridCache Raygen")
                 .raygen_shader("restir/hash_grid_raygen.hlsl")
@@ -392,7 +406,7 @@ impl RestirRenderer {
                     hg_cache.decay,
                     hg_cache_decay_format,
                 )
-                .push_constant(&frame_hash)
+                .push_constant(&frame_rand.next())
                 // TODO indirect trace
                 .dimension(HG_CACHE_MAX_NUM_QUERIES as u32, 1, 1);
 
@@ -458,7 +472,7 @@ impl RestirRenderer {
                 .texture("gbuffer_color", gbuffer.color)
                 .rw_texture("rw_hit_pos_normal_texture", ind_diff_new_hit_pos_normal)
                 .rw_texture("rw_hit_radiance_texture", ind_diff_new_hit_radiance)
-                .push_constant(&input.frame_index)
+                .push_constant(&frame_rand.next())
                 .push_constant(&has_prev_frame)
                 .dimension(main_size.x, main_size.y, 1);
         }
@@ -572,7 +586,7 @@ impl RestirRenderer {
             .rw_texture("rw_reservoir_texture", ind_diff_temp.reservoir)
             .rw_texture("rw_hit_pos_normal_texture", ind_diff_temp.hit_pos_normal)
             .rw_texture("rw_hit_radiance_texture", ind_diff_temp.hit_radiance)
-            .push_constant(&input.frame_index)
+            .push_constant(&frame_rand.next())
             .push_constant(&(has_prev_diffuse_reservoir as u32))
             .push_constant(&ind_diff_has_new_sample)
             .group_count(main_size.x.div_round_up(8), main_size.y.div_round_up(8), 1);
@@ -615,7 +629,7 @@ impl RestirRenderer {
             .rw_texture("rw_hit_radiance_texture", ind_diff_spatial.hit_radiance)
             .rw_texture("rw_lighting_texture", indirect_diffuse)
             //.rw_texture("rw_debug_texture", debug_texture.1)
-            .push_constant(&frame_index)
+            .push_constant(&frame_rand.next())
             .group_count(
                 div_round_up(main_size.x, 8),
                 div_round_up(main_size.y, 8),
@@ -667,7 +681,7 @@ impl RestirRenderer {
                 //.rw_texture("rw_hit_normal_texture", ind_spec_hit_normal)
                 .rw_texture("rw_hit_pos_texture", ind_spec_hit_pos)
                 .rw_texture("rw_hit_radiance_texture", ind_spec_hit_radiance)
-                .push_constant::<u32>(&frame_index)
+                .push_constant::<u32>(&frame_rand.next())
                 .push_constant::<u32>(&has_prev_frame)
                 .dimension(main_size.x, main_size.y, 1);
         }
@@ -723,7 +737,7 @@ impl RestirRenderer {
                 .rw_texture("rw_reservoir_texture", ind_spec_temporal_reservoir)
                 .rw_texture("rw_hit_pos_texture", ind_spec_hit_pos)
                 .rw_texture("rw_hit_radiance_texture", ind_spec_hit_radiance)
-                .push_constant::<u32>(&frame_index)
+                .push_constant::<u32>(&frame_rand.next())
                 .push_constant::<u32>(&has_prev_frame)
                 .group_count(
                     div_round_up(main_size.x, 8),
@@ -747,7 +761,7 @@ impl RestirRenderer {
             .texture("hit_radiance_texture", ind_spec_hit_radiance)
             .rw_texture("rw_lighting_texture", indirect_specular)
             .rw_texture("rw_ray_len_texture", indirect_specular_ray_len)
-            .push_constant::<u32>(&frame_index)
+            .push_constant::<u32>(&frame_rand.next())
             .group_count(
                 div_round_up(main_size.x, 8),
                 div_round_up(main_size.y, 4),

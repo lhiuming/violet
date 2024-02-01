@@ -39,7 +39,7 @@ RWTexture2D<float3> rw_hit_radiance_texture;
 [[vk::push_constant]]
 struct PushConstants
 {
-    uint frame_index;
+    uint frame_rand;
     uint has_prev_frame;
 } pc;
 
@@ -312,7 +312,7 @@ void main(uint2 dispatch_id: SV_DispatchThreadID)
     }
     #endif
 
-    uint rng_state = lcg_init(dispatch_id.xy, buffer_size, pc.frame_index);
+    uint rng_state = lcg_init_with_seed(dispatch_id.xy, pc.frame_rand);
 
     // update reserviour with the new sample
     const float w_sum = prev_w + new_w;
