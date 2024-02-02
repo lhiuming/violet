@@ -50,6 +50,7 @@ enum DebugView {
 
 pub struct RestirConfig {
     taa: bool,
+    jitter_cycle: u32,
     denoise: bool,
     ao_radius: f32,
     ind_diff_validate: bool,
@@ -61,6 +62,7 @@ impl Default for RestirConfig {
     fn default() -> Self {
         Self {
             taa: true,
+            jitter_cycle: 8,
             denoise: true,
             ao_radius: 2.0,
             ind_diff_validate: true,
@@ -185,10 +187,23 @@ impl RestirRenderer {
         self.config.taa
     }
 
+    pub fn jitter_cycle(&self) -> u32 {
+        self.config.jitter_cycle
+    }
+
     pub fn ui(&mut self, ui: &mut Ui) {
         let config = &mut self.config;
         ui.heading("RESTIR RENDERER");
         ui.checkbox(&mut config.taa, "taa");
+        ui.indent(imgui::Id::new("taa_child"), |ui| {
+            ui.add_enabled_ui(config.taa, |ui| {
+                ui.add(
+                    imgui::Slider::new(&mut config.jitter_cycle, 8..=32)
+                        .step_by(4.0)
+                        .text("cycle"),
+                );
+            });
+        });
         ui.checkbox(&mut config.denoise, "denoise");
         ui.indent(imgui::Id::new("denoise_child"), |ui| {
             ui.add_enabled_ui(config.denoise, |ui| {

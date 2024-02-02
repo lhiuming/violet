@@ -301,7 +301,7 @@ impl RenderLoop for RestirRenderLoop {
         let sun_inten = Vec3::new(1.0, 1.0, 0.85) * 20.0;
         let jitter_info = if self.restir_renderer.taa() {
             Some(JitterInfo {
-                frame_index: self.frame_index,
+                offset_index: self.frame_index % self.restir_renderer.jitter_cycle(),
                 viewport_size: main_size,
             })
         } else {

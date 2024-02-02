@@ -53,7 +53,7 @@ pub struct ViewInfo {
 
 #[derive(Clone, Copy)]
 pub struct JitterInfo {
-    pub frame_index: u32,
+    pub offset_index: u32,
     pub viewport_size: UVec2,
 }
 
@@ -86,12 +86,11 @@ pub struct FrameParams {
 
 impl FrameParams {
     // 2D jitter in range of [-1.0, 1.0]
-    pub fn jitter(frame_index: u32) -> Vec2 {
-        let cycle = 8;
+    pub fn jitter(index: u32) -> Vec2 {
         // NOTE: +1 to ignore the (0.0, 0.0) jitter
-        let frame_index = frame_index % cycle + 1;
-        let x = 2.0 * halton(frame_index, 2) - 1.0;
-        let y = 2.0 * halton(frame_index, 3) - 1.0;
+        let index = index + 1;
+        let x = 2.0 * halton(index, 2) - 1.0;
+        let y = 2.0 * halton(index, 3) - 1.0;
         Vec2::new(x, y)
     }
 
@@ -100,7 +99,7 @@ impl FrameParams {
         let mut jitter_ndc = Vec2::ZERO;
         if let Some(jitter_info) = jitter_info {
             let raster_size = jitter_info.viewport_size.as_vec2();
-            jitter_ndc = Self::jitter(jitter_info.frame_index) / raster_size;
+            jitter_ndc = Self::jitter(jitter_info.offset_index) / raster_size;
             view_proj = Mat4::from_translation(jitter_ndc.extend(0.0)) * view_proj;
         }
         (view_proj, jitter_ndc)

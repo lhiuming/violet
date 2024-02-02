@@ -146,8 +146,8 @@ void main(uint2 dispatch_id : SV_DispatchThreadID) {
             // NOTE: Brian Karis used Blackman-Harris; Tomasz Stachowiak and Alex Tardif suggest Mitchell-Netravali.
             float3 neighbor = source_texture[pixcoord];
             float subsample_dist = length(subsample_offset);
-            //float subsample_weight = mitchell(subsample_dist);
-            float subsample_weight = blackman_harris(subsample_dist);
+            float subsample_weight = mitchell(subsample_dist); // looks sharper
+            //float subsample_weight = blackman_harris(subsample_dist);
 
             neighbor_accu += neighbor * subsample_weight;
             neighbor_weight_accu += subsample_weight;
@@ -235,7 +235,7 @@ void main(uint2 dispatch_id : SV_DispatchThreadID) {
     // Blending //
 
     // linear factors
-    const float BLEND_FACTOR = 1.0 / 8.0; // NOTE: jittering is taking 8 samples too
+    const float BLEND_FACTOR = 1.0 / 32.0;
     float src_weight = BLEND_FACTOR;
     float hist_weight = 1.0 - BLEND_FACTOR;
 
