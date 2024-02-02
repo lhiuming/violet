@@ -192,9 +192,9 @@ float3 ggx_brdf_integral_approx(float n_dot_v, float roughness, float3 specular_
     float c3 = c * c2;
 
     float k0 = dot(float2(1.0, a), mul(m0, float2(1.0, c)));
-    k0 /= max(1e-12, dot(float3(1.0, a, a3), mul(m1, float3(1.0, c, c3))));
+    k0 /= dot(float3(1.0, a, a3), mul(m1, float3(1.0, c, c3))); // positive
     float k1 = dot(float2(1.0, a), mul(m2, float2(1.0, c)));
-    k1 /= max(1e-12, dot(float3(1.0, a, a3), mul(m3, float3(1.0, c2, c3))));
+    k1 /= dot(float3(1.0, a, a3), mul(m3, float3(1.0, c2, c3))); // positive
 
     return k0 + k1 * specular_f0;
 }

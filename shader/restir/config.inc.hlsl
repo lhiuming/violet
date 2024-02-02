@@ -6,6 +6,7 @@
 
 #define DEMODULATE_INDIRECT_SPECULAR_FOR_DENOISER 1
 // NOTE: feels too high, but lower case banding on metal surface; use pre-integrated LUT instead
-#define DEMODULATE_INDIRECT_SPECULAR_RG_INTERGRAL_MIN 1e-2
+//#define DEMODULATE_INDIRECT_SPECULAR_RG_INTERGRAL_MIN 1e-2
+#define DEMODULATE_INDIRECT_SPECULAR_RG_INTERGRAL_MIN (1.0 / 65536.0)
 
 #endif
